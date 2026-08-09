@@ -32,13 +32,15 @@ pub fn build(b: *std.Build) void {
 	// Linking the client libraries into the binary, so it needs nothing installed
 	// to run. The system's own libraries stay dynamic - there is no static libc on
 	// macOS, and no reason to on glibc.
+	// pkg-config is what tells a static build what else to link, so it has to be
+	// installed for -Dstatic; PKG_CONFIG_PATH is how a keg-only brew library is
+	// found.
 	const static = b.option(bool, "static", "link the client libraries into the binary") orelse false;
-	const openssl = b.option([]const u8, "openssl", "prefix of the OpenSSL installation");
 	// The MariaDB connector speaks to MySQL as well, and its licence allows a
 	// non-GPL program to link it - Oracle's own client library does not.
 	const mariadb = b.option([]const u8, "mariadb", "prefix of the mariadb-connector-c installation");
 
-	const linking = Linking{ .static = static, .openssl = openssl };
+	const linking = Linking{ .static = static };
 
 	// The bindings are shared with the WASM build, so they are their own module
 	// rather than a relative import reaching outside the root.
@@ -72,6 +74,9 @@ pub fn build(b: *std.Build) void {
 	linkPostgres(b, module, target, libpq, linking);
 	linkMysql(b, module, target, mariadb, linking);
 	linkKeychain(module, target);
+	if (static) {
+		linkClientLibraries(b, module);
+	}
 
 	const exe = b.addExecutable(.{ .name = "krtek", .root_module = module });
 	b.installArtifact(exe);
@@ -97,6 +102,9 @@ pub fn build(b: *std.Build) void {
 	linkPostgres(b, test_module, target, libpq, linking);
 	linkMysql(b, test_module, target, mariadb, linking);
 	linkKeychain(test_module, target);
+	if (static) {
+		linkClientLibraries(b, test_module);
+	}
 	const tests = b.addTest(.{ .root_module = test_module });
 
 	// A scratch program that talks to a real PostgreSQL, for development.
@@ -149,43 +157,107 @@ fn linkPostgres(b: *std.Build, module: *std.Build.Module, target: std.Build.Reso
 		module.linkSystemLibrary("pq", .{});
 		return;
 	}
-	// A static libpq is split into three archives and wants a fourth for OAuth,
-	// then the things it talks to: TLS, Kerberos, LDAP, HTTP, zlib. All of those
-	// except OpenSSL are part of the system on both platforms.
-	// `libpq.a` is only half of it: the rest of PostgreSQL's own code is in
-	// `libpgcommon_shlib.a` and `libpgport_shlib.a` - the plain `libpgcommon.a`
-	// looks like it would do and does not, because it is built differently from
-	// the libpq that references it - and the OAuth flow is in `libpq-oauth.a`.
-	for ([_][]const u8{ "pq", "pq-oauth", "pgcommon_shlib", "pgport_shlib" }) |name| {
-		module.linkSystemLibrary(name, .{ .preferred_link_mode = .static, .weak = true });
-	}
-	linkOpenSsl(b, module, options.openssl, target);
-	const system = if (target.result.os.tag == .macos)
-		&[_][]const u8{ "gssapi_krb5", "curl", "ldap", "z", "m" }
-	else
-		&[_][]const u8{ "gssapi_krb5", "ldap", "lber", "z", "m" };
-	for (system) |name| {
-		module.linkSystemLibrary(name, .{ .weak = true });
-	}
+	// A static build links both client libraries together, in one place; see
+	// `linkClientLibraries`.
 }
 
 const Linking = struct {
 	static: bool,
-	openssl: ?[]const u8,
 };
 
-/// OpenSSL is the one dependency neither platform has where the linker looks, so
-/// its prefix is asked for: `-Dopenssl=$(brew --prefix openssl@3)` on a Mac,
-/// nothing needed on a distribution that puts it in /usr/lib.
-fn linkOpenSsl(b: *std.Build, module: *std.Build.Module, prefix: ?[]const u8, target: std.Build.ResolvedTarget) void {
-	const root: ?[]const u8 = prefix orelse
-		if (target.result.os.tag == .macos) "/opt/homebrew/opt/openssl@3" else null;
-	if (root) |where| {
-		module.addLibraryPath(.{ .cwd_relative = b.pathJoin(&.{ where, "lib" }) });
+/// Link what `pkg-config --static` says the client libraries need, preferring an
+/// archive for each and falling back to the shared one where there is none -
+/// which is what leaves libc, Kerberos, LDAP and the like dynamic.
+///
+/// Both libraries are asked for in one call so that pkg-config merges the two
+/// lists: they share zlib and OpenSSL, and asking separately puts zlib in the
+/// binary twice, which dyld refuses to load.
+///
+/// pkg-config is run here rather than handed to `linkSystemLibrary`'s own
+/// `use_pkg_config`, because that reads only the shared link line and so misses
+/// everything a static libpq needs.
+fn linkClientLibraries(b: *std.Build, module: *std.Build.Module) void {
+	var code: u8 = 0;
+	const out = b.runAllowFail(
+		&.{ "pkg-config", "--static", "--libs", "libpq", "libmariadb" },
+		&code,
+		.ignore,
+	) catch {
+		std.debug.panic(
+			"-Dstatic needs pkg-config with libpq.pc and libmariadb.pc; " ++
+				"on a Mac set PKG_CONFIG_PATH to the keg-only prefixes",
+			.{},
+		);
+	};
+
+	// The search paths first, so an archive can be looked for in them below.
+	var paths: std.ArrayList([]const u8) = .empty;
+	var scan = std.mem.tokenizeAny(u8, out, " \r\n\t");
+	while (scan.next()) |flag| {
+		if (std.mem.startsWith(u8, flag, "-L")) {
+			paths.append(b.allocator, flag[2..]) catch @panic("out of memory");
+			module.addLibraryPath(.{ .cwd_relative = flag[2..] });
+		}
 	}
-	for ([_][]const u8{ "ssl", "crypto" }) |name| {
-		module.linkSystemLibrary(name, .{ .preferred_link_mode = .static });
+
+	// Each library once. The two lists overlap - both want zlib and OpenSSL - and
+	// one of them names zlib as `-l/…/libz.tbd` while the other says `-lz`, which
+	// linked twice is a binary dyld refuses to start.
+	var seen: std.StringHashMap(void) = .init(b.allocator);
+	var flags = std.mem.tokenizeAny(u8, out, " \r\n\t");
+	while (flags.next()) |flag| {
+		if (std.mem.eql(u8, flag, "-framework")) {
+			if (flags.next()) |framework| {
+				module.linkFramework(framework, .{});
+			}
+			continue;
+		}
+		if (!std.mem.startsWith(u8, flag, "-l")) {
+			continue;
+		}
+		const entry = flag[2..];
+		// A real archive given by path goes in as it is.
+		if (std.mem.endsWith(u8, entry, ".a")) {
+			module.addObjectFile(.{ .cwd_relative = entry });
+			continue;
+		}
+		const library = shlibVariant(b, paths.items, libraryName(entry));
+		if (seen.fetchPut(library, {}) catch @panic("out of memory")) |_| {
+			continue;
+		}
+		module.linkSystemLibrary(library, .{ .preferred_link_mode = .static });
 	}
+}
+
+/// `z` out of `z`, and out of `/…/usr/lib/libz.tbd` - which is how the macOS SDK
+/// is named in a .pc file.
+fn libraryName(entry: []const u8) []const u8 {
+	var name = entry;
+	if (std.mem.lastIndexOfScalar(u8, name, '/')) |slash| {
+		name = name[slash + 1 ..];
+	}
+	if (std.mem.startsWith(u8, name, "lib")) {
+		name = name["lib".len..];
+	}
+	if (std.mem.lastIndexOfScalar(u8, name, '.')) |dot| {
+		name = name[0..dot];
+	}
+	return name;
+}
+
+/// PostgreSQL builds its internal archives twice, and only the `_shlib` ones
+/// match the libpq that references them - brew's `libpq.pc` names the other pair,
+/// which links and then leaves `pg_encoding_to_char` undefined. So where a
+/// `lib<name>_shlib.a` exists, that is the one meant.
+fn shlibVariant(b: *std.Build, paths: []const []const u8, library: []const u8) []const u8 {
+	const wanted = b.fmt("{s}_shlib", .{library});
+	for (paths) |where| {
+		const candidate = b.pathJoin(&.{ where, b.fmt("lib{s}.a", .{wanted}) });
+		if (std.Io.Dir.cwd().access(b.graph.io, candidate, .{})) |_| {
+			return wanted;
+		} else |_| {}
+	}
+	return library;
 }
 
 /// The keychain lives in Security.framework, which only macOS has.
@@ -206,13 +278,8 @@ fn linkMysql(b: *std.Build, module: *std.Build.Module, target: std.Build.Resolve
 			module.addIncludePath(.{ .cwd_relative = candidate });
 		}
 	}
-	module.linkSystemLibrary("mariadb", .{
-		.preferred_link_mode = if (options.static) .static else .dynamic,
-	});
-	if (options.static) {
-		// The connector wants TLS and zlib; libpq brought the same OpenSSL along.
-		linkOpenSsl(b, module, options.openssl, target);
-		module.linkSystemLibrary("z", .{ .weak = true });
+	if (!options.static) {
+		module.linkSystemLibrary("mariadb", .{});
 	}
 }
 

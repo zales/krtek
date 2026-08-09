@@ -41,11 +41,12 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libpq-dev libmariadb-dev libssl-dev
+          sudo apt-get install -y pkg-config libpq-dev libmariadb-dev libssl-dev \
+            libkrb5-dev libldap2-dev zlib1g-dev
 
       - name: client libraries (macos)
         if: runner.os == 'macOS'
-        run: brew install libpq mariadb-connector-c openssl@3
+        run: brew install pkgconf libpq mariadb-connector-c openssl@3
 
       - name: the SQLite amalgamation
         run: ./fetch-sqlite.sh
@@ -53,9 +54,12 @@ jobs:
       # Static: the client libraries go into the binary, so what is downloaded
       # needs nothing installed to run.
       - name: build
+        env:
+          # The keg-only libraries keep their .pc files to themselves.
+          PKG_CONFIG_PATH: /opt/homebrew/opt/libpq/lib/pkgconfig:/opt/homebrew/opt/mariadb-connector-c/lib/pkgconfig:/usr/local/opt/libpq/lib/pkgconfig:/usr/local/opt/mariadb-connector-c/lib/pkgconfig
         run: |
           zig build -Doptimize=ReleaseFast -Dstatic \
-            ${{ runner.os == 'macOS' && '-Dlibpq=$(brew --prefix libpq) -Dmariadb=$(brew --prefix mariadb-connector-c) -Dopenssl=$(brew --prefix openssl@3)' || '' }}
+            ${{ runner.os == 'macOS' && '-Dlibpq=$(brew --prefix libpq) -Dmariadb=$(brew --prefix mariadb-connector-c)' || '' }}
 
       - name: nothing but the system is linked
         run: |
