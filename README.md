@@ -1,5 +1,7 @@
 # krtek
 
+[![build](https://github.com/zales/krtek/actions/workflows/ci.yml/badge.svg)](https://github.com/zales/krtek/actions/workflows/ci.yml)
+
 A database manager for the terminal, written in Zig, with the feature set of
 [Adminer](https://www.adminer.org) mapped onto what a text screen can do.
 **SQLite, PostgreSQL, MySQL/MariaDB and Redis**, behind one interface.
@@ -12,6 +14,12 @@ Written for the terminals people actually use: under the kitty keyboard protocol
 modifier, so what a key produced is read from the text the terminal reports, not
 from the key code - otherwise every capital letter and every shifted symbol
 arrives wrong.
+
+A [release](https://github.com/zales/krtek/releases/latest) has a binary for
+macOS and Linux, on both architectures. It links the PostgreSQL and MySQL client
+libraries, so those have to be around - `brew install libpq
+mariadb-connector-c`, or `apt install libpq5 libmariadb3`. SQLite is compiled in
+and Redis needs nothing.
 
 ```sh
 zig build -Doptimize=ReleaseSafe

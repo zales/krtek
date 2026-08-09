@@ -19,8 +19,10 @@ const usage =
 	\\
 	\\With no argument it opens the list of saved connections.
 	\\A SQLite file is opened in place and edits go straight to it.
-	\\For PostgreSQL the password comes from the URL, PGPASSWORD or ~/.pgpass -
-	\\it is never written down. Press ? inside the app for the key map.
+	\\A password is asked for when the server wants one, and kept only where the
+	\\connection says: nowhere, the config file, or the macOS keychain. An engine's
+	\\own store - PGPASSWORD, ~/.pgpass, ~/.my.cnf - works as it always did.
+	\\Press ? inside the app for the key map.
 	\\
 ;
 
