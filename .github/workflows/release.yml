@@ -42,7 +42,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y pkg-config libpq-dev libmariadb-dev libssl-dev \
-            libkrb5-dev libldap2-dev zlib1g-dev
+            libkrb5-dev libldap2-dev zlib1g-dev libcurl4-openssl-dev
 
       - name: client libraries (macos)
         if: runner.os == 'macOS'

@@ -225,7 +225,22 @@ fn linkClientLibraries(b: *std.Build, module: *std.Build.Module) void {
 		if (seen.fetchPut(library, {}) catch @panic("out of memory")) |_| {
 			continue;
 		}
-		module.linkSystemLibrary(library, .{ .preferred_link_mode = .static });
+		// PostgreSQL's internal archives are separate where they are separate:
+		// brew ships them beside libpq, Debian builds them into it and its .pc
+		// file mentions them anyway. Asking for one that is not there is a build
+		// error, so it is only asked for when it is on disk.
+		if (internalToPostgres(library)) {
+			if (archive(b, paths.items, library) == null) {
+				continue;
+			}
+			module.linkSystemLibrary(library, .{ .preferred_link_mode = .static });
+			continue;
+		}
+		module.linkSystemLibrary(library, .{
+			// An archive if there is one - that is the point - and the system's
+			// shared library otherwise.
+			.preferred_link_mode = if (archive(b, paths.items, library) != null) .static else .dynamic,
+		});
 	}
 }
 
@@ -251,13 +266,29 @@ fn libraryName(entry: []const u8) []const u8 {
 /// `lib<name>_shlib.a` exists, that is the one meant.
 fn shlibVariant(b: *std.Build, paths: []const []const u8, library: []const u8) []const u8 {
 	const wanted = b.fmt("{s}_shlib", .{library});
+	return if (archive(b, paths, wanted) != null) wanted else library;
+}
+
+/// Where `lib<name>.a` is, among the paths pkg-config gave, or null.
+fn archive(b: *std.Build, paths: []const []const u8, library: []const u8) ?[]const u8 {
 	for (paths) |where| {
-		const candidate = b.pathJoin(&.{ where, b.fmt("lib{s}.a", .{wanted}) });
+		const candidate = b.pathJoin(&.{ where, b.fmt("lib{s}.a", .{library}) });
 		if (std.Io.Dir.cwd().access(b.graph.io, candidate, .{})) |_| {
-			return wanted;
+			return candidate;
 		} else |_| {}
 	}
-	return library;
+	return null;
+}
+
+/// Is this one of PostgreSQL's own pieces, which may or may not be a separate
+/// archive on a given system?
+fn internalToPostgres(library: []const u8) bool {
+	for ([_][]const u8{ "pgcommon", "pgport", "pgcommon_shlib", "pgport_shlib", "pq-oauth" }) |name| {
+		if (std.mem.eql(u8, library, name)) {
+			return true;
+		}
+	}
+	return false;
 }
 
 /// The keychain lives in Security.framework, which only macOS has.
