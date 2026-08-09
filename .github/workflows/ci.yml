@@ -43,6 +43,16 @@ jobs:
         if: runner.os == 'macOS'
         run: brew install pkgconf libpq mariadb-connector-c openssl@3
 
+      - name: what the client libraries actually ship
+        run: |
+          echo "--- pkg-config libpq:";     pkg-config --static --libs libpq || true
+          echo "--- pkg-config libmariadb:"; pkg-config --static --libs libmariadb || true
+          echo "--- archives on disk:"
+          ls -1 /usr/lib/*/libpq*.a /usr/lib/*/libpg*.a /usr/lib/*/libmariadb*.a 2>/dev/null || true
+          ls -1 $(brew --prefix libpq 2>/dev/null)/lib/*.a 2>/dev/null || true
+          echo "--- which package has libpgcommon:"
+          apt-file search libpgcommon.a 2>/dev/null | head -3 || true
+
       - name: the SQLite amalgamation
         run: ./fetch-sqlite.sh
 
