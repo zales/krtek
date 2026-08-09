@@ -1,0 +1,32 @@
+ krtek smoke.db                                                                              SQLite 3.50.4  1 objects
+ TABLES & VIEWS          ┃ notes  1-1 of 1   page 1/1
+ ▪ notes                1┃ id  body
+                         ┃   1 it drew this
+                         ┃
+                         ┃
+                         ┃
+                         ┃
+                         ┃
+                         ┃
+                         ┃
+                         ┃
+                         ┃
+                         ┃
+                         ┃
+                         ┃
+                         ┃
+                         ┃
+                         ┃
+                         ┃
+                         ┃
+                         ┃
+                         ┃
+                         ┃
+                         ┃
+                         ┃
+                         ┃
+                         ┃
+                         ┃
+                         ┃
+ smoke.db - SQLite 3.50.4
+ enter opens   / filter   c create table   E export   ctrl+k commands   q quit

@@ -7,95 +7,97 @@ on:
   workflow_dispatch:
 
 jobs:
-  build:
-    name: ${{ matrix.name }}
+  # macOS links the client libraries out of Homebrew and leaves only the system's
+  # own dylibs behind, so it builds on the runner itself.
+  macos:
+    name: macos ${{ matrix.arch }}
     runs-on: ${{ matrix.runner }}
     strategy:
       # One platform failing should not hide what the others did.
       fail-fast: false
       matrix:
         include:
-          - name: linux x86_64
-            runner: ubuntu-24.04
-          - name: linux arm64
-            runner: ubuntu-24.04-arm
-          - name: macos arm64
+          - arch: arm64
             runner: macos-15
-          - name: macos x86_64
+          - arch: x86_64
             runner: macos-15-intel
+    env:
+      # The keg-only libraries keep their .pc files to themselves.
+      PKG_CONFIG_PATH: /opt/homebrew/opt/libpq/lib/pkgconfig:/opt/homebrew/opt/mariadb-connector-c/lib/pkgconfig:/usr/local/opt/libpq/lib/pkgconfig:/usr/local/opt/mariadb-connector-c/lib/pkgconfig
     steps:
       - uses: actions/checkout@v4
-
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.16.0
 
-      # The two client libraries krtek links: libpq for PostgreSQL, the MariaDB
-      # connector for MySQL. SQLite is compiled in and Redis needs nothing.
-      - name: client libraries (linux)
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y pkg-config libpq-dev libmariadb-dev libssl-dev \
-            libkrb5-dev libldap2-dev zlib1g-dev libcurl4-openssl-dev
-
-      - name: client libraries (macos)
-        if: runner.os == 'macOS'
-        run: brew install pkgconf libpq mariadb-connector-c openssl@3
-
-      - name: what the client libraries actually ship
-        run: |
-          echo "--- pkg-config libpq:";     pkg-config --static --libs libpq || true
-          echo "--- pkg-config libmariadb:"; pkg-config --static --libs libmariadb || true
-          echo "--- archives on disk:"
-          ls -1 /usr/lib/*/libpq*.a /usr/lib/*/libpg*.a /usr/lib/*/libmariadb*.a 2>/dev/null || true
-          ls -1 $(brew --prefix libpq 2>/dev/null)/lib/*.a 2>/dev/null || true
-          echo "--- which package has libpgcommon:"
-          apt-file search libpgcommon.a 2>/dev/null | head -3 || true
-
-      - name: the SQLite amalgamation
-        run: ./fetch-sqlite.sh
+      - run: brew install pkgconf libpq mariadb-connector-c openssl@3
+      - run: ./fetch-sqlite.sh
 
       - name: build
-        env:
-          # The keg-only libraries keep their .pc files to themselves.
-          PKG_CONFIG_PATH: /opt/homebrew/opt/libpq/lib/pkgconfig:/opt/homebrew/opt/mariadb-connector-c/lib/pkgconfig:/usr/local/opt/libpq/lib/pkgconfig:/usr/local/opt/mariadb-connector-c/lib/pkgconfig
         run: |
           zig build -Doptimize=ReleaseSafe -Dstatic \
-            ${{ runner.os == 'macOS' && '-Dlibpq=$(brew --prefix libpq) -Dmariadb=$(brew --prefix mariadb-connector-c)' || '' }}
+            -Dlibpq=$(brew --prefix libpq) -Dmariadb=$(brew --prefix mariadb-connector-c)
 
       # Nothing of the client libraries may be left as a runtime dependency: that
       # is the whole point of -Dstatic, and it is easy to lose by accident.
       - name: nothing but the system is linked
         run: |
-          if [ "$RUNNER_OS" = "macOS" ]; then
-            otool -L zig-out/bin/krtek | tee links.txt
-            ! grep -qE "libpq|mariadb|libssl|libcrypto|homebrew|/usr/local" links.txt
-          else
-            ldd zig-out/bin/krtek | tee links.txt
-            ! grep -qE "libpq|mariadb|libssl|libcrypto" links.txt
-          fi
+          otool -L zig-out/bin/krtek | tee links.txt
+          ! grep -qE "libpq|mariadb|libssl|libcrypto|homebrew|/usr/local" links.txt
 
       - name: test
-        run: |
-          zig build test \
-            ${{ runner.os == 'macOS' && '-Dlibpq=$(brew --prefix libpq) -Dmariadb=$(brew --prefix mariadb-connector-c)' || '' }}
+        run: zig build test -Dlibpq=$(brew --prefix libpq) -Dmariadb=$(brew --prefix mariadb-connector-c)
 
-      # It has to start, find its terminal and draw something. The harness feeds
-      # it keys through a pty and reads back what it drew, so this catches a
-      # binary that builds and then falls over on the first frame.
       - name: it runs
-        run: |
-          python3 - <<'PY'
-          import sqlite3
-          c = sqlite3.connect("ci.db")
-          c.execute("create table notes (id integer primary key, body text)")
-          c.execute("insert into notes (body) values ('from ci')")
-          c.commit()
-          PY
-          python3 tests/screen.py ci.db '{keep}' | tee screen.txt
-          grep -q "from ci" screen.txt
+        run: ./tests/smoke.sh
 
-      - name: what the object list looked like
-        if: always()
-        run: cat screen.txt || true
+  # Linux is built against musl in an Alpine chroot, which gets one binary that
+  # runs on any distribution. Debian's `libpq.a` is missing the pgcommon and
+  # pgport archives that it needs, so a static build there is not possible with
+  # the distribution's own packages; Alpine's postgresql-dev has all of it.
+  linux:
+    name: linux ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: jirutka/setup-alpine@v1
+        with:
+          branch: v3.22
+          packages: >
+            build-base pkgconf python3 curl tar xz
+            postgresql-dev mariadb-connector-c-dev
+            openssl-dev openssl-libs-static zlib-static
+            krb5-dev openldap-dev curl-dev curl-static
+
+      - name: zig
+        shell: alpine.sh {0}
+        run: |
+          arch=$(uname -m)
+          curl -fsSL "https://ziglang.org/download/0.16.0/zig-$arch-linux-0.16.0.tar.xz" -o zig.tar.xz
+          mkdir -p /opt/zig && tar xJf zig.tar.xz -C /opt/zig --strip-components=1
+          /opt/zig/zig version
+
+      - name: build, test, run
+        shell: alpine.sh {0}
+        run: |
+          export PATH=/opt/zig:$PATH
+          ./fetch-sqlite.sh
+          zig build -Doptimize=ReleaseSafe -Dstatic
+          zig build test
+          ./tests/smoke.sh
+
+      - name: it needs nothing at all
+        shell: alpine.sh {0}
+        run: |
+          file zig-out/bin/krtek
+          ldd zig-out/bin/krtek 2>&1 | tee links.txt || true
+          grep -qE "statically linked|not a dynamic executable|Not a valid dynamic" links.txt

@@ -13,82 +13,100 @@ permissions:
   contents: write
 
 jobs:
-  binaries:
-    name: ${{ matrix.target }}
+  macos:
+    name: macos-${{ matrix.arch }}
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - target: linux-x86_64
-            runner: ubuntu-24.04
-          - target: linux-arm64
-            runner: ubuntu-24.04-arm
-          - target: macos-arm64
+          - arch: arm64
             runner: macos-15
-          - target: macos-x86_64
+          - arch: x86_64
             runner: macos-15-intel
+    env:
+      PKG_CONFIG_PATH: /opt/homebrew/opt/libpq/lib/pkgconfig:/opt/homebrew/opt/mariadb-connector-c/lib/pkgconfig:/usr/local/opt/libpq/lib/pkgconfig:/usr/local/opt/mariadb-connector-c/lib/pkgconfig
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+
+      - run: brew install pkgconf libpq mariadb-connector-c openssl@3
+      - run: ./fetch-sqlite.sh
+
+      - name: build
+        run: |
+          zig build -Doptimize=ReleaseFast -Dstatic \
+            -Dlibpq=$(brew --prefix libpq) -Dmariadb=$(brew --prefix mariadb-connector-c)
+
+      - name: nothing but the system is linked
+        run: |
+          otool -L zig-out/bin/krtek | tee links.txt
+          ! grep -qE "libpq|mariadb|libssl|libcrypto|homebrew|/usr/local" links.txt
+
+      - name: package
+        run: ./tests/package.sh "${{ inputs.tag || github.ref_name }}" "macos-${{ matrix.arch }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-${{ matrix.arch }}
+          path: |
+            *.tar.gz
+            *.tar.gz.sha256
+
+  linux:
+    name: linux-${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.tag || github.ref }}
 
-      - uses: mlugg/setup-zig@v2
+      - uses: jirutka/setup-alpine@v1
         with:
-          version: 0.16.0
+          branch: v3.22
+          packages: >
+            build-base pkgconf python3 curl tar xz
+            postgresql-dev mariadb-connector-c-dev
+            openssl-dev openssl-libs-static zlib-static
+            krb5-dev openldap-dev curl-dev curl-static
 
-      - name: client libraries (linux)
-        if: runner.os == 'Linux'
+      - name: zig
+        shell: alpine.sh {0}
         run: |
-          sudo apt-get update
-          sudo apt-get install -y pkg-config libpq-dev libmariadb-dev libssl-dev \
-            libkrb5-dev libldap2-dev zlib1g-dev libcurl4-openssl-dev
+          arch=$(uname -m)
+          curl -fsSL "https://ziglang.org/download/0.16.0/zig-$arch-linux-0.16.0.tar.xz" -o zig.tar.xz
+          mkdir -p /opt/zig && tar xJf zig.tar.xz -C /opt/zig --strip-components=1
 
-      - name: client libraries (macos)
-        if: runner.os == 'macOS'
-        run: brew install pkgconf libpq mariadb-connector-c openssl@3
-
-      - name: the SQLite amalgamation
-        run: ./fetch-sqlite.sh
-
-      # Static: the client libraries go into the binary, so what is downloaded
-      # needs nothing installed to run.
-      - name: build
-        env:
-          # The keg-only libraries keep their .pc files to themselves.
-          PKG_CONFIG_PATH: /opt/homebrew/opt/libpq/lib/pkgconfig:/opt/homebrew/opt/mariadb-connector-c/lib/pkgconfig:/usr/local/opt/libpq/lib/pkgconfig:/usr/local/opt/mariadb-connector-c/lib/pkgconfig
+      - name: build and package
+        shell: alpine.sh {0}
         run: |
-          zig build -Doptimize=ReleaseFast -Dstatic \
-            ${{ runner.os == 'macOS' && '-Dlibpq=$(brew --prefix libpq) -Dmariadb=$(brew --prefix mariadb-connector-c)' || '' }}
-
-      - name: nothing but the system is linked
-        run: |
-          if [ "$RUNNER_OS" = "macOS" ]; then
-            otool -L zig-out/bin/krtek | tee links.txt
-            ! grep -qE "libpq|mariadb|libssl|libcrypto|homebrew|/usr/local" links.txt
-          else
-            ldd zig-out/bin/krtek | tee links.txt
-            ! grep -qE "libpq|mariadb|libssl|libcrypto" links.txt
-          fi
-
-      - name: package
-        run: |
-          version="${{ inputs.tag || github.ref_name }}"
-          name="krtek-$version-${{ matrix.target }}"
-          mkdir -p "$name"
-          cp zig-out/bin/krtek README.md "$name/"
-          tar czf "$name.tar.gz" "$name"
-          shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256"
+          export PATH=/opt/zig:$PATH
+          ./fetch-sqlite.sh
+          zig build -Doptimize=ReleaseFast -Dstatic
+          file zig-out/bin/krtek
+          ./tests/package.sh "${{ inputs.tag || github.ref_name }}" "linux-${{ matrix.arch }}"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.target }}
+          name: linux-${{ matrix.arch }}
           path: |
             *.tar.gz
             *.tar.gz.sha256
 
   release:
-    needs: binaries
+    needs: [macos, linux]
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -108,7 +126,10 @@ jobs:
             echo
             echo "Each archive holds one binary and needs **nothing installed**: SQLite, libpq,"
             echo "the MariaDB connector and OpenSSL are linked into it, and Redis is spoken"
-            echo "directly. Only the operating system's own libraries are left dynamic."
+            echo "directly."
+            echo
+            echo "The Linux builds are static against musl - they run on any distribution."
+            echo "The macOS builds leave only Apple's own libraries dynamic."
             echo
             echo '```sh'
             echo "tar xzf krtek-*.tar.gz && ./krtek-*/krtek --help"
