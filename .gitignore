@@ -1,0 +1,10 @@
+/vendor/
+/zig-out/
+/.zig-cache/
+/zig-pkg/
+__pycache__/
+# Databases and dumps left lying about while working, but not the test fixture.
+*.db
+*.db*
+!tests/sample.db
+*.sql

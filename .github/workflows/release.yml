@@ -1,0 +1,110 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: the tag to build and release
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  binaries:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: linux-x86_64
+            runner: ubuntu-24.04
+          - target: linux-arm64
+            runner: ubuntu-24.04-arm
+          - target: macos-arm64
+            runner: macos-15
+          - target: macos-x86_64
+            runner: macos-13
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+
+      - name: client libraries (linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libpq-dev libmariadb-dev
+
+      - name: client libraries (macos)
+        if: runner.os == 'macOS'
+        run: brew install libpq mariadb-connector-c
+
+      - name: the SQLite amalgamation
+        run: ./fetch-sqlite.sh
+
+      - name: build
+        run: zig build -Doptimize=ReleaseFast ${{ runner.os == 'macOS' && '-Dlibpq=$(brew --prefix libpq) -Dmariadb=$(brew --prefix mariadb-connector-c)' || '' }}
+
+      # The binary links the two client libraries, so say which ones it wants -
+      # that is what someone downloading it needs to know.
+      - name: what it links
+        run: |
+          if [ "$RUNNER_OS" = "macOS" ]; then otool -L zig-out/bin/krtek; else ldd zig-out/bin/krtek; fi
+
+      - name: package
+        run: |
+          version="${{ inputs.tag || github.ref_name }}"
+          name="krtek-$version-${{ matrix.target }}"
+          mkdir -p "$name"
+          cp zig-out/bin/krtek README.md "$name/"
+          tar czf "$name.tar.gz" "$name"
+          shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: |
+            *.tar.gz
+            *.tar.gz.sha256
+
+  release:
+    needs: binaries
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="${{ inputs.tag || github.ref_name }}"
+          {
+            echo "A database manager for the terminal: SQLite, PostgreSQL, MySQL/MariaDB and Redis."
+            echo
+            echo "Each archive holds one binary. It links the PostgreSQL and MySQL client"
+            echo "libraries, so those have to be installed:"
+            echo
+            echo '```sh'
+            echo "brew install libpq mariadb-connector-c        # macOS"
+            echo "apt install libpq5 libmariadb3                # Debian, Ubuntu"
+            echo '```'
+            echo
+            echo "SQLite is compiled in and Redis needs nothing."
+          } > notes.md
+          gh release create "$version" \
+            --title "krtek $version" \
+            --notes-file notes.md \
+            artifacts/*.tar.gz artifacts/*.tar.gz.sha256

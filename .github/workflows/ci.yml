@@ -1,0 +1,71 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      # One platform failing should not hide what the others did.
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux x86_64
+            runner: ubuntu-24.04
+          - name: linux arm64
+            runner: ubuntu-24.04-arm
+          - name: macos arm64
+            runner: macos-15
+          - name: macos x86_64
+            runner: macos-13
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+
+      # The two client libraries krtek links: libpq for PostgreSQL, the MariaDB
+      # connector for MySQL. SQLite is compiled in and Redis needs nothing.
+      - name: client libraries (linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libpq-dev libmariadb-dev
+
+      - name: client libraries (macos)
+        if: runner.os == 'macOS'
+        run: brew install libpq mariadb-connector-c
+
+      - name: the SQLite amalgamation
+        run: ./fetch-sqlite.sh
+
+      - name: build
+        run: zig build -Doptimize=ReleaseSafe ${{ runner.os == 'macOS' && '-Dlibpq=$(brew --prefix libpq) -Dmariadb=$(brew --prefix mariadb-connector-c)' || '' }}
+
+      - name: test
+        run: zig build test ${{ runner.os == 'macOS' && '-Dlibpq=$(brew --prefix libpq) -Dmariadb=$(brew --prefix mariadb-connector-c)' || '' }}
+
+      # It has to start, find its terminal and draw something. The harness feeds
+      # it keys through a pty and reads back what it drew, so this catches a
+      # binary that builds and then falls over on the first frame.
+      - name: it runs
+        run: |
+          python3 - <<'PY'
+          import sqlite3
+          c = sqlite3.connect("ci.db")
+          c.execute("create table notes (id integer primary key, body text)")
+          c.execute("insert into notes (body) values ('from ci')")
+          c.commit()
+          PY
+          python3 tests/screen.py ci.db '{keep}' | tee screen.txt
+          grep -q "from ci" screen.txt
+
+      - name: what the object list looked like
+        if: always()
+        run: cat screen.txt || true
