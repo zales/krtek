@@ -16,10 +16,12 @@ from the key code - otherwise every capital letter and every shifted symbol
 arrives wrong.
 
 A [release](https://github.com/zales/krtek/releases/latest) has a binary for
-macOS and Linux, on both architectures. It links the PostgreSQL and MySQL client
-libraries, so those have to be around - `brew install libpq
-mariadb-connector-c`, or `apt install libpq5 libmariadb3`. SQLite is compiled in
-and Redis needs nothing.
+macOS and Linux, on both architectures, and it **needs nothing installed**:
+SQLite, libpq, the MariaDB connector and OpenSSL are linked into it, and Redis is
+spoken directly, so only the operating system's own libraries are left dynamic.
+
+Building it yourself needs those libraries present - see below - and
+`-Dstatic` is what puts them inside the binary.
 
 ```sh
 zig build -Doptimize=ReleaseSafe
@@ -145,9 +147,17 @@ zig build kccheck                        # check the macOS keychain, by hand
 
 Both client libraries are keg-only on Homebrew; `-Dlibpq=/prefix` and
 `-Dmariadb=/prefix` point the build at them if they live somewhere other than
-`/opt/homebrew/opt/libpq` and `/opt/homebrew/opt/mariadb-connector-c`. The
-MariaDB connector speaks to MySQL as well, and its licence lets a program that is
-not GPL link it - Oracle's own client library does not.
+`/opt/homebrew/opt/libpq` and `/opt/homebrew/opt/mariadb-connector-c`, and
+`-Dopenssl=` does the same for OpenSSL. The MariaDB connector speaks to MySQL as
+well, and its licence lets a program that is not GPL link it - Oracle's own client
+library does not.
+
+`-Dstatic` links libpq, the connector and OpenSSL into the binary, leaving only
+the operating system's libraries dynamic - Kerberos, LDAP, curl and zlib on macOS,
+libc and the same few on Linux. That is what a release is built with. It is not
+one `-l` per library: a static libpq also wants `libpq-oauth.a` and the *`_shlib`*
+variants of `libpgcommon` and `libpgport`, because the plain ones are built
+differently from the libpq that references them.
 
 ## What it does
 

@@ -29,9 +29,16 @@ pub fn build(b: *std.Build) void {
 	const target = b.standardTargetOptions(.{});
 	const optimize = b.standardOptimizeOption(.{});
 	const libpq = b.option([]const u8, "libpq", "prefix of the libpq installation");
+	// Linking the client libraries into the binary, so it needs nothing installed
+	// to run. The system's own libraries stay dynamic - there is no static libc on
+	// macOS, and no reason to on glibc.
+	const static = b.option(bool, "static", "link the client libraries into the binary") orelse false;
+	const openssl = b.option([]const u8, "openssl", "prefix of the OpenSSL installation");
 	// The MariaDB connector speaks to MySQL as well, and its licence allows a
 	// non-GPL program to link it - Oracle's own client library does not.
 	const mariadb = b.option([]const u8, "mariadb", "prefix of the mariadb-connector-c installation");
+
+	const linking = Linking{ .static = static, .openssl = openssl };
 
 	// The bindings are shared with the WASM build, so they are their own module
 	// rather than a relative import reaching outside the root.
@@ -62,8 +69,8 @@ pub fn build(b: *std.Build) void {
 	module.addImport("vaxis", vaxis.module("vaxis"));
 	module.addIncludePath(b.path("vendor"));
 	module.addCSourceFile(.{ .file = b.path("vendor/sqlite3.c"), .flags = &sqlite_flags });
-	linkPostgres(b, module, target, libpq);
-	linkMysql(b, module, target, mariadb);
+	linkPostgres(b, module, target, libpq, linking);
+	linkMysql(b, module, target, mariadb, linking);
 	linkKeychain(module, target);
 
 	const exe = b.addExecutable(.{ .name = "krtek", .root_module = module });
@@ -87,8 +94,8 @@ pub fn build(b: *std.Build) void {
 	test_module.addImport("vaxis", vaxis.module("vaxis"));
 	test_module.addIncludePath(b.path("vendor"));
 	test_module.addCSourceFile(.{ .file = b.path("vendor/sqlite3.c"), .flags = &sqlite_flags });
-	linkPostgres(b, test_module, target, libpq);
-	linkMysql(b, test_module, target, mariadb);
+	linkPostgres(b, test_module, target, libpq, linking);
+	linkMysql(b, test_module, target, mariadb, linking);
 	linkKeychain(test_module, target);
 	const tests = b.addTest(.{ .root_module = test_module });
 
@@ -102,8 +109,8 @@ pub fn build(b: *std.Build) void {
 	check_module.addImport("db", database);
 	check_module.addIncludePath(b.path("vendor"));
 	check_module.addCSourceFile(.{ .file = b.path("vendor/sqlite3.c"), .flags = &sqlite_flags });
-	linkPostgres(b, check_module, target, libpq);
-	linkMysql(b, check_module, target, mariadb);
+	linkPostgres(b, check_module, target, libpq, linking);
+	linkMysql(b, check_module, target, mariadb, linking);
 	const check = b.addExecutable(.{ .name = "dbcheck", .root_module = check_module });
 	const run_check = b.addRunArtifact(check);
 	if (b.args) |args| {
@@ -129,7 +136,7 @@ pub fn build(b: *std.Build) void {
 	b.step("test", "Unit tests of the terminal app").dependOn(&b.addRunArtifact(tests).step);
 }
 
-fn linkPostgres(b: *std.Build, module: *std.Build.Module, target: std.Build.ResolvedTarget, prefix: ?[]const u8) void {
+fn linkPostgres(b: *std.Build, module: *std.Build.Module, target: std.Build.ResolvedTarget, prefix: ?[]const u8, options: Linking) void {
 	if (prefix orelse defaultPrefix(target, "libpq")) |root| {
 		module.addIncludePath(.{ .cwd_relative = b.pathJoin(&.{ root, "include" }) });
 		module.addLibraryPath(.{ .cwd_relative = b.pathJoin(&.{ root, "lib" }) });
@@ -138,7 +145,47 @@ fn linkPostgres(b: *std.Build, module: *std.Build.Module, target: std.Build.Reso
 		// unused -I flag.
 		module.addIncludePath(.{ .cwd_relative = "/usr/include/postgresql" });
 	}
-	module.linkSystemLibrary("pq", .{});
+	if (!options.static) {
+		module.linkSystemLibrary("pq", .{});
+		return;
+	}
+	// A static libpq is split into three archives and wants a fourth for OAuth,
+	// then the things it talks to: TLS, Kerberos, LDAP, HTTP, zlib. All of those
+	// except OpenSSL are part of the system on both platforms.
+	// `libpq.a` is only half of it: the rest of PostgreSQL's own code is in
+	// `libpgcommon_shlib.a` and `libpgport_shlib.a` - the plain `libpgcommon.a`
+	// looks like it would do and does not, because it is built differently from
+	// the libpq that references it - and the OAuth flow is in `libpq-oauth.a`.
+	for ([_][]const u8{ "pq", "pq-oauth", "pgcommon_shlib", "pgport_shlib" }) |name| {
+		module.linkSystemLibrary(name, .{ .preferred_link_mode = .static, .weak = true });
+	}
+	linkOpenSsl(b, module, options.openssl, target);
+	const system = if (target.result.os.tag == .macos)
+		&[_][]const u8{ "gssapi_krb5", "curl", "ldap", "z", "m" }
+	else
+		&[_][]const u8{ "gssapi_krb5", "ldap", "lber", "z", "m" };
+	for (system) |name| {
+		module.linkSystemLibrary(name, .{ .weak = true });
+	}
+}
+
+const Linking = struct {
+	static: bool,
+	openssl: ?[]const u8,
+};
+
+/// OpenSSL is the one dependency neither platform has where the linker looks, so
+/// its prefix is asked for: `-Dopenssl=$(brew --prefix openssl@3)` on a Mac,
+/// nothing needed on a distribution that puts it in /usr/lib.
+fn linkOpenSsl(b: *std.Build, module: *std.Build.Module, prefix: ?[]const u8, target: std.Build.ResolvedTarget) void {
+	const root: ?[]const u8 = prefix orelse
+		if (target.result.os.tag == .macos) "/opt/homebrew/opt/openssl@3" else null;
+	if (root) |where| {
+		module.addLibraryPath(.{ .cwd_relative = b.pathJoin(&.{ where, "lib" }) });
+	}
+	for ([_][]const u8{ "ssl", "crypto" }) |name| {
+		module.linkSystemLibrary(name, .{ .preferred_link_mode = .static });
+	}
 }
 
 /// The keychain lives in Security.framework, which only macOS has.
@@ -150,7 +197,7 @@ fn linkKeychain(module: *std.Build.Module, target: std.Build.ResolvedTarget) voi
 	module.linkFramework("CoreFoundation", .{});
 }
 
-fn linkMysql(b: *std.Build, module: *std.Build.Module, target: std.Build.ResolvedTarget, prefix: ?[]const u8) void {
+fn linkMysql(b: *std.Build, module: *std.Build.Module, target: std.Build.ResolvedTarget, prefix: ?[]const u8, options: Linking) void {
 	if (prefix orelse defaultPrefix(target, "mariadb-connector-c")) |root| {
 		module.addIncludePath(.{ .cwd_relative = b.pathJoin(&.{ root, "include", "mariadb" }) });
 		module.addLibraryPath(.{ .cwd_relative = b.pathJoin(&.{ root, "lib" }) });
@@ -159,7 +206,14 @@ fn linkMysql(b: *std.Build, module: *std.Build.Module, target: std.Build.Resolve
 			module.addIncludePath(.{ .cwd_relative = candidate });
 		}
 	}
-	module.linkSystemLibrary("mariadb", .{});
+	module.linkSystemLibrary("mariadb", .{
+		.preferred_link_mode = if (options.static) .static else .dynamic,
+	});
+	if (options.static) {
+		// The connector wants TLS and zlib; libpq brought the same OpenSSL along.
+		linkOpenSsl(b, module, options.openssl, target);
+		module.linkSystemLibrary("z", .{ .weak = true });
+	}
 }
 
 /// On macOS, where brew keeps a keg-only library on Apple silicon. Elsewhere

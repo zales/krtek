@@ -41,23 +41,31 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libpq-dev libmariadb-dev
+          sudo apt-get install -y libpq-dev libmariadb-dev libssl-dev
 
       - name: client libraries (macos)
         if: runner.os == 'macOS'
-        run: brew install libpq mariadb-connector-c
+        run: brew install libpq mariadb-connector-c openssl@3
 
       - name: the SQLite amalgamation
         run: ./fetch-sqlite.sh
 
+      # Static: the client libraries go into the binary, so what is downloaded
+      # needs nothing installed to run.
       - name: build
-        run: zig build -Doptimize=ReleaseFast ${{ runner.os == 'macOS' && '-Dlibpq=$(brew --prefix libpq) -Dmariadb=$(brew --prefix mariadb-connector-c)' || '' }}
-
-      # The binary links the two client libraries, so say which ones it wants -
-      # that is what someone downloading it needs to know.
-      - name: what it links
         run: |
-          if [ "$RUNNER_OS" = "macOS" ]; then otool -L zig-out/bin/krtek; else ldd zig-out/bin/krtek; fi
+          zig build -Doptimize=ReleaseFast -Dstatic \
+            ${{ runner.os == 'macOS' && '-Dlibpq=$(brew --prefix libpq) -Dmariadb=$(brew --prefix mariadb-connector-c) -Dopenssl=$(brew --prefix openssl@3)' || '' }}
+
+      - name: nothing but the system is linked
+        run: |
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            otool -L zig-out/bin/krtek | tee links.txt
+            ! grep -qE "libpq|mariadb|libssl|libcrypto|homebrew|/usr/local" links.txt
+          else
+            ldd zig-out/bin/krtek | tee links.txt
+            ! grep -qE "libpq|mariadb|libssl|libcrypto" links.txt
+          fi
 
       - name: package
         run: |
@@ -94,15 +102,13 @@ jobs:
           {
             echo "A database manager for the terminal: SQLite, PostgreSQL, MySQL/MariaDB and Redis."
             echo
-            echo "Each archive holds one binary. It links the PostgreSQL and MySQL client"
-            echo "libraries, so those have to be installed:"
+            echo "Each archive holds one binary and needs **nothing installed**: SQLite, libpq,"
+            echo "the MariaDB connector and OpenSSL are linked into it, and Redis is spoken"
+            echo "directly. Only the operating system's own libraries are left dynamic."
             echo
             echo '```sh'
-            echo "brew install libpq mariadb-connector-c        # macOS"
-            echo "apt install libpq5 libmariadb3                # Debian, Ubuntu"
+            echo "tar xzf krtek-*.tar.gz && ./krtek-*/krtek --help"
             echo '```'
-            echo
-            echo "SQLite is compiled in and Redis needs nothing."
           } > notes.md
           gh release create "$version" \
             --title "krtek $version" \

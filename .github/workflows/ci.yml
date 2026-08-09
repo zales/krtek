@@ -36,20 +36,36 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libpq-dev libmariadb-dev
+          sudo apt-get install -y libpq-dev libmariadb-dev libssl-dev
 
       - name: client libraries (macos)
         if: runner.os == 'macOS'
-        run: brew install libpq mariadb-connector-c
+        run: brew install libpq mariadb-connector-c openssl@3
 
       - name: the SQLite amalgamation
         run: ./fetch-sqlite.sh
 
       - name: build
-        run: zig build -Doptimize=ReleaseSafe ${{ runner.os == 'macOS' && '-Dlibpq=$(brew --prefix libpq) -Dmariadb=$(brew --prefix mariadb-connector-c)' || '' }}
+        run: |
+          zig build -Doptimize=ReleaseSafe -Dstatic \
+            ${{ runner.os == 'macOS' && '-Dlibpq=$(brew --prefix libpq) -Dmariadb=$(brew --prefix mariadb-connector-c) -Dopenssl=$(brew --prefix openssl@3)' || '' }}
+
+      # Nothing of the client libraries may be left as a runtime dependency: that
+      # is the whole point of -Dstatic, and it is easy to lose by accident.
+      - name: nothing but the system is linked
+        run: |
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            otool -L zig-out/bin/krtek | tee links.txt
+            ! grep -qE "libpq|mariadb|libssl|libcrypto|homebrew|/usr/local" links.txt
+          else
+            ldd zig-out/bin/krtek | tee links.txt
+            ! grep -qE "libpq|mariadb|libssl|libcrypto" links.txt
+          fi
 
       - name: test
-        run: zig build test ${{ runner.os == 'macOS' && '-Dlibpq=$(brew --prefix libpq) -Dmariadb=$(brew --prefix mariadb-connector-c)' || '' }}
+        run: |
+          zig build test \
+            ${{ runner.os == 'macOS' && '-Dlibpq=$(brew --prefix libpq) -Dmariadb=$(brew --prefix mariadb-connector-c)' || '' }}
 
       # It has to start, find its terminal and draw something. The harness feeds
       # it keys through a pty and reads back what it drew, so this catches a
