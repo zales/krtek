@@ -51,10 +51,10 @@ jobs:
       - name: it runs
         run: ./tests/smoke.sh
 
-  # Linux is built against musl in an Alpine chroot, which gets one binary that
-  # runs on any distribution. Debian's `libpq.a` is missing the pgcommon and
-  # pgport archives that it needs, so a static build there is not possible with
-  # the distribution's own packages; Alpine's postgresql-dev has all of it.
+  # Linux links the client libraries dynamically: Debian's libpq.a is missing the
+  # pgcommon and pgport archives it needs, so -Dstatic cannot work with the
+  # distribution's own packages, and a binary built there wants libpq5 and
+  # libmariadb3 installed.
   linux:
     name: linux ${{ matrix.arch }}
     runs-on: ${{ matrix.runner }}
@@ -68,36 +68,16 @@ jobs:
             runner: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v4
-
-      - uses: jirutka/setup-alpine@v1
+      - uses: mlugg/setup-zig@v2
         with:
-          branch: v3.22
-          packages: >
-            build-base pkgconf python3 curl tar xz
-            postgresql-dev mariadb-connector-c-dev
-            openssl-dev openssl-libs-static zlib-static
-            krb5-dev openldap-dev curl-dev curl-static
+          version: 0.16.0
 
-      - name: zig
-        shell: alpine.sh {0}
-        run: |
-          arch=$(uname -m)
-          curl -fsSL "https://ziglang.org/download/0.16.0/zig-$arch-linux-0.16.0.tar.xz" -o zig.tar.xz
-          mkdir -p /opt/zig && tar xJf zig.tar.xz -C /opt/zig --strip-components=1
-          /opt/zig/zig version
+      - run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libpq-dev libmariadb-dev
 
-      - name: build, test, run
-        shell: alpine.sh {0}
-        run: |
-          export PATH=/opt/zig:$PATH
-          ./fetch-sqlite.sh
-          zig build -Doptimize=ReleaseSafe -Dstatic
-          zig build test
-          ./tests/smoke.sh
-
-      - name: it needs nothing at all
-        shell: alpine.sh {0}
-        run: |
-          file zig-out/bin/krtek
-          ldd zig-out/bin/krtek 2>&1 | tee links.txt || true
-          grep -qE "statically linked|not a dynamic executable|Not a valid dynamic" links.txt
+      - run: ./fetch-sqlite.sh
+      - run: zig build -Doptimize=ReleaseSafe
+      - run: zig build test
+      - run: ./tests/smoke.sh
+      - run: ldd zig-out/bin/krtek

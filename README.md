@@ -16,12 +16,17 @@ from the key code - otherwise every capital letter and every shifted symbol
 arrives wrong.
 
 A [release](https://github.com/zales/krtek/releases/latest) has a binary for
-macOS and Linux, on both architectures, and it **needs nothing installed**:
-SQLite, libpq, the MariaDB connector and OpenSSL are linked into it, and Redis is
-spoken directly, so only the operating system's own libraries are left dynamic.
+macOS and Linux, on both architectures.
 
-Building it yourself needs those libraries present - see below - and
-`-Dstatic` is what puts them inside the binary.
+**On macOS it needs nothing installed**: SQLite, libpq, the MariaDB connector and
+OpenSSL are linked into the binary, Redis is spoken directly, and only Apple's own
+libraries are left dynamic. That is `-Dstatic`.
+
+**On Linux the two client libraries are dynamic** - `apt install libpq5
+libmariadb3` - because Debian ships a `libpq.a` without the pgcommon and pgport
+archives it needs, so there is nothing complete to link. Alpine has all of it, and
+its MariaDB connector has no archive at all; a self-contained Linux binary means
+building one of them from source, which is not done here yet.
 
 ```sh
 zig build -Doptimize=ReleaseSafe
@@ -153,11 +158,14 @@ well, and its licence lets a program that is not GPL link it - Oracle's own clie
 library does not.
 
 `-Dstatic` links libpq, the connector and OpenSSL into the binary, leaving only
-the operating system's libraries dynamic - Kerberos, LDAP, curl and zlib on macOS,
-libc and the same few on Linux. That is what a release is built with. It is not
-one `-l` per library: a static libpq also wants `libpq-oauth.a` and the *`_shlib`*
-variants of `libpgcommon` and `libpgport`, because the plain ones are built
-differently from the libpq that references them.
+the operating system's own libraries dynamic - Kerberos, LDAP, curl and zlib on
+macOS. What that takes is not one `-l` per library, and not the same list twice,
+so `pkg-config --static` is asked and its answer translated: both libraries in one
+call, because they share zlib and OpenSSL and asking separately puts zlib in
+twice, which dyld refuses to load. Where brew's `libpq.pc` names `libpgcommon`, the
+`_shlib` variant beside it is used instead - the plain archive is built differently
+from the libpq that references it, and linking it leaves `pg_encoding_to_char`
+undefined.
 
 ## What it does
 

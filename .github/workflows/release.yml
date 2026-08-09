@@ -72,31 +72,18 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.tag || github.ref }}
-
-      - uses: jirutka/setup-alpine@v1
+      - uses: mlugg/setup-zig@v2
         with:
-          branch: v3.22
-          packages: >
-            build-base pkgconf python3 curl tar xz
-            postgresql-dev mariadb-connector-c-dev
-            openssl-dev openssl-libs-static zlib-static
-            krb5-dev openldap-dev curl-dev curl-static
+          version: 0.16.0
 
-      - name: zig
-        shell: alpine.sh {0}
-        run: |
-          arch=$(uname -m)
-          curl -fsSL "https://ziglang.org/download/0.16.0/zig-$arch-linux-0.16.0.tar.xz" -o zig.tar.xz
-          mkdir -p /opt/zig && tar xJf zig.tar.xz -C /opt/zig --strip-components=1
+      - run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libpq-dev libmariadb-dev
 
-      - name: build and package
-        shell: alpine.sh {0}
-        run: |
-          export PATH=/opt/zig:$PATH
-          ./fetch-sqlite.sh
-          zig build -Doptimize=ReleaseFast -Dstatic
-          file zig-out/bin/krtek
-          ./tests/package.sh "${{ inputs.tag || github.ref_name }}" "linux-${{ matrix.arch }}"
+      - run: ./fetch-sqlite.sh
+      - run: zig build -Doptimize=ReleaseFast
+      - run: ldd zig-out/bin/krtek
+      - run: ./tests/package.sh "${{ inputs.tag || github.ref_name }}" "linux-${{ matrix.arch }}"
 
       - uses: actions/upload-artifact@v4
         with:
@@ -124,12 +111,16 @@ jobs:
           {
             echo "A database manager for the terminal: SQLite, PostgreSQL, MySQL/MariaDB and Redis."
             echo
-            echo "Each archive holds one binary and needs **nothing installed**: SQLite, libpq,"
-            echo "the MariaDB connector and OpenSSL are linked into it, and Redis is spoken"
-            echo "directly."
+            echo "**macOS** needs nothing installed: SQLite, libpq, the MariaDB connector and"
+            echo "OpenSSL are linked into the binary, Redis is spoken directly, and only"
+            echo "Apple's own libraries are left dynamic."
             echo
-            echo "The Linux builds are static against musl - they run on any distribution."
-            echo "The macOS builds leave only Apple's own libraries dynamic."
+            echo "**Linux** links the two client libraries dynamically, because Debian ships a"
+            echo "libpq.a that is missing pieces it needs:"
+            echo
+            echo '```sh'
+            echo "apt install libpq5 libmariadb3"
+            echo '```'""
             echo
             echo '```sh'
             echo "tar xzf krtek-*.tar.gz && ./krtek-*/krtek --help"

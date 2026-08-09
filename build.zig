@@ -190,8 +190,25 @@ fn linkClientLibraries(b: *std.Build, module: *std.Build.Module) void {
 		);
 	};
 
-	// The search paths first, so an archive can be looked for in them below.
+	// The search paths first, so an archive can be looked for in them below. The
+	// system directories are in the list too: a .pc file for something that lives
+	// in /usr/lib says no -L at all.
 	var paths: std.ArrayList([]const u8) = .empty;
+	const system = [_][]const u8{
+		"/usr/lib",
+		"/lib",
+		b.fmt("/usr/lib/{t}-linux-gnu", .{module.resolved_target.?.result.cpu.arch}),
+	};
+	for (system) |where| {
+		// A .pc file for something that lives in /usr/lib names no -L at all, so
+		// the search has to know the usual places - and the linker is told about
+		// the ones that exist, or it resolves the library from its own paths, where
+		// only the shared one is.
+		if (std.Io.Dir.cwd().access(b.graph.io, where, .{})) |_| {
+			paths.append(b.allocator, where) catch @panic("out of memory");
+			module.addLibraryPath(.{ .cwd_relative = where });
+		} else |_| {}
+	}
 	var scan = std.mem.tokenizeAny(u8, out, " \r\n\t");
 	while (scan.next()) |flag| {
 		if (std.mem.startsWith(u8, flag, "-L")) {
@@ -236,9 +253,9 @@ fn linkClientLibraries(b: *std.Build, module: *std.Build.Module) void {
 			module.linkSystemLibrary(library, .{ .preferred_link_mode = .static });
 			continue;
 		}
+		// An archive if there is one - that is the point - and the system's shared
+		// library otherwise, which is what leaves libc and its stubs dynamic.
 		module.linkSystemLibrary(library, .{
-			// An archive if there is one - that is the point - and the system's
-			// shared library otherwise.
 			.preferred_link_mode = if (archive(b, paths.items, library) != null) .static else .dynamic,
 		});
 	}
