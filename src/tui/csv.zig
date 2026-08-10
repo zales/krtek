@@ -1,4 +1,5 @@
-//! Reading and writing delimited files, the format Adminer imports and exports.
+//! Reading and writing delimited files: what a spreadsheet and every other
+//! database client will read.
 
 const std = @import("std");
 

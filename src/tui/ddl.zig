@@ -3,8 +3,7 @@
 //! SQLite can only add, rename and drop a column; anything else - a type, a
 //! default, a primary key, a foreign key - means building a new table, copying
 //! the rows over and putting the old name back. That is what `rebuild` writes,
-//! following the procedure from https://sqlite.org/lang_altertable.html, and it
-//! is also how Adminer alters a SQLite table.
+//! following the procedure from https://sqlite.org/lang_altertable.html.
 
 const std = @import("std");
 const sq = @import("sqlite");

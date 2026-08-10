@@ -1567,7 +1567,7 @@ fn labelled(app: *App, left: usize, width: usize, line: usize, rows: usize, labe
 	return line + 1;
 }
 
-/// Every foreign key in the database, which is Adminer's relation overview.
+/// Every foreign key in the database, as one overview of how it hangs together.
 fn relations(app: *App, size: Size, side: usize, rows: usize) void {
 	const screen = app.screen;
 	const left = side;

@@ -1074,7 +1074,7 @@ pub const App = struct {
 	// ------------------------------------------------------------ commands
 
 	/// Run a batch: every statement is reported, the last result set becomes the
-	/// grid, and an open transaction is rolled back like Adminer does.
+	/// grid, and a transaction left open is rolled back.
 	pub fn runBatch(self: *App, sql: []const u8) !void {
 		try self.runBatchStopping(sql, false);
 	}
@@ -2461,8 +2461,7 @@ pub const App = struct {
 		}
 	}
 
-	/// Look for a string in every text-ish column of every table, the way
-	/// Adminer's "search data in tables" does.
+	/// Look for a string in every text-ish column of every table.
 	fn searchEverything(self: *App, needle: []const u8) !void {
 		var arena = std.heap.ArenaAllocator.init(self.allocator);
 		defer arena.deinit();

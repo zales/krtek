@@ -5,9 +5,9 @@
 //! of those - so the whole client is the hundred lines below, with no dependency
 //! and no licence to think about.
 //!
-//! **Redis is not relational, and this driver does not pretend otherwise.** It
-//! maps onto the interface the way Adminer's own Redis plugin does: one table
-//! called `data` whose columns are `key`, `type`, `ttl` and `value`, rows found
+//! **Redis is not relational, and this driver does not pretend otherwise.** It is
+//! fitted to the interface rather than the other way round: one table called
+//! `data` whose columns are `key`, `type`, `ttl` and `value`, rows found
 //! with `SCAN`, and the numbered databases as schemas, so `#` switches between
 //! them. There is no DDL, no index beyond the key itself, and no foreign key.
 //!

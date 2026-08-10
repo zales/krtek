@@ -2,9 +2,10 @@
 
 [![build](https://github.com/zales/krtek/actions/workflows/ci.yml/badge.svg)](https://github.com/zales/krtek/actions/workflows/ci.yml)
 
-A database manager for the terminal, written in Zig, with the feature set of
-[Adminer](https://www.adminer.org) mapped onto what a text screen can do.
-**SQLite, PostgreSQL, MySQL/MariaDB and Redis**, behind one interface.
+A database manager for the terminal, written in Zig: what a graphical client
+does - browse, edit, alter, dump, import - on a text screen, and quicker, because
+everything is a key press. **SQLite, PostgreSQL, MySQL/MariaDB and Redis**, behind
+one interface.
 
 *Krtek* is Czech for a mole: a small thing that digs through what is underneath
 and comes back up with what it found.
@@ -121,10 +122,10 @@ quietly drift away from what the program does.
 
 ## Redis
 
-Redis is not relational and the driver does not pretend otherwise. It maps onto
-the interface the way Adminer's own Redis plugin does: one table called `data`
-whose columns are `key`, `type`, `ttl` and `value`, rows found with `SCAN`, and
-the numbered databases as schemas, so `#` moves between them. A value is shown as
+Redis is not relational and the driver does not pretend otherwise. It is fitted
+to the interface rather than the other way round: one table called `data` whose
+columns are `key`, `type`, `ttl` and `value`, rows found with `SCAN`, and the
+numbered databases as schemas, so `#` moves between them. A value is shown as
 its type allows - a string as it is, a list or set as its elements, a hash as
 `field=value` - and editing a cell writes `SET`, editing the ttl writes `EXPIRE`
 or `PERSIST`, deleting a row writes `DEL`. Filtering the key with `W` becomes the
@@ -249,8 +250,8 @@ dump (whole database or one table, structure and/or data) or CSV/TSV, and import
 of an SQL script or a CSV file. Commands: `:export`, `:dump`, `:limit`, `:text`,
 `:open`, `:check`, `:analyze`, `:vacuum`, `:q`.
 
-A batch behaves like Adminer's: each statement is reported separately, and a
-batch that leaves a transaction open is rolled back. A generated schema change
+A batch reports each statement separately, and one that leaves a transaction
+open is rolled back. A generated schema change
 stops at the first error, so its own `COMMIT` can never make half a rebuild
 permanent.
 
@@ -329,7 +330,7 @@ with `psql` doing the same.
   `:dump` before a risky change.
 * **A rebuild cannot recover what the pragmas do not report:** `CHECK`
   constraints, generated columns and collations are lost when a table is altered.
-  The form says so. Adminer has the same limitation on SQLite.
+  The form says so.
 * **A trigger is replayed as its own text**, so renaming a column a trigger
   mentions makes the alter fail - safely, with a rollback and the failing
   statement in the report. Drop the trigger, alter, recreate it.
