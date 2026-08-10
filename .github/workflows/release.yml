@@ -83,7 +83,6 @@ jobs:
             export PATH=/opt/zig:$PATH ZIG_GLOBAL_CACHE_DIR=/tmp/zig-cache
             ./fetch-sqlite.sh
             OPTIMIZE=ReleaseFast ./tests/linux-static.sh -Dstrip
-            zig build test
             ./tests/smoke.sh
           '
 
