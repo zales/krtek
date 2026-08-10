@@ -74,6 +74,9 @@ pub const Cell = struct {
 	}
 };
 
+/// A key column, and which cell of the row holds it.
+pub const Position = struct { name: []const u8, at: usize };
+
 pub const Row = struct {
 	cells: []Cell,
 	/// What addresses this row, when it can be addressed at all. Conditions
@@ -1007,7 +1010,6 @@ pub const App = struct {
 
 		// The cursor is closed, so the engine can be asked things again.
 		const skip: usize = if (hidden_key and count > 0) 1 else 0;
-		const Position = struct { name: []const u8, at: usize };
 		var keys: std.ArrayListUnmanaged(Position) = .empty;
 		if (hidden_key) {
 			try keys.append(arena, .{ .name = "__key", .at = 0 });
@@ -1032,29 +1034,17 @@ pub const App = struct {
 			self.editable = complete;
 		}
 
+		// The engine's own name for a hidden key, asked for once rather than per row.
+		var hidden_name: []const u8 = "";
+		if (hidden_key) {
+			const found = self.conn.rowKey(arena, from orelse .{ .name = "" }) catch database.RowKey{};
+			hidden_name = found.expression;
+		}
 		for (raw.items) |cells| {
-			var identity: ?[]const database.ask.Filter = null;
-			if (self.editable) {
-				var conditions: std.ArrayListUnmanaged(database.ask.Filter) = .empty;
-				for (keys.items, 0..) |key, n| {
-					// The hidden key keeps the engine's own name for it, which is a
-					// column as far as a condition is concerned: SQLite answers to
-					// "rowid" just as it answers to a real column.
-					var column = key.name;
-					if (hidden_key and n == 0) {
-						const found = self.conn.rowKey(arena, from orelse .{ .name = "" }) catch database.RowKey{};
-						if (found.expression.len != 0) {
-							column = found.expression;
-						}
-					}
-					const cell = cells[key.at];
-					try conditions.append(arena, if (cell.kind == .nul)
-						.{ .column = column, .op = .is_null }
-					else
-						.{ .column = column, .value = cell.text });
-				}
-				identity = conditions.items;
-			}
+			const identity: ?[]const database.ask.Filter = if (self.editable)
+				try identityOf(arena, keys.items, cells, hidden_name)
+			else
+				null;
 			try self.rows.append(self.allocator, .{ .cells = cells[skip..], .key = identity });
 		}
 		self.clampCursor();
@@ -1677,6 +1667,34 @@ pub const App = struct {
 		}) orelse return;
 		try self.reload();
 		self.say("{s} updated", .{column});
+	}
+
+	/// What addresses one row: each key column and the value this row has in it.
+	///
+	/// A NULL is `IS NULL` rather than `= NULL`, which matches nothing. The first
+	/// key column takes `hidden` as its name when there is one - the engine's own
+	/// expression for a row it can address without a real key, which is a column as
+	/// far as a condition is concerned: SQLite answers to "rowid" just as it answers
+	/// to a column of its own.
+	pub fn identityOf(
+		a: std.mem.Allocator,
+		keys: []const Position,
+		cells: []const Cell,
+		hidden: []const u8,
+	) ![]const database.ask.Filter {
+		var conditions: std.ArrayListUnmanaged(database.ask.Filter) = .empty;
+		for (keys, 0..) |key, n| {
+			const column = if (n == 0 and hidden.len != 0) hidden else key.name;
+			if (key.at >= cells.len) {
+				continue;
+			}
+			const cell = cells[key.at];
+			try conditions.append(a, if (cell.kind == .nul)
+				.{ .column = column, .op = .is_null }
+			else
+				.{ .column = column, .value = cell.text });
+		}
+		return conditions.items;
 	}
 
 	/// A copy of an identity that outlives the grid it came from: a form holds one

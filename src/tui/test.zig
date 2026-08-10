@@ -3,6 +3,7 @@ const std = @import("std");
 const term = @import("term.zig");
 const app = @import("app.zig");
 const fuzzy = @import("fuzzy.zig");
+const db = @import("db");
 
 // the DDL generator brings its own tests
 comptime {
@@ -66,6 +67,97 @@ test "page count rounds up" {
 	try std.testing.expectEqual(@as(usize, 3), app.divCeil(101, 50));
 	try std.testing.expectEqual(@as(usize, 2), app.divCeil(100, 50));
 	try std.testing.expectEqual(@as(usize, 0), app.divCeil(0, 50));
+}
+
+// --- the structured path: what the interface asks the drivers for ---
+
+test "the filter form's operators are the interface's own" {
+	try std.testing.expectEqual(db.ask.Op.eq, app.operatorOf("="));
+	try std.testing.expectEqual(db.ask.Op.ne, app.operatorOf("!="));
+	try std.testing.expectEqual(db.ask.Op.lt, app.operatorOf("<"));
+	try std.testing.expectEqual(db.ask.Op.le, app.operatorOf("<="));
+	try std.testing.expectEqual(db.ask.Op.gt, app.operatorOf(">"));
+	try std.testing.expectEqual(db.ask.Op.ge, app.operatorOf(">="));
+	try std.testing.expectEqual(db.ask.Op.like, app.operatorOf("LIKE"));
+	// `contains` is LIKE; the wildcards are put around the value, not here.
+	try std.testing.expectEqual(db.ask.Op.like, app.operatorOf("contains"));
+	try std.testing.expectEqual(db.ask.Op.is_null, app.operatorOf("IS NULL"));
+	try std.testing.expectEqual(db.ask.Op.not_null, app.operatorOf("IS NOT NULL"));
+	// Every operator the form offers is one the interface can express, so a new
+	// one cannot be added to the list and silently mean equality.
+	for (app.OPERATORS) |name| {
+		const op = app.operatorOf(name);
+		const unary = std.mem.startsWith(u8, name, "IS ");
+		try std.testing.expectEqual(!unary, op.takesValue());
+	}
+	// And anything else is an equality rather than a crash.
+	try std.testing.expectEqual(db.ask.Op.eq, app.operatorOf("nonsense"));
+}
+
+test "a row is addressed by its key columns, and a NULL by IS NULL" {
+	var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+	defer arena.deinit();
+	const a = arena.allocator();
+
+	// id=7, title='RUR', part=NULL - with the key over id and part.
+	const cells = [_]app.Cell{
+		.{ .text = "7", .kind = .int },
+		.{ .text = "RUR", .kind = .text },
+		.{ .text = "NULL", .kind = .nul },
+	};
+	const keys = [_]app.Position{
+		.{ .name = "id", .at = 0 },
+		.{ .name = "part", .at = 2 },
+	};
+	const identity = try app.App.identityOf(a, &keys, &cells, "");
+	try std.testing.expectEqual(@as(usize, 2), identity.len);
+	try std.testing.expectEqualStrings("id", identity[0].column);
+	try std.testing.expectEqualStrings("7", identity[0].value);
+	try std.testing.expectEqual(db.ask.Op.eq, identity[0].op);
+	// = NULL matches nothing, which would make the row unaddressable.
+	try std.testing.expectEqualStrings("part", identity[1].column);
+	try std.testing.expectEqual(db.ask.Op.is_null, identity[1].op);
+
+	// And it renders into the WHERE the engines used to be handed directly.
+	var sql: db.List = .empty;
+	defer sql.deinit(a);
+	try db.ask.renderChange(&sql, a, .{
+		.kind = .delete,
+		.table = .{ .name = "books" },
+		.where = identity,
+	}, .{});
+	try std.testing.expectEqualStrings(
+		"DELETE FROM \"books\" WHERE \"id\" = '7' AND \"part\" IS NULL",
+		sql.items,
+	);
+}
+
+test "a hidden key stands in for the first column, under the engine's own name" {
+	var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+	defer arena.deinit();
+	const a = arena.allocator();
+
+	const cells = [_]app.Cell{
+		.{ .text = "42", .kind = .int },
+		.{ .text = "x", .kind = .text },
+	};
+	const keys = [_]app.Position{.{ .name = "__key", .at = 0 }};
+	const identity = try app.App.identityOf(a, &keys, &cells, "rowid");
+	try std.testing.expectEqual(@as(usize, 1), identity.len);
+	try std.testing.expectEqualStrings("rowid", identity[0].column);
+	try std.testing.expectEqualStrings("42", identity[0].value);
+}
+
+test "a key that points past the row is left out rather than read" {
+	var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+	defer arena.deinit();
+	const cells = [_]app.Cell{.{ .text = "1", .kind = .int }};
+	const keys = [_]app.Position{
+		.{ .name = "id", .at = 0 },
+		.{ .name = "gone", .at = 9 },
+	};
+	const identity = try app.App.identityOf(arena.allocator(), &keys, &cells, "");
+	try std.testing.expectEqual(@as(usize, 1), identity.len);
 }
 
 // the driver layer brings its own tests
