@@ -162,6 +162,7 @@ pub fn main(init: std.process.Init) !void {
 		std.debug.print("paged: {d} records, {d} distinct\n", .{ seen_keys.items.len, distinct });
 	}
 
+	// How much talking all of the above took, where the driver counts it.
 	std.debug.print("settings:\n", .{});
 	for (try conn.settings(arena.allocator())) |setting| {
 		std.debug.print("  {s} = {s}\n", .{ setting.label, setting.value });

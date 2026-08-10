@@ -530,6 +530,9 @@ const Topic = struct {
 	name: []const u8,
 	internal: bool = false,
 	partitions: []Partition = &.{},
+	/// Whether the offsets below have been asked for since this description of the
+	/// cluster was made.
+	offsets_read: bool = false,
 };
 
 pub const Value = union(enum) {
@@ -616,9 +619,18 @@ pub const Db = struct {
 	/// One connection per broker, opened when a partition it leads is read from.
 	leaders: std.AutoHashMapUnmanaged(i32, Stream) = .empty,
 	brokers: std.ArrayListUnmanaged(Broker) = .empty,
-	/// Everything the brokers said, until the next statement.
+	/// Everything the brokers said about this statement, until the next one.
 	replies: std.heap.ArenaAllocator,
-	/// The cluster as it was last described, in `replies`.
+	/// And what they said about the cluster, which outlives a statement: the
+	/// topics and their partitions are asked about by everything the interface
+	/// draws, and asking the broker again for each of them is a round trip per
+	/// question rather than per change.
+	meta: std.heap.ArenaAllocator,
+	/// When that was, on the wall clock, and when the offsets in it were read.
+	/// Zero means "ask".
+	meta_at: i64 = 0,
+	offsets_at: i64 = 0,
+	/// The cluster as it was last described, in `meta`.
 	topics: []Topic = &.{},
 	host: List = .empty,
 	port: u16 = 9092,
@@ -627,6 +639,10 @@ pub const Db = struct {
 	last_error: List = .empty,
 	cluster_id: List = .empty,
 	correlation: i32 = 0,
+	/// How many requests have gone to the cluster on this connection. Reported by
+	/// the info view and by tests/dbcheck.zig, because "it asks too often" is a
+	/// claim and this is a number.
+	requests: usize = 0,
 	progress: ?db.Progress = null,
 	/// How to reach a broker: every connection to every one of them is made the
 	/// same way, so this is kept rather than the target it came from.
@@ -657,6 +673,7 @@ pub const Db = struct {
 			.allocator = allocator,
 			.stream = stream,
 			.replies = std.heap.ArenaAllocator.init(allocator),
+			.meta = std.heap.ArenaAllocator.init(allocator),
 		};
 		errdefer {
 			stream.close();
@@ -716,6 +733,7 @@ pub const Db = struct {
 		self.brokers.deinit(self.allocator);
 		self.stream.close();
 		self.replies.deinit();
+		self.meta.deinit();
 		self.host.deinit(self.allocator);
 		self.user.deinit(self.allocator);
 		self.password.deinit(self.allocator);
@@ -796,7 +814,14 @@ pub const Db = struct {
 		}
 		self.last_error.clearRetainingCapacity();
 		_ = self.replies.reset(.retain_capacity);
-		self.topics = &.{};
+	}
+
+	/// Throw the description of the cluster away, so the next question asks the
+	/// broker. Everything that changes what is there calls this: a topic created or
+	/// dropped, records produced or deleted, a leader that moved.
+	fn forget(self: *Db) void {
+		self.meta_at = 0;
+		self.offsets_at = 0;
 	}
 
 	fn keepGoing(self: *Db) bool {
@@ -819,6 +844,7 @@ pub const Db = struct {
 	fn call(self: *Db, stream: *Stream, api: Api, body: []const u8) CallError![]const u8 {
 		const arena = self.replies.allocator();
 		self.correlation += 1;
+		self.requests += 1;
 
 		var head: List = .empty;
 		defer head.deinit(self.allocator);
@@ -910,6 +936,7 @@ pub const Db = struct {
 		}
 		self.stream = stream;
 		self.arm(&self.stream);
+		self.forget();
 		try self.authenticate(&self.stream);
 		self.last_error.clearRetainingCapacity();
 	}
@@ -922,6 +949,7 @@ pub const Db = struct {
 			stream.close();
 		}
 		self.leaders.clearRetainingCapacity();
+		self.forget();
 		// The complaint that got us here is replaced by whatever happens next; if the
 		// retry works, the user should see no complaint at all.
 		const was = try self.allocator.dupe(u8, self.last_error.items);
@@ -1168,7 +1196,10 @@ pub const Db = struct {
 	/// Metadata: the brokers, and every topic with its partitions and leaders.
 	/// Kept in `replies`, so it is refreshed with every statement.
 	fn describeCluster(self: *Db) !void {
-		const arena = self.replies.allocator();
+		// Its own arena, reset here: this outlives the statement that asked for it.
+		_ = self.meta.reset(.retain_capacity);
+		self.topics = &.{};
+		const arena = self.meta.allocator();
 		var body: List = .empty;
 		defer body.deinit(self.allocator);
 		const write = Encoder{ .out = &body, .a = self.allocator };
@@ -1270,10 +1301,22 @@ pub const Db = struct {
 	/// ListOffsets for every partition of one topic, which is what a row count and
 	/// a page number are made of. -2 is the earliest offset Kafka still has, -1 the
 	/// next one to be written.
+	/// The first and last offset of every partition of one topic. Two requests per
+	/// partition, so the answer is kept for as long as the metadata is: the object
+	/// list asks for every topic and then the grid asks again for the one being
+	/// opened.
 	fn readOffsets(self: *Db, topic: *Topic) db.Error!void {
+		const now = wallMs();
+		if (self.offsets_at != 0 and now - self.offsets_at < META_MS and topic.offsets_read) {
+			return;
+		}
 		for (topic.partitions) |*partition| {
 			partition.earliest = try self.oneOffset(topic.name, partition, -2);
 			partition.latest = try self.oneOffset(topic.name, partition, -1);
+		}
+		topic.offsets_read = true;
+		if (self.offsets_at == 0) {
+			self.offsets_at = now;
 		}
 	}
 
@@ -1796,14 +1839,24 @@ pub const Db = struct {
 		return out.toOwnedSlice(allocator);
 	}
 
-	/// The metadata again, because a statement clears the arena it lives in.
+	/// What is in the cluster, from the broker or from the last few moments of
+	/// memory. Drawing one screen asks this a dozen times - the object list, the row
+	/// count, the structure, the grid - and the answer does not change between them.
 	fn refresh(self: *Db) db.Error!void {
+		const now = wallMs();
+		if (self.meta_at != 0 and now - self.meta_at < META_MS and self.topics.len != 0) {
+			return;
+		}
 		self.describeCluster() catch {
 			if (self.last_error.items.len == 0) {
 				self.remember("kafka stopped answering for its metadata");
 			}
 			return error.Driver;
 		};
+		self.meta_at = now;
+		// The partitions are new objects, so whatever was known about their offsets
+		// is not about these.
+		self.offsets_at = 0;
 	}
 
 	fn oneNumber(self: *Db, name: []const u8, number: i64) db.Error!Rows {
@@ -1871,6 +1924,8 @@ pub const Db = struct {
 		try write.int32(target.id);
 		try write.byteArray(batch);
 
+		// The offsets are about to be wrong, whether or not this succeeds.
+		self.forget();
 		const stream = try self.leader(target.leader);
 		const reply = self.call(stream, .produce, body.items) catch |err| {
 			// A connection that died before the request went out means the record was
@@ -2143,6 +2198,7 @@ pub const Db = struct {
 			partitions += topic.partitions.len;
 		}
 		try list.append(arena, .{ .label = "topics", .value = try std.fmt.allocPrint(arena, "{d}", .{self.topics.len}) });
+		try list.append(arena, .{ .label = "requests", .value = try std.fmt.allocPrint(arena, "{d}", .{self.requests}) });
 		try list.append(arena, .{ .label = "partitions", .value = try std.fmt.allocPrint(arena, "{d}", .{partitions}) });
 		return list.items;
 	}
@@ -2354,6 +2410,7 @@ pub const Db = struct {
 		try write.int32(15000); // timeout
 		try write.boolean(false); // validate only
 
+		self.forget();
 		const reply = try self.ask(.create_topics, body.items);
 		var read = Decoder{ .bytes = reply };
 		try self.readTopicResults(&read, true);
@@ -2372,6 +2429,7 @@ pub const Db = struct {
 		try write.string(name);
 		try write.int32(15000);
 
+		self.forget();
 		const reply = try self.ask(.delete_topics, body.items);
 		var read = Decoder{ .bytes = reply };
 		try self.readTopicResults(&read, false);
@@ -2444,6 +2502,7 @@ pub const Db = struct {
 		try write.int64(upto);
 		try write.int32(15000);
 
+		self.forget();
 		const stream = try self.leader(node);
 		const reply = self.call(stream, .delete_records, body.items) catch {
 			return error.Driver;
@@ -2867,6 +2926,11 @@ pub fn codecName(codec: Codec) []const u8 {
 		_ => "an unknown codec",
 	};
 }
+
+/// How long a description of the cluster is worth keeping. Long enough that one
+/// screen is drawn from one set of answers, short enough that a topic somebody else
+/// created shows up without being asked for.
+const META_MS: i64 = 2000;
 
 /// How much readable slack to leave after a compressed payload. A bit reader that
 /// runs off the end lands here rather than past the buffer.
@@ -4046,9 +4110,11 @@ pub fn fuzzBatches(allocator: std.mem.Allocator, input: []const u8) anyerror!voi
 		.allocator = allocator,
 		.stream = .{ .fd = -1 },
 		.replies = std.heap.ArenaAllocator.init(allocator),
+		.meta = std.heap.ArenaAllocator.init(allocator),
 	};
 	defer {
 		self.replies.deinit();
+		self.meta.deinit();
 		self.host.deinit(self.allocator);
 		self.label.deinit(self.allocator);
 		self.version_text.deinit(self.allocator);
@@ -4080,9 +4146,11 @@ fn fuzzOneBatch(input: []const u8) anyerror!void {
 		.allocator = std.testing.allocator,
 		.stream = .{ .fd = -1 },
 		.replies = std.heap.ArenaAllocator.init(std.testing.allocator),
+		.meta = std.heap.ArenaAllocator.init(std.testing.allocator),
 	};
 	defer {
 		self.replies.deinit();
+		self.meta.deinit();
 		self.host.deinit(self.allocator);
 		self.label.deinit(self.allocator);
 		self.version_text.deinit(self.allocator);

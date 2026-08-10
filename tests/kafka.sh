@@ -134,6 +134,17 @@ docker exec "$NAME" bash -c 'for i in $(seq -w 1 12); do echo "k$i:zaznam-$i"; d
 	/opt/kafka/bin/kafka-console-producer.sh --bootstrap-server localhost:9092 --topic pages \
 	  --property parse.key=true --property key.separator=:' >/dev/null 2>&1
 check "pages neither overlap nor skip" "kafka://127.0.0.1:9093" "paged: 12 records, 12 distinct" pages
+
+# One screen is drawn from one description of the cluster. dbcheck asks for
+# everything the interface asks for - the objects, a row count, the structure, the
+# rows, and every page - and the driver counts what that took. Without the cache the
+# same run was 86 requests; the ceiling here is loose enough not to be brittle and
+# tight enough to notice a driver that has gone back to asking per question.
+asked=$(zig build dbcheck -- "kafka://127.0.0.1:9093" pages 2>&1 | sed -n 's/.*requests = \([0-9]*\).*/\1/p' | tail -1)
+if [ -z "$asked" ] || [ "$asked" -gt 40 ]; then
+	fail "one screen took $asked requests, which is too many"
+fi
+echo "ok: one screen is $asked requests, not one per question"
 check "every partition is counted" "kafka://127.0.0.1:9093" "orders rows~9 exact=9"
 for codec in gzip snappy lz4 zstd; do
 	check "$codec unpacks" "kafka://127.0.0.1:9093" "c-$codec rows~3 exact=3"
