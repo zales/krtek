@@ -99,20 +99,23 @@ jobs:
           file zig-out/bin/krtek | tee links.txt
           grep -q "statically linked" links.txt
 
-      # And a check that it worked, because -Dcpu=baseline is one word and losing
-      # it would not be noticed until somebody else's machine died on it. SVE is
-      # what GitHub's arm64 runners emit; AVX-512 is the x86 equivalent.
-      - name: no instructions somebody's CPU might not have
+      # A check that -Dcpu=baseline is still there, since losing one word would
+      # not be noticed until somebody else's machine died on it: run the binary on
+      # an emulated processor without what this runner happens to have - qemu64 has
+      # no AVX, cortex-a72 no SVE.
+      #
+      # Behavioural on purpose. Grepping the disassembly for those instructions
+      # does not work: OpenSSL carries AVX-512 routines and picks them by CPUID at
+      # runtime, which is safe and would fail the grep. Running it is the question
+      # actually worth asking.
+      - name: it runs on a CPU without the runner's extras
         run: |
-          objdump -d zig-out/bin/krtek > dis.txt
-          # `! grep ...` would not fail the step unless it were the last line -
-          # errexit skips a command whose status is inverted - so ask outright.
-          if grep -qE "\b(ptrue|whilelo|cntb)\b" dis.txt; then
-            echo "::error::SVE instructions - built for the runner's CPU, not baseline"; exit 1
-          fi
-          if grep -qE "%zmm|\bvmovdqu64\b" dis.txt; then
-            echo "::error::AVX-512 instructions - built for the runner's CPU, not baseline"; exit 1
-          fi
+          sudo apt-get update -qq && sudo apt-get install -y -qq qemu-user
+          case "${{ matrix.arch }}" in
+            x86_64) qemu-x86_64 -cpu qemu64 zig-out/bin/krtek --help ;;
+            arm64) qemu-aarch64 -cpu cortex-a72 zig-out/bin/krtek --help ;;
+            *) echo "::error::no baseline CPU known for ${{ matrix.arch }}"; exit 1 ;;
+          esac
 
       - name: package
         run: |
