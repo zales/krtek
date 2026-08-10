@@ -80,8 +80,7 @@ jobs:
             mkdir -p /opt/zig && tar xJf /tmp/zig.tar.xz -C /opt/zig --strip-components=1
             export PATH=/opt/zig:$PATH ZIG_GLOBAL_CACHE_DIR=/tmp/zig-cache
             ./fetch-sqlite.sh
-            OPTIMIZE=ReleaseSafe ./tests/linux-static.sh 
-            zig build test
+            TEST=1 OPTIMIZE=ReleaseSafe ./tests/linux-static.sh
             ./tests/smoke.sh
           '
 

@@ -39,3 +39,9 @@ fi
 export PKG_CONFIG_PATH="$PREFIX/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
 zig build "-Doptimize=${OPTIMIZE:-ReleaseSafe}" -Dstatic -Dmariadb="$PREFIX" "$@"
 file zig-out/bin/krtek
+
+# The tests link the same libraries, so they need the same two flags - there is no
+# shared library here for a plain `zig build test` to find.
+if [ "${TEST:-0}" = "1" ]; then
+	zig build test -Dstatic -Dmariadb="$PREFIX"
+fi
