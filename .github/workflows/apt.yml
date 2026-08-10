@@ -1,0 +1,109 @@
+name: apt
+
+# The APT repository on GitHub Pages: https://zales.github.io/krtek
+#
+# It is built from the .deb files attached to the releases rather than from a
+# build, so it can be regenerated at any time without releasing anything - by
+# hand from the Actions tab, or automatically when a release is published. Every
+# release is fetched, so the repository keeps the older versions too and
+# `apt install krtek=0.4.0-1` works.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  apt:
+    runs-on: ubuntu-24.04
+    env:
+      # Empty unless the repository defines the secret; decides whether the
+      # metadata can be signed.
+      APT_GPG_PRIVATE_KEY: ${{ secrets.APT_GPG_PRIVATE_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - run: sudo apt-get update && sudo apt-get install -y dpkg-dev
+
+      # Every .deb of every release. --skip-existing so a tag that has no .deb
+      # (anything before v0.4.0) is not an error.
+      - name: the packages
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p public
+          for tag in $(gh release list --limit 100 --json tagName -q '.[].tagName'); do
+            gh release download "$tag" --pattern '*.deb' --dir public --skip-existing || true
+          done
+          ls -la public
+          test -n "$(ls public/*.deb 2>/dev/null)" || { echo "::error::no .deb in any release"; exit 1; }
+
+      - name: the index
+        run: |
+          cd public
+          touch .nojekyll   # or Pages would run Jekyll over it
+          # -m keeps every version of a package, not only the newest, so an
+          # older one can still be asked for by name and version.
+          dpkg-scanpackages -m . /dev/null > Packages
+          gzip -k -f Packages
+          {
+            echo "Origin: krtek"
+            echo "Label: krtek"
+            echo "Suite: stable"
+            echo "Codename: stable"
+            echo "Architectures: amd64 arm64"
+            echo "Components: main"
+            echo "Description: krtek - a database manager for the terminal"
+            echo "Date: $(date -Ru)"
+            echo "MD5Sum:"
+            for f in Packages Packages.gz; do
+              echo " $(md5sum "$f" | cut -d' ' -f1) $(stat -c%s "$f") $f"
+            done
+            echo "SHA256:"
+            for f in Packages Packages.gz; do
+              echo " $(sha256sum "$f" | cut -d' ' -f1) $(stat -c%s "$f") $f"
+            done
+          } > Release
+
+      # A signature makes the [trusted=yes] in the sources line unnecessary. To
+      # get one: gpg --quick-generate-key "krtek <you@example.com>" default default never
+      # then gh secret set APT_GPG_PRIVATE_KEY < <(gpg --armor --export-secret-keys KEYID)
+      - name: sign it
+        if: ${{ env.APT_GPG_PRIVATE_KEY != '' }}
+        run: |
+          echo "$APT_GPG_PRIVATE_KEY" | gpg --batch --import
+          key=$(gpg --list-secret-keys --with-colons | awk -F: '/^sec:/ {print $5; exit}')
+          test -n "$key" || { echo "::error::APT_GPG_PRIVATE_KEY imported no secret key"; exit 1; }
+          # Loopback pinentry: a runner has no tty for gpg to ask on.
+          sign() { gpg --batch --yes --pinentry-mode loopback --passphrase '' --default-key "$key" "$@"; }
+          cd public
+          sign --armor --detach-sign -o Release.gpg Release
+          sign --clearsign -o InRelease Release
+          gpg --export "$key" > krtek-archive-keyring.gpg
+          # A repository whose signature does not check out breaks apt update for
+          # everyone who already trusts the key, so it is checked before it goes out.
+          LC_ALL=C gpg --verify Release.gpg Release
+          LC_ALL=C gpg --verify InRelease
+          test -s krtek-archive-keyring.gpg
+
+      - name: say so when it is not signed
+        if: ${{ env.APT_GPG_PRIVATE_KEY == '' }}
+        run: |
+          echo "::warning::APT_GPG_PRIVATE_KEY is not set - publishing an UNSIGNED repository." \
+               "Clients need [trusted=yes], which turns off the check that a package is what it says."
+
+      # The landing page, and the screenshots it shows.
+      - name: the page
+        run: |
+          cp docs/index.html public/index.html
+          cp docs/*.svg public/
+
+      - uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./public
+          # The whole thing is rebuilt from the releases every time, so there is
+          # nothing worth keeping in the branch's history.
+          force_orphan: true

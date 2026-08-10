@@ -22,15 +22,33 @@ arrives wrong.
 
 ```sh
 brew install zales/krtek/krtek                    # macOS and Linux
-sudo dpkg -i krtek_*_amd64.deb                    # Debian, Ubuntu
+sudo apt install krtek                            # Debian, Ubuntu - after the two lines below
 tar xzf krtek-*.tar.gz && ./krtek-*/krtek         # anything else
 ```
 
-Every [release](https://github.com/zales/krtek/releases/latest) has all three for
-macOS and Linux on both architectures: a `.tar.gz`, a `.deb`, and the Homebrew
-formula it was built with. The `.deb` installs the binary, the man page and the
-copyright, and **Depends on nothing at all**, so it goes on any Debian or Ubuntu
-of any age.
+Debian and Ubuntu have an APT repository, so `apt upgrade` keeps krtek up to date
+like anything else:
+
+```sh
+echo "deb [trusted=yes] https://zales.github.io/krtek ./" | sudo tee /etc/apt/sources.list.d/krtek.list
+sudo apt update && sudo apt install krtek
+```
+
+`trusted=yes` is there because the metadata is not signed: it says do not check
+who built these packages. The checksums in the index are still checked. To sign
+them, put an armoured secret key in the `APT_GPG_PRIVATE_KEY` secret and
+[.github/workflows/apt.yml](.github/workflows/apt.yml) signs `Release`, publishes
+the public key beside it, and verifies its own signature before it goes out - then
+the sources line becomes
+`deb [signed-by=/etc/apt/keyrings/krtek.gpg] https://zales.github.io/krtek ./`.
+
+That repository is [GitHub Pages](https://zales.github.io/krtek), built from the
+`.deb` files attached to the releases rather than from a build, so it can be
+regenerated at any time and it keeps the older versions: `apt install krtek=0.4.0-1`
+works. Every [release](https://github.com/zales/krtek/releases/latest) also has the
+`.tar.gz`, the `.deb` and the Homebrew formula for macOS and Linux on both
+architectures. The `.deb` installs the binary, the man page and the copyright, and
+**Depends on nothing at all**, so it goes on any Debian or Ubuntu of any age.
 
 **It needs nothing installed.** SQLite, libpq, the MariaDB connector and OpenSSL
 are linked into the binary and Redis is spoken directly. The Linux builds are
@@ -230,8 +248,15 @@ formula from the checksums the archives were actually packaged with, so it canno
 name a checksum that does not exist; the release attaches it and, given a
 `TAP_TOKEN` secret that may push to `zales/homebrew-krtek`, commits it there as
 `Formula/krtek.rb`. That tap is what `brew install zales/krtek/krtek` reads.
-homebrew-core is a different matter: it wants a formula that builds from source, a
-public repository and a licence.
+homebrew-core is a different matter: it wants a formula that builds from source and
+would have to be worth its while.
+
+The APT repository is [.github/workflows/apt.yml](.github/workflows/apt.yml), which
+takes the `.deb` files off the releases - all of them, so nothing is lost - runs
+`dpkg-scanpackages` over the lot, writes the `Release` file, signs it if there is a
+key, and pushes the result to the `gh-pages` branch together with the landing page
+in [docs/index.html](docs/index.html). It runs when a release is published, and by
+hand from the Actions tab whenever the repository needs rebuilding.
 
 The copyright file spells out what is linked in, because a static binary carries
 other people's code: libpq under the PostgreSQL licence, the MariaDB connector
@@ -309,6 +334,7 @@ permanent.
 | `src/tui/keychain.zig` | the macOS keychain, through Security.framework |
 | `vendor/sqlite3.c` | the unmodified SQLite amalgamation, compiled by Zig's clang |
 | `packaging/` | the `.deb` and the Homebrew formula |
+| `docs/index.html` | the landing page, which is also the APT repository |
 | `docs/krtek.1` | the man page, installed by both of them |
 
 The libraries are SQLite (compiled in), libpq (linked) and
