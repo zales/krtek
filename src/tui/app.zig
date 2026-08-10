@@ -35,6 +35,29 @@ pub const SIDEBAR: usize = 26;
 
 pub const OPERATORS = [_][]const u8{ "=", "!=", "<", "<=", ">", ">=", "LIKE", "contains", "IS NULL", "IS NOT NULL" };
 
+/// What the filter form's operator means. `contains` is LIKE with the wildcards
+/// added for the user, which is done where the value is.
+pub fn operatorOf(text: []const u8) database.ask.Op {
+	const table = [_]struct { name: []const u8, op: database.ask.Op }{
+		.{ .name = "=", .op = .eq },
+		.{ .name = "!=", .op = .ne },
+		.{ .name = "<", .op = .lt },
+		.{ .name = "<=", .op = .le },
+		.{ .name = ">", .op = .gt },
+		.{ .name = ">=", .op = .ge },
+		.{ .name = "LIKE", .op = .like },
+		.{ .name = "contains", .op = .like },
+		.{ .name = "IS NULL", .op = .is_null },
+		.{ .name = "IS NOT NULL", .op = .not_null },
+	};
+	for (table) |entry| {
+		if (std.mem.eql(u8, entry.name, text)) {
+			return entry.op;
+		}
+	}
+	return .eq;
+}
+
 pub const Kind = enum { nul, int, float, text, blob };
 
 pub const Cell = struct {
@@ -53,7 +76,10 @@ pub const Cell = struct {
 
 pub const Row = struct {
 	cells: []Cell,
-	where: ?[]const u8, // identifies this row when it can be addressed
+	/// What addresses this row, when it can be addressed at all. Conditions
+	/// rather than a WHERE clause, so an engine that has no SQL can read the
+	/// values out of it instead of parsing them back out of a string.
+	key: ?[]const database.ask.Filter,
 };
 
 pub const Object = struct {
@@ -143,7 +169,11 @@ pub const App = struct {
 	pending: std.ArrayListUnmanaged(u8) = .empty,
 	marked: std.ArrayListUnmanaged(usize) = .empty, // row indexes ticked with space
 	hidden: std.ArrayListUnmanaged(usize) = .empty, // column indexes hidden from the grid
-	where_text: std.ArrayListUnmanaged(u8) = .empty, // the active WHERE, without the keyword
+	/// What the filter form put together: conditions an engine of any kind can
+	/// honour. The strings are owned.
+	conditions: std.ArrayListUnmanaged(database.ask.Filter) = .empty,
+	/// The raw box of the filter form, which only an engine with SQL can use.
+	where_text: std.ArrayListUnmanaged(u8) = .empty,
 	text_limit: usize = 44, // widest column in the grid
 	history: std.ArrayListUnmanaged([]const u8) = .empty,
 	reports: std.ArrayListUnmanaged(Report) = .empty,
@@ -257,6 +287,7 @@ pub const App = struct {
 		try self.setTable(null);
 		self.schema.clearRetainingCapacity();
 		try self.firstSchema();
+		self.clearConditions();
 		self.where_text.clearRetainingCapacity();
 		self.hidden.clearRetainingCapacity();
 		self.marked.clearRetainingCapacity();
@@ -566,6 +597,8 @@ pub const App = struct {
 		}
 		self.closeEditor();
 		self.hidden.deinit(self.allocator);
+		self.clearConditions();
+		self.conditions.deinit(self.allocator);
 		self.where_text.deinit(self.allocator);
 		self.closeForm();
 		for (self.history.items) |entry| {
@@ -741,6 +774,7 @@ pub const App = struct {
 		self.descending = false;
 		self.marked.clearRetainingCapacity();
 		self.hidden.clearRetainingCapacity();
+		self.clearConditions();
 		self.where_text.clearRetainingCapacity();
 		self.view = .grid;
 		try self.reload();
@@ -748,47 +782,35 @@ pub const App = struct {
 
 	pub fn reload(self: *App) !void {
 		const table = self.currentTable() orelse return;
-		var count_sql: std.ArrayListUnmanaged(u8) = .empty;
-		defer count_sql.deinit(self.allocator);
-		try count_sql.appendSlice(self.allocator, "SELECT count(*) FROM ");
-		try database.quoteTable(&count_sql, self.allocator, table);
-		try self.appendWhere(&count_sql, self.allocator);
-		self.total = if (self.where_text.items.len == 0)
+		self.total = if (!self.isFiltered())
 			(self.conn.rowCount(table) orelse 0)
 		else
-			(self.countMatching(count_sql.items) orelse 0);
+			(self.conn.count(self.filtered(table)) orelse 0);
 
 		const page_count = self.pages();
 		if (self.page >= page_count) {
 			self.page = page_count - 1;
 		}
 
-		// A key that is not part of SELECT * has to be asked for by name; that is
+		// A key that is not part of the row has to be asked for by name; that is
 		// what lets a table whose primary key is invisible still be edited.
 		var key_arena = std.heap.ArenaAllocator.init(self.allocator);
 		defer key_arena.deinit();
 		const key = self.conn.rowKey(key_arena.allocator(), table) catch database.RowKey{};
 		const hidden_key = key.hidden and key.expression.len != 0;
-		var sql: std.ArrayListUnmanaged(u8) = .empty;
-		defer sql.deinit(self.allocator);
-		try sql.appendSlice(self.allocator, "SELECT ");
+		var request = self.filtered(table);
 		if (hidden_key) {
-			try sql.appendSlice(self.allocator, key.expression);
-			try sql.appendSlice(self.allocator, " AS \"__key\", ");
+			request.extra = key.expression;
+			request.extra_as = "__key";
 		}
-		try sql.appendSlice(self.allocator, "* FROM ");
-		try database.quoteTable(&sql, self.allocator, table);
-		try self.appendWhere(&sql, self.allocator);
 		if (self.order) |column| {
-			try sql.appendSlice(self.allocator, " ORDER BY ");
-			try database.quoteName(&sql, self.allocator, column);
-			if (self.descending) {
-				try sql.appendSlice(self.allocator, " DESC");
-			}
+			request.order = column;
+			request.descending = self.descending;
 		}
-		try sql.print(self.allocator, " LIMIT {d} OFFSET {d}", .{ self.limit, self.page * self.limit });
+		request.limit = self.limit;
+		request.offset = self.page * self.limit;
 
-		self.load(sql.items, table, hidden_key) catch {
+		self.loadSelect(request, table, hidden_key) catch {
 			self.cols.clearRetainingCapacity();
 			self.rows.clearRetainingCapacity();
 			self.widths.clearRetainingCapacity();
@@ -798,26 +820,28 @@ pub const App = struct {
 		self.setTitle("{s}", .{table.name});
 	}
 
-	/// The count for a filtered view, which the driver's rowCount cannot know.
-	fn countMatching(self: *App, sql: []const u8) ?i64 {
-		var rows = (self.conn.query(sql, null) catch return null) orelse return null;
-		defer rows.close();
-		if (!(rows.next() catch return null)) {
-			return null;
-		}
-		return switch (rows.value(0)) {
-			.int => |v| v,
-			.float => |v| @intFromFloat(v),
-			.text => |t| std.fmt.parseInt(i64, t, 10) catch null,
-			else => null,
+	/// The table as the grid is looking at it: whatever the filter row says, and
+	/// nothing else. The page, the order and the hidden key are added by whoever
+	/// needs them, because a count wants none of the three.
+	fn filtered(self: *App, table: database.Table) database.ask.Select {
+		return .{
+			.table = table,
+			.where = self.conditions.items,
+			.where_text = self.where_text.items,
 		};
 	}
 
-	fn appendWhere(self: *App, out: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator) !void {
-		if (self.where_text.items.len != 0) {
-			try out.appendSlice(a, " WHERE ");
-			try out.appendSlice(a, self.where_text.items);
+	/// Whether the grid is showing part of a table rather than all of it.
+	pub fn isFiltered(self: *App) bool {
+		return self.conditions.items.len != 0 or self.where_text.items.len != 0;
+	}
+
+	fn clearConditions(self: *App) void {
+		for (self.conditions.items) |condition| {
+			self.allocator.free(condition.column);
+			self.allocator.free(condition.value);
 		}
+		self.conditions.clearRetainingCapacity();
 	}
 
 	pub fn isHidden(self: *App, column: usize) bool {
@@ -884,18 +908,8 @@ pub const App = struct {
 			if (index >= self.rows.items.len) {
 				continue;
 			}
-			const where = self.rows.items[index].where orelse continue;
-			var sql: std.ArrayListUnmanaged(u8) = .empty;
-			defer sql.deinit(self.allocator);
-			try sql.appendSlice(self.allocator, "DELETE FROM ");
-			try database.quoteTable(&sql, self.allocator, table);
-			try sql.appendSlice(self.allocator, where);
-			const zero = try self.allocator.dupeZ(u8, sql.items);
-			defer self.allocator.free(zero);
-			self.conn.exec(zero) catch {
-				self.complain("{s}", .{self.conn.message()});
-				return;
-			};
+			const key = self.rows.items[index].key orelse continue;
+			try self.change(.{ .kind = .delete, .table = table, .where = key }) orelse return;
 			deleted += 1;
 		}
 		self.marked.clearRetainingCapacity();
@@ -904,16 +918,28 @@ pub const App = struct {
 		self.say("{d} row(s) deleted", .{deleted});
 	}
 
-	/// Run one statement and keep its rows as the grid contents. With
-	/// `hidden_rowid` the first column is the row's rowid and is not displayed.
-	/// Run one statement and keep its rows as the grid contents. With
-	/// `hidden_key` the first column addresses the row and is not displayed.
+	/// Put a cursor's rows on the grid. With `hidden_key` the first column
+	/// addresses the row and is not displayed.
 	///
 	/// The rows are read first and only then asked about: an engine that streams
 	/// results - PostgreSQL does - refuses another query while one is still open,
 	/// so the key lookup has to wait until the cursor is closed.
+	/// Rows for SQL the user wrote.
 	pub fn load(self: *App, sql: []const u8, source: ?database.Table, hidden_key: bool) !void {
 		_ = self.arena.reset(.retain_capacity);
+		var cursor = (try self.conn.query(sql, null)) orelse return;
+		return self.fill(&cursor, source, hidden_key);
+	}
+
+	/// Rows for a request the interface put together itself, which is how the grid
+	/// asks: no SQL is written, so an engine without SQL can answer it too.
+	pub fn loadSelect(self: *App, request: database.ask.Select, source: ?database.Table, hidden_key: bool) !void {
+		_ = self.arena.reset(.retain_capacity);
+		var cursor = (try self.conn.select(request)) orelse return;
+		return self.fill(&cursor, source, hidden_key);
+	}
+
+	fn fill(self: *App, cursor_in: *database.Rows, source: ?database.Table, hidden_key: bool) !void {
 		const arena = self.arena.allocator();
 		self.cols.clearRetainingCapacity();
 		self.widths.clearRetainingCapacity();
@@ -925,7 +951,7 @@ pub const App = struct {
 		var from: ?database.Table = source;
 		var count: usize = 0;
 		{
-			var cursor = (try self.conn.query(sql, null)) orelse return;
+			var cursor = cursor_in.*;
 			defer cursor.close();
 			count = cursor.columnCount();
 			const skip: usize = if (hidden_key and count > 0) 1 else 0;
@@ -1001,37 +1027,29 @@ pub const App = struct {
 		}
 
 		for (raw.items) |cells| {
-			var where: ?[]const u8 = null;
+			var identity: ?[]const database.ask.Filter = null;
 			if (self.editable) {
-				var clause: std.ArrayListUnmanaged(u8) = .empty;
-				try clause.appendSlice(arena, " WHERE ");
+				var conditions: std.ArrayListUnmanaged(database.ask.Filter) = .empty;
 				for (keys.items, 0..) |key, n| {
-					if (n != 0) {
-						try clause.appendSlice(arena, " AND ");
-					}
-					// The hidden key column keeps the engine's own expression.
+					// The hidden key keeps the engine's own name for it, which is a
+					// column as far as a condition is concerned: SQLite answers to
+					// "rowid" just as it answers to a real column.
+					var column = key.name;
 					if (hidden_key and n == 0) {
-						const expression = self.conn.rowKey(arena, from orelse .{ .name = "" }) catch database.RowKey{};
-						try clause.appendSlice(arena, if (expression.expression.len != 0) expression.expression else key.name);
-					} else {
-						try database.quoteName(&clause, arena, key.name);
+						const found = self.conn.rowKey(arena, from orelse .{ .name = "" }) catch database.RowKey{};
+						if (found.expression.len != 0) {
+							column = found.expression;
+						}
 					}
 					const cell = cells[key.at];
-					switch (cell.kind) {
-						.nul => try clause.appendSlice(arena, " IS NULL"),
-						.int, .float => {
-							try clause.appendSlice(arena, " = ");
-							try clause.appendSlice(arena, cell.text);
-						},
-						else => {
-							try clause.appendSlice(arena, " = ");
-							try database.quote(&clause, arena, cell.text);
-						},
-					}
+					try conditions.append(arena, if (cell.kind == .nul)
+						.{ .column = column, .op = .is_null }
+					else
+						.{ .column = column, .value = cell.text });
 				}
-				where = clause.items;
+				identity = conditions.items;
 			}
-			try self.rows.append(self.allocator, .{ .cells = cells[skip..], .where = where });
+			try self.rows.append(self.allocator, .{ .cells = cells[skip..], .key = identity });
 		}
 		self.clampCursor();
 	}
@@ -1365,12 +1383,7 @@ pub const App = struct {
 		const table = database.Table{ .schema = self.schema.items, .name = name };
 		var out: std.ArrayListUnmanaged(u8) = .empty;
 		defer out.deinit(self.allocator);
-		var sql: std.ArrayListUnmanaged(u8) = .empty;
-		defer sql.deinit(self.allocator);
-		try sql.appendSlice(self.allocator, "SELECT * FROM ");
-		try database.quoteTable(&sql, self.allocator, table);
-		try self.appendWhere(&sql, self.allocator);
-		var cursor = (try self.conn.query(sql.items, null)) orelse return;
+		var cursor = (try self.conn.select(self.filtered(table))) orelse return;
 		defer cursor.close();
 		for (0..cursor.columnCount()) |i| {
 			if (i != 0) {
@@ -1469,11 +1482,7 @@ pub const App = struct {
 		if (names.len == 0) {
 			return;
 		}
-		var sql: std.ArrayListUnmanaged(u8) = .empty;
-		defer sql.deinit(self.allocator);
-		try sql.appendSlice(self.allocator, "SELECT * FROM ");
-		try database.quoteTable(&sql, self.allocator, table);
-		var rows = (try self.conn.query(sql.items, null)) orelse return;
+		var rows = (try self.conn.select(.{ .table = table })) orelse return;
 		defer rows.close();
 
 		var first = true;
@@ -1534,15 +1543,24 @@ pub const App = struct {
 		}
 		const row = self.rows.items[self.cursor_row];
 		const table = self.currentTable() orelse return try arena.dupe(u8, row.cells[self.cursor_col].text);
-		const where = row.where orelse return try arena.dupe(u8, row.cells[self.cursor_col].text);
-		var sql: std.ArrayListUnmanaged(u8) = .empty;
-		defer sql.deinit(self.allocator);
-		try sql.appendSlice(self.allocator, "SELECT ");
-		try database.quoteName(&sql, self.allocator, self.cols.items[self.cursor_col]);
-		try sql.appendSlice(self.allocator, " FROM ");
-		try database.quoteTable(&sql, self.allocator, table);
-		try sql.appendSlice(self.allocator, where);
-		return try self.scalarText(arena, sql.items);
+		const key = row.key orelse return try arena.dupe(u8, row.cells[self.cursor_col].text);
+		const column = self.cols.items[self.cursor_col];
+		var cursor = (try self.conn.select(.{
+			.table = table,
+			.columns = &.{column},
+			.where = key,
+			.limit = 1,
+		})) orelse return null;
+		defer cursor.close();
+		if (!(try cursor.next())) {
+			return null;
+		}
+		return switch (cursor.value(0)) {
+			.null => null,
+			.int => |value| try std.fmt.allocPrint(arena, "{d}", .{value}),
+			.float => |value| try std.fmt.allocPrint(arena, "{d}", .{value}),
+			.text, .blob => |bytes| try arena.dupe(u8, bytes),
+		};
 	}
 
 	/// What the copy keys put in the clipboard. The value under the cursor is
@@ -1636,31 +1654,47 @@ pub const App = struct {
 		if (self.noRowHere()) {
 			return;
 		}
-		const where = self.rows.items[self.cursor_row].where orelse return;
+		const key = self.rows.items[self.cursor_row].key orelse return;
 		const column = self.cols.items[self.cursor_col];
-
-		var sql: std.ArrayListUnmanaged(u8) = .empty;
-		defer sql.deinit(self.allocator);
-		try sql.appendSlice(self.allocator, "UPDATE ");
-		try database.quoteTable(&sql, self.allocator, table);
-		try sql.appendSlice(self.allocator, " SET ");
-		try database.quoteName(&sql, self.allocator, column);
-		try sql.appendSlice(self.allocator, " = ");
-		if (std.mem.eql(u8, text, "NULL")) {
-			try sql.appendSlice(self.allocator, "NULL");
-		} else {
-			try database.quote(&sql, self.allocator, text);
-		}
-		try sql.appendSlice(self.allocator, where);
-
-		const zero = try self.allocator.dupeZ(u8, sql.items);
-		defer self.allocator.free(zero);
-		self.conn.exec(zero) catch {
-			self.complain("{s}", .{self.conn.message()});
-			return;
-		};
+		try self.change(.{
+			.kind = .update,
+			.table = table,
+			.cells = &.{.{
+				.column = column,
+				.value = if (std.mem.eql(u8, text, "NULL")) null else text,
+			}},
+			.where = key,
+		}) orelse return;
 		try self.reload();
 		self.say("{s} updated", .{column});
+	}
+
+	/// A copy of an identity that outlives the grid it came from: a form holds one
+	/// while the rows underneath are reloaded.
+	fn copyFilters(a: std.mem.Allocator, filters: []const database.ask.Filter) ![]const database.ask.Filter {
+		const out = try a.alloc(database.ask.Filter, filters.len);
+		for (filters, out) |filter, *copy| {
+			copy.* = .{
+				.column = try a.dupe(u8, filter.column),
+				.op = filter.op,
+				.value = try a.dupe(u8, filter.value),
+				.as_text = filter.as_text,
+			};
+		}
+		return out;
+	}
+
+	/// Make one change and remember what it took, so ctrl+p in the editor brings
+	/// it back - as SQL where there is SQL, and as the engine's own command
+	/// otherwise. Null when the engine refused, with the reason already on screen.
+	fn change(self: *App, request: database.ask.Change) !?void {
+		self.conn.apply(request) catch {
+			self.complain("{s}", .{self.conn.message()});
+			return null;
+		};
+		if (self.conn.wording(self.allocator, .{ .change = request })) |words| {
+			self.history.append(self.allocator, words) catch self.allocator.free(words);
+		} else |_| {}
 	}
 
 	pub fn deleteRow(self: *App) !void {
@@ -1668,18 +1702,8 @@ pub const App = struct {
 		if (self.noRowHere()) {
 			return;
 		}
-		const where = self.rows.items[self.cursor_row].where orelse return;
-		var sql: std.ArrayListUnmanaged(u8) = .empty;
-		defer sql.deinit(self.allocator);
-		try sql.appendSlice(self.allocator, "DELETE FROM ");
-		try database.quoteTable(&sql, self.allocator, table);
-		try sql.appendSlice(self.allocator, where);
-		const zero = try self.allocator.dupeZ(u8, sql.items);
-		defer self.allocator.free(zero);
-		self.conn.exec(zero) catch {
-			self.complain("{s}", .{self.conn.message()});
-			return;
-		};
+		const key = self.rows.items[self.cursor_row].key orelse return;
+		try self.change(.{ .kind = .delete, .table = table, .where = key }) orelse return;
 		try self.loadObjects();
 		try self.reload();
 		self.say("row deleted", .{});
@@ -1708,6 +1732,7 @@ pub const App = struct {
 		try self.setTable(null);
 		self.schema.clearRetainingCapacity();
 		try self.firstSchema();
+		self.clearConditions();
 		self.where_text.clearRetainingCapacity();
 		self.hidden.clearRetainingCapacity();
 		self.marked.clearRetainingCapacity();
@@ -1737,6 +1762,7 @@ pub const App = struct {
 		try self.schema.appendSlice(self.allocator, name);
 		try self.setTable(null);
 		self.selected = 0;
+		self.clearConditions();
 		self.where_text.clearRetainingCapacity();
 		try self.loadObjects();
 		if (self.current()) |object| {
@@ -1824,8 +1850,8 @@ pub const App = struct {
 		}, "ctrl+s saves, esc cancels, an empty value with a DEFAULT is left to the engine");
 		form.table = try form.arena.allocator().dupe(u8, table.name);
 		if (mode == .edit) {
-			form.where = if (self.rows.items[self.cursor_row].where) |w|
-				try form.arena.allocator().dupe(u8, w)
+			form.key = if (self.rows.items[self.cursor_row].key) |key|
+				try copyFilters(form.arena.allocator(), key)
 			else
 				null;
 		}
@@ -2131,8 +2157,24 @@ pub const App = struct {
 		const a = arena.allocator();
 		var sql: std.ArrayListUnmanaged(u8) = .empty;
 
+		if (form.purpose == .row) {
+			const request = try self.rowChange(a, form);
+			const inserted = request.kind == .insert;
+			self.closeForm();
+			try self.change(request) orelse return;
+			try self.loadObjects();
+			try self.reload();
+			if (inserted) {
+				self.say("row inserted", .{});
+			} else {
+				self.say("row updated", .{});
+			}
+			return;
+		}
+
 		switch (form.purpose) {
-			.row => try self.buildRow(&sql, a, form),
+			// Handled above, before the form was closed.
+			.row => unreachable,
 			.create_table, .alter_table => try self.buildTable(&sql, a, form),
 			.index => {
 				var columns: std.ArrayListUnmanaged([]const u8) = .empty;
@@ -2319,55 +2361,52 @@ pub const App = struct {
 			.rename_table => if (renamed) |value| try self.openTable(value),
 			.create_table, .copy_table, .view => self.say("created", .{}),
 			.alter_table, .foreign_key, .index => try self.reload(),
-			.row => try self.reload(),
 			else => {},
 		}
 	}
 
-	/// INSERT or UPDATE from the row form.
-	fn buildRow(self: *App, sql: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, form: *Form.Form) !void {
+	/// The row form as a change: which columns it sets, to what, and which row it
+	/// is about. A number goes in as it stands so the engine sees a number, and a
+	/// value left empty where the column has a default is left out altogether -
+	/// which is how a new row gets its own id.
+	///
+	/// Everything is copied into `a`, because the form is closed before the change
+	/// is made and its own memory goes with it.
+	fn rowChange(self: *App, a: std.mem.Allocator, form: *Form.Form) !database.ask.Change {
 		const columns = try self.columnDefs(a, form.table);
-		var names: std.ArrayListUnmanaged([]const u8) = .empty;
-		var values: std.ArrayListUnmanaged([]const u8) = .empty;
+		var cells: std.ArrayListUnmanaged(database.ask.Cell) = .empty;
 		for (columns, 0..) |column, i| {
 			const value_field = form.field(i * 2) orelse continue;
 			const null_field = form.field(i * 2 + 1) orelse continue;
-			var literal: std.ArrayListUnmanaged(u8) = .empty;
+			const text = value_field.text.items;
 			if (null_field.on) {
-				try literal.appendSlice(a, "NULL");
-			} else if (value_field.text.items.len == 0 and form.where == null and
+				try cells.append(a, .{ .column = column.name, .value = null });
+				continue;
+			}
+			if (text.len == 0 and form.key == null and
 				(column.dflt != null or (column.pk and std.ascii.indexOfIgnoreCase(column.type, "INT") != null)))
 			{
-				continue; // let SQLite apply the default or the next rowid
-			} else if (isNumeric(column.type) and value_field.text.items.len != 0) {
-				try literal.appendSlice(a, value_field.text.items);
-				if (!looksNumeric(value_field.text.items)) {
-					literal.clearRetainingCapacity();
-					try database.quote(&literal, a, value_field.text.items);
-				}
-			} else {
-				try database.quote(&literal, a, value_field.text.items);
+				continue; // leave it to the engine: a default, or the next id
 			}
-			try names.append(a, column.name);
-			try values.append(a, literal.items);
+			// A number is written as it stands rather than quoted, so a column with
+			// a numeric type is given a number - unless what was typed is not one,
+			// and then it is quoted and the engine may complain about it.
+			const numeric = isNumeric(column.type) and text.len != 0 and looksNumeric(text);
+			try cells.append(a, .{
+				.column = try a.dupe(u8, column.name),
+				.value = try a.dupe(u8, text),
+				.raw = numeric,
+			});
 		}
-		if (form.where) |where| {
-			try sql.appendSlice(a, "UPDATE ");
-			try database.quoteName(sql, a, form.table);
-			try sql.appendSlice(a, " SET ");
-			for (names.items, 0..) |name, i| {
-				if (i != 0) {
-					try sql.appendSlice(a, ", ");
-				}
-				try database.quoteName(sql, a, name);
-				try sql.appendSlice(a, " = ");
-				try sql.appendSlice(a, values.items[i]);
-			}
-			try sql.appendSlice(a, where);
-			try sql.appendSlice(a, ";\n");
-			return;
-		}
-		try self.conn.ddl().insertRow(sql, a, .{ .schema = self.schema.items, .name = form.table }, names.items, values.items);
+		return .{
+			.kind = if (form.key == null) .insert else .update,
+			.table = .{
+				.schema = try a.dupe(u8, self.schema.items),
+				.name = try a.dupe(u8, form.table),
+			},
+			.cells = cells.items,
+			.where = if (form.key) |key| try copyFilters(a, key) else &.{},
+		};
 	}
 
 	/// CREATE TABLE, or a rebuild when altering.
@@ -2412,40 +2451,32 @@ pub const App = struct {
 	}
 
 	fn applyFilter(self: *App, form: *Form.Form) !void {
+		self.clearConditions();
 		self.where_text.clearRetainingCapacity();
 		var i: usize = 0;
 		while (i < 9) : (i += 3) {
 			const column = form.valueOf(i);
 			const operator = form.valueOf(i + 1);
 			const value = form.valueOf(i + 2);
-			const unary = std.mem.startsWith(u8, operator, "IS ");
-			if (column.len == 0 or (value.len == 0 and !unary)) {
+			const op = operatorOf(operator);
+			if (column.len == 0 or (value.len == 0 and op.takesValue())) {
 				continue;
 			}
-			if (self.where_text.items.len != 0) {
-				try self.where_text.appendSlice(self.allocator, " AND ");
-			}
-			try database.quoteName(&self.where_text, self.allocator, column);
-			if (unary) {
-				try self.where_text.print(self.allocator, " {s}", .{operator});
-			} else if (std.mem.eql(u8, operator, "contains")) {
-				try self.where_text.appendSlice(self.allocator, " LIKE ");
-				var pattern: std.ArrayListUnmanaged(u8) = .empty;
-				defer pattern.deinit(self.allocator);
-				try pattern.append(self.allocator, '%');
-				try pattern.appendSlice(self.allocator, value);
-				try pattern.append(self.allocator, '%');
-				try database.quote(&self.where_text, self.allocator, pattern.items);
-			} else {
-				try self.where_text.print(self.allocator, " {s} ", .{operator});
-				try database.quote(&self.where_text, self.allocator, value);
-			}
+			// `contains` is LIKE with the wildcards put in for the user.
+			const wrapped = std.mem.eql(u8, operator, "contains");
+			const text = if (wrapped)
+				try std.fmt.allocPrint(self.allocator, "%{s}%", .{value})
+			else
+				try self.allocator.dupe(u8, value);
+			errdefer self.allocator.free(text);
+			try self.conditions.append(self.allocator, .{
+				.column = try self.allocator.dupe(u8, column),
+				.op = op,
+				.value = text,
+			});
 		}
 		const raw = form.valueOf(9);
 		if (raw.len != 0) {
-			if (self.where_text.items.len != 0) {
-				try self.where_text.appendSlice(self.allocator, " AND ");
-			}
 			try self.where_text.appendSlice(self.allocator, raw);
 		}
 		self.page = 0;
@@ -2454,7 +2485,7 @@ pub const App = struct {
 			self.complain("{s}", .{@errorName(err)});
 			return;
 		};
-		if (self.where_text.items.len == 0) {
+		if (!self.isFiltered()) {
 			self.say("filter cleared", .{});
 		} else {
 			self.say("{d} row(s) match", .{self.total});
@@ -2510,6 +2541,7 @@ pub const App = struct {
 		}
 		try sql.print(a, "\nLIMIT {d}", .{self.limit});
 		try self.setTable(null);
+		self.clearConditions();
 		self.where_text.clearRetainingCapacity();
 		self.hidden.clearRetainingCapacity();
 		self.page = 0;

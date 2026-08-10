@@ -450,7 +450,7 @@ fn grid(app: *App, size: Size, side: usize, rows: usize) void {
 		screen.style(.{ .fg = C.faint });
 		// An empty table and a filter that matches nothing look the same on
 		// screen, so say which one it is and what undoes it.
-		const filtered = app.where_text.items.len != 0;
+		const filtered = app.isFiltered();
 		_ = write(app, if (filtered)
 			"nothing matches the filter - W changes it, esc clears it"
 		else if (app.editable)

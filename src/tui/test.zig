@@ -11,6 +11,7 @@ comptime {
 	_ = @import("connections.zig");
 	_ = @import("editor.zig");
 	_ = @import("fuzzy.zig");
+	_ = @import("input.zig");
 }
 
 test "display width counts columns, not bytes" {

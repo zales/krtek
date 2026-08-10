@@ -16,6 +16,20 @@ pub const postgres = @import("postgres.zig");
 const mysql = @import("mysql.zig");
 const redis = @import("redis.zig");
 
+/// What the interface asks for, as a structure: see the file for why.
+pub const ask = @import("ask.zig");
+
+// Every driver brings its own tests. A plain import is not enough to run them -
+// analysis is lazy, so a file nothing reaches into contributes no tests - which
+// is why they are named here.
+comptime {
+	_ = ask;
+	_ = sqlite;
+	_ = postgres;
+	_ = mysql;
+	_ = redis;
+}
+
 pub const Error = error{ Driver, OutOfMemory };
 
 /// Called by a driver every so often while a statement is running. Returning
@@ -107,6 +121,11 @@ pub const Caps = struct {
 	/// What to cast a value to in order to compare it as text. Every engine
 	/// spells it differently and MySQL does not know `TEXT` as a cast target.
 	text_cast: []const u8 = "TEXT",
+	/// The engine takes SQL. When it does not, the interface asks for rows only
+	/// through `ask.Select` and changes them only through `ask.Change`, and what
+	/// the user writes in the editor is passed to the engine as its own kind of
+	/// command - which turns the editor into a console for it.
+	speaks_sql: bool = true,
 };
 
 /// One statement out of a batch, with the text the user wrote.
@@ -258,6 +277,78 @@ pub const Db = union(enum) {
 		}
 	}
 
+	// --- rows, asked for rather than written ---
+	//
+	// A driver that declares `select`, `apply` or `wording` answers the request
+	// itself; the rest are SQL engines and the request is rendered for them here,
+	// once, rather than in three drivers or in the interface.
+
+	/// Ask for rows.
+	pub fn select(self: Db, request: ask.Select) Error!?Rows {
+		switch (self) {
+			inline else => |driver| {
+				if (@hasDecl(@TypeOf(driver.*), "select")) {
+					return driver.select(request);
+				}
+				const sql = try self.wording(driver.allocator, .{ .select = request });
+				defer driver.allocator.free(sql);
+				return driver.query(sql, null);
+			},
+		}
+	}
+
+	/// How many rows match. Null when the engine cannot say, which is not the
+	/// same as none.
+	pub fn count(self: Db, request: ask.Select) ?i64 {
+		var counting = request;
+		counting.count = true;
+		var rows = (self.select(counting) catch return null) orelse return null;
+		defer rows.close();
+		if (!(rows.next() catch return null)) {
+			return null;
+		}
+		return switch (rows.value(0)) {
+			.int => |value| value,
+			.float => |value| @intFromFloat(value),
+			.text => |text| std.fmt.parseInt(i64, text, 10) catch null,
+			else => null,
+		};
+	}
+
+	/// Insert, update or delete one row.
+	pub fn apply(self: Db, change: ask.Change) Error!void {
+		switch (self) {
+			inline else => |driver| {
+				if (@hasDecl(@TypeOf(driver.*), "apply")) {
+					return driver.apply(change);
+				}
+				const sql = try self.wording(driver.allocator, .{ .change = change });
+				defer driver.allocator.free(sql);
+				return driver.exec(sql);
+			},
+		}
+	}
+
+	/// The request in the engine's own words, for the history, the report and the
+	/// clipboard: SQL where there is SQL, and `SCAN user:*` or `FETCH orders 0`
+	/// where there is not. Owned by the caller.
+	pub fn wording(self: Db, allocator: std.mem.Allocator, request: Request) Error![]u8 {
+		switch (self) {
+			inline else => |driver| {
+				if (@hasDecl(@TypeOf(driver.*), "wording")) {
+					return driver.wording(allocator, request);
+				}
+				var out: List = .empty;
+				errdefer out.deinit(allocator);
+				switch (request) {
+					.select => |value| try ask.renderSelect(&out, allocator, value, driver.caps()),
+					.change => |value| try ask.renderChange(&out, allocator, value, driver.caps()),
+				}
+				return out.toOwnedSlice(allocator);
+			},
+		}
+	}
+
 	pub fn inTransaction(self: Db) bool {
 		switch (self) {
 			inline else => |driver| return driver.inTransaction(),
@@ -347,6 +438,12 @@ pub const Db = union(enum) {
 			inline else => |driver| return driver.ddl(),
 		}
 	}
+};
+
+/// One request, for the sake of putting it into words.
+pub const Request = union(enum) {
+	select: ask.Select,
+	change: ask.Change,
 };
 
 /// A table, with the schema it lives in on the engines that have them.

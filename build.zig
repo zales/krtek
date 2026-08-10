@@ -116,6 +116,26 @@ pub fn build(b: *std.Build) void {
 	}
 	const tests = b.addTest(.{ .root_module = test_module });
 
+	// The drivers are a module of their own, and `zig test` only collects the
+	// tests of the module it is rooted in - importing it from the app's test file
+	// compiles it but runs none of its tests. So it gets an artifact of its own,
+	// which is how the tests in src/db came to run at all.
+	const db_test_module = b.createModule(.{
+		.root_source_file = b.path("src/db/db.zig"),
+		.target = target,
+		.optimize = optimize,
+		.link_libc = true,
+	});
+	db_test_module.addImport("sqlite", bindings);
+	db_test_module.addIncludePath(b.path("vendor"));
+	db_test_module.addCSourceFile(.{ .file = b.path("vendor/sqlite3.c"), .flags = &sqlite_flags });
+	linkPostgres(b, db_test_module, target, libpq, linking);
+	linkMysql(b, db_test_module, target, mariadb, linking);
+	if (static) {
+		linkClientLibraries(b, db_test_module);
+	}
+	const db_tests = b.addTest(.{ .root_module = db_test_module });
+
 	// A scratch program that talks to a real PostgreSQL, for development.
 	const check_module = b.createModule(.{
 		.root_source_file = b.path("tests/dbcheck.zig"),
@@ -150,7 +170,9 @@ pub fn build(b: *std.Build) void {
 	const kc = b.addExecutable(.{ .name = "kccheck", .root_module = kc_module });
 	b.step("kccheck", "Check the macOS keychain, by hand").dependOn(&b.addRunArtifact(kc).step);
 
-	b.step("test", "Unit tests of the terminal app").dependOn(&b.addRunArtifact(tests).step);
+	const test_step = b.step("test", "Unit tests of the terminal app and the drivers");
+	test_step.dependOn(&b.addRunArtifact(tests).step);
+	test_step.dependOn(&b.addRunArtifact(db_tests).step);
 }
 
 fn linkPostgres(b: *std.Build, module: *std.Build.Module, target: std.Build.ResolvedTarget, prefix: ?[]const u8, options: Linking) void {

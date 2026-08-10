@@ -4,6 +4,7 @@
 //! built out of it, so there is one set of key bindings to learn.
 
 const std = @import("std");
+const ask = @import("db").ask;
 const term = @import("term.zig");
 
 pub const Kind = union(enum) {
@@ -82,7 +83,9 @@ pub const Form = struct {
 	row_size: usize = 0,
 	/// Context for the submit handler.
 	table: []const u8 = "",
-	where: ?[]const u8 = null,
+	/// Which row the form is editing, when it edits one: the conditions that
+	/// address it. Null for a new row.
+	key: ?[]const ask.Filter = null,
 	extra: []const u8 = "",
 
 	pub fn init(allocator: std.mem.Allocator, purpose: Purpose, title: []const u8) Form {
