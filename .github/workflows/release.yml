@@ -40,7 +40,7 @@ jobs:
       - name: build
         run: |
           zig build -Doptimize=ReleaseFast -Dstatic -Dstrip \
-            -Dlibpq=$(brew --prefix libpq) -Dmariadb=$(brew --prefix mariadb-connector-c)
+            -Dlibpq="$(brew --prefix libpq)" -Dmariadb="$(brew --prefix mariadb-connector-c)"
 
       - name: nothing but the system is linked
         run: |
@@ -98,16 +98,41 @@ jobs:
           sudo chown -R "$(id -u):$(id -g)" zig-out
           ./tests/package.sh "${{ inputs.tag || github.ref_name }}" "linux-${{ matrix.arch }}"
 
+      # A .deb of the same binary, built here rather than in the container: dpkg
+      # is on the runner and Alpine has none. It depends on nothing, so it
+      # installs on any Debian or Ubuntu.
+      - name: deb
+        run: |
+          arch=${{ matrix.arch }}
+          ./packaging/deb.sh "${{ inputs.tag || github.ref_name }}" "${arch/x86_64/amd64}"
+
+      # Installing it is the only proof that matters, and a Debian container is
+      # not the machine that built it.
+      - name: the deb installs and runs
+        run: |
+          docker run --rm -v "$PWD:/src" -w /src debian:12 sh -euc '
+            dpkg -i krtek_*.deb
+            krtek --help | head -1
+            test -f /usr/share/man/man1/krtek.1.gz
+            dpkg -r krtek
+          '
+
       - uses: actions/upload-artifact@v4
         with:
           name: linux-${{ matrix.arch }}
           path: |
             *.tar.gz
             *.tar.gz.sha256
+            *.deb
+            *.deb.sha256
 
   release:
     needs: [macos, linux]
     runs-on: ubuntu-24.04
+    # At the job level so the step below can ask whether there is a token at all;
+    # the secrets context is not readable from a step's `if`.
+    env:
+      TAP_TOKEN: ${{ secrets.TAP_TOKEN }}
     steps:
       - uses: actions/checkout@v4
 
@@ -115,6 +140,14 @@ jobs:
         with:
           path: artifacts
           merge-multiple: true
+
+      # The formula names the checksums of the archives that were just built, so
+      # it can never point at something that is not there.
+      - name: the homebrew formula
+        run: |
+          version="${{ inputs.tag || github.ref_name }}"
+          ./packaging/formula.sh "$version" artifacts > artifacts/krtek.rb
+          cat artifacts/krtek.rb
 
       - name: release
         env:
@@ -132,10 +165,31 @@ jobs:
             echo "The macOS ones leave only Apple's own libraries dynamic."
             echo
             echo '```sh'
-            echo "tar xzf krtek-*.tar.gz && ./krtek-*/krtek --help"
+            echo "brew install zales/krtek/krtek                 # macOS and Linux"
+            echo "sudo dpkg -i krtek_*_amd64.deb                 # Debian, Ubuntu"
+            echo "tar xzf krtek-*.tar.gz && ./krtek-*/krtek      # anywhere else"
             echo '```'
           } > notes.md
           gh release create "$version" \
             --title "krtek $version" \
             --notes-file notes.md \
-            artifacts/*.tar.gz artifacts/*.tar.gz.sha256
+            artifacts/*.tar.gz artifacts/*.tar.gz.sha256 \
+            artifacts/*.deb artifacts/*.deb.sha256 \
+            artifacts/krtek.rb
+
+      # And into the tap, so `brew upgrade` sees it. Needs a token that may push
+      # to zales/homebrew-krtek; without one the formula is still on the release
+      # above and can be copied over by hand.
+      - name: the tap
+        if: ${{ env.TAP_TOKEN != '' }}
+        run: |
+          version="${{ inputs.tag || github.ref_name }}"
+          git clone --depth 1 "https://x-access-token:$TAP_TOKEN@github.com/zales/homebrew-krtek.git" tap
+          mkdir -p tap/Formula
+          cp artifacts/krtek.rb tap/Formula/krtek.rb
+          cd tap
+          git config user.name "github-actions"
+          git config user.email "github-actions@users.noreply.github.com"
+          git add Formula/krtek.rb
+          git diff --cached --quiet || git commit -m "krtek $version"
+          git push

@@ -18,14 +18,27 @@ modifier, so what a key produced is read from the text the terminal reports, not
 from the key code - otherwise every capital letter and every shifted symbol
 arrives wrong.
 
-A [release](https://github.com/zales/krtek/releases/latest) has a binary for
-macOS and Linux, on both architectures.
+## Installing it
+
+```sh
+brew install zales/krtek/krtek                    # macOS and Linux
+sudo dpkg -i krtek_*_amd64.deb                    # Debian, Ubuntu
+tar xzf krtek-*.tar.gz && ./krtek-*/krtek         # anything else
+```
+
+Every [release](https://github.com/zales/krtek/releases/latest) has all three for
+macOS and Linux on both architectures: a `.tar.gz`, a `.deb`, and the Homebrew
+formula it was built with. The `.deb` installs the binary, the man page and the
+copyright, and **Depends on nothing at all**, so it goes on any Debian or Ubuntu
+of any age.
 
 **It needs nothing installed.** SQLite, libpq, the MariaDB connector and OpenSSL
 are linked into the binary and Redis is spoken directly. The Linux builds are
 static against musl and run on any distribution - checked on Debian with nothing
 installed at all; the macOS builds leave only Apple's own libraries dynamic. That
 is `-Dstatic`.
+
+Or from source, which needs nothing but Zig 0.16:
 
 ```sh
 zig build -Doptimize=ReleaseSafe
@@ -208,6 +221,25 @@ undefined. Each archive is then handed to the linker as a *file* rather than as
 `-lname`: that keeps it out of its own search, which is where an archive quietly
 becomes a shared library and takes the whole binary with it.
 
+**Packaging** is two short scripts, both of which a release runs and CI rehearses.
+[packaging/deb.sh](packaging/deb.sh) wraps the built binary as a `.deb` - binary,
+man page, copyright, changelog, `Depends` on nothing - and needs `dpkg-deb`, which
+is why it runs on the machine that has it rather than in the Alpine container that
+built the binary. [packaging/formula.sh](packaging/formula.sh) writes the Homebrew
+formula from the checksums the archives were actually packaged with, so it cannot
+name a checksum that does not exist; the release attaches it and, given a
+`TAP_TOKEN` secret that may push to `zales/homebrew-krtek`, commits it there as
+`Formula/krtek.rb`. That tap is what `brew install zales/krtek/krtek` reads.
+homebrew-core is a different matter: it wants a formula that builds from source, a
+public repository and a licence.
+
+The copyright file spells out what is linked in, because a static binary carries
+other people's code: libpq under the PostgreSQL licence, the MariaDB connector
+under the LGPL, OpenSSL under Apache 2.0, SQLite in the public domain. The LGPL
+asks that its object code can be replaced, and it can - `zig build -Dstatic
+-Dmariadb=<prefix>` from this source is the whole procedure, which is what the
+copyright file says.
+
 ## What it does
 
 Everything is reachable from the key map, which `?` prints in full.
@@ -276,6 +308,8 @@ permanent.
 | `src/tui/connections.zig` | the saved connections and where each keeps its password |
 | `src/tui/keychain.zig` | the macOS keychain, through Security.framework |
 | `vendor/sqlite3.c` | the unmodified SQLite amalgamation, compiled by Zig's clang |
+| `packaging/` | the `.deb` and the Homebrew formula |
+| `docs/krtek.1` | the man page, installed by both of them |
 
 The libraries are SQLite (compiled in), libpq (linked) and
 [libvaxis](https://github.com/rockorager/libvaxis) for the terminal, which brings

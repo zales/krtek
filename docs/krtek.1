@@ -1,0 +1,135 @@
+.\" Manual page for krtek. Keep it in step with the usage text in
+.\" src/tui/main.zig and with the key map behind ? in the app.
+.TH KRTEK 1 "August 2026" "krtek" "User Commands"
+.SH NAME
+krtek \- a database manager for the terminal
+.SH SYNOPSIS
+.B krtek
+.RI [ database.db ]
+.br
+.B krtek
+.RI postgres://user@host:port/database
+.br
+.B krtek
+.RI mysql://user@host:port/database
+.br
+.B krtek
+.RI redis://host:port/index
+.br
+.B krtek
+.RB \(dq host=...\ dbname=...\ user=... \(dq
+.br
+.B krtek
+.RB [ \-h | \-\-help ]
+.SH DESCRIPTION
+.B krtek
+browses, edits, alters, dumps and imports a database on a text screen. It speaks
+SQLite, PostgreSQL, MySQL/MariaDB and Redis behind one interface, and needs
+nothing installed: the client libraries are linked into the binary.
+.PP
+With no argument it opens the list of saved connections, where
+.B enter
+connects,
+.B a
+adds,
+.B e
+edits and
+.B d
+removes one.
+.PP
+A SQLite file is opened through SQLite's own VFS: edits go straight to disk, the
+database is never held in memory, and there is nothing to save.
+.PP
+Press
+.B ?
+inside the app for the whole key map, and
+.B ctrl+k
+for a command palette that finds a command by a few letters of its name and shows
+the key that runs it.
+.SH OPTIONS
+.TP
+.BR \-h ", " \-\-help
+Print the usage and exit. There are no other options: everything else is done
+inside the app.
+.SH KEYS
+A few worth knowing before the first run.
+.TP
+.B ?
+The key map.
+.TP
+.B ctrl+k
+The command palette.
+.TP
+.B enter
+Open what is under the cursor; in the object list, the table.
+.TP
+.B s
+Write SQL.
+.BR ctrl+s " runs it, " ctrl+p " walks the history."
+.TP
+.B S
+The structure of the table: columns, indexes, foreign keys.
+.TP
+.B i
+Insert a row.
+.BR e " edits the one under the cursor, " d " deletes it."
+.TP
+.B W
+Filter the rows.
+.BR o " sorts by the column under the cursor."
+.TP
+.B C
+Copy: then
+.BR c " for the cell, " r " for the row, " p " for the page as CSV, " s
+for the last statement. It goes through OSC 52, so it reaches the clipboard over
+ssh and inside tmux.
+.TP
+.B ctrl+c
+Give up on a statement that is taking too long. The connection stays usable.
+.TP
+.B q
+Quit.
+.SH PASSWORDS
+A password is asked for when the server wants one, and kept only where the
+connection says: nowhere, the configuration file, or - on macOS - the login
+keychain. An engine's own store works as it always did:
+.BR PGPASSWORD ,
+.IR ~/.pgpass ,
+.IR ~/.my.cnf .
+.SH FILES
+.TP
+.I ~/.config/krtek/connections
+The saved connections, one
+.RI \(dq name<TAB>target \(dq
+line each, readable and editable by hand. A password kept in the file is on that
+line and the file is mode 0600.
+.SH ENVIRONMENT
+.TP
+.B KRTEK_THEME
+.BR light " or " dark
+to settle the colours by hand. Without it the terminal is asked what its
+background is.
+.TP
+.B XDG_CONFIG_HOME
+Where the
+.I krtek
+configuration directory lives, if not
+.IR ~/.config .
+.TP
+.BR PGPASSWORD ", " PGSSLMODE ", ..."
+Read by libpq, as usual.
+.SH EXIT STATUS
+.TP
+.B 0
+Normal exit, including
+.BR \-\-help .
+.TP
+.B 1
+The connection could not be made. The reason is on standard error.
+.SH SEE ALSO
+.BR sqlite3 (1),
+.BR psql (1),
+.BR mysql (1),
+.BR redis-cli (1)
+.SH BUGS
+https://github.com/zales/krtek/issues

@@ -36,7 +36,7 @@ jobs:
       - name: build
         run: |
           zig build -Doptimize=ReleaseSafe -Dstatic \
-            -Dlibpq=$(brew --prefix libpq) -Dmariadb=$(brew --prefix mariadb-connector-c)
+            -Dlibpq="$(brew --prefix libpq)" -Dmariadb="$(brew --prefix mariadb-connector-c)"
 
       # Nothing of the client libraries may be left as a runtime dependency: that
       # is the whole point of -Dstatic, and it is easy to lose by accident.
@@ -46,7 +46,7 @@ jobs:
           ! grep -qE "libpq|mariadb|libssl|libcrypto|homebrew|/usr/local" links.txt
 
       - name: test
-        run: zig build test -Dlibpq=$(brew --prefix libpq) -Dmariadb=$(brew --prefix mariadb-connector-c)
+        run: zig build test -Dlibpq="$(brew --prefix libpq)" -Dmariadb="$(brew --prefix mariadb-connector-c)"
 
       - name: it runs
         run: ./tests/smoke.sh
@@ -94,3 +94,17 @@ jobs:
       - name: and on a distribution that is not Alpine
         run: |
           docker run --rm -v "$PWD:/src" -w /src debian:12 ./zig-out/bin/krtek --help | head -2
+
+      # The .deb is built by the release, so build one here too: a tag should not
+      # be the first time anybody finds out that it does not install.
+      - name: the deb builds, installs and runs
+        run: |
+          sudo chown -R "$(id -u):$(id -g)" zig-out
+          arch=${{ matrix.arch }}
+          ./packaging/deb.sh 0.0.0 "${arch/x86_64/amd64}"
+          docker run --rm -v "$PWD:/src" -w /src debian:12 sh -euc '
+            dpkg -i krtek_*.deb
+            krtek --help | head -1
+            test -f /usr/share/man/man1/krtek.1.gz
+            dpkg -r krtek
+          '

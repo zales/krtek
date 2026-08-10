@@ -15,6 +15,8 @@ const usage =
 	\\
 	\\usage: krtek [database.db]
 	\\       krtek postgres://user@host:port/database
+	\\       krtek mysql://user@host:port/database
+	\\       krtek redis://host:port/index
 	\\       krtek "host=... dbname=... user=..."
 	\\
 	\\With no argument it opens the list of saved connections.
@@ -30,7 +32,9 @@ pub fn main(init: std.process.Init) !void {
 	const allocator = std.heap.c_allocator;
 	const args = try init.minimal.args.toSlice(init.arena.allocator());
 	if (args.len > 1 and (std.mem.eql(u8, args[1], "-h") or std.mem.eql(u8, args[1], "--help"))) {
-		std.debug.print(usage, .{});
+		// Asked-for output goes to stdout, so `krtek --help | grep` works and so
+		// does anything that reads it - the Homebrew formula's test, for one.
+		std.Io.File.stdout().writeStreamingAll(init.io, usage) catch {};
 		return;
 	}
 	// No argument is not an error: the app opens its list of connections.

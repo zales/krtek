@@ -11,5 +11,11 @@ __pycache__/
 !tests/sample.db
 *.sql
 links.txt
+# What packaging leaves behind: release archives, packages and their checksums.
+/krtek-*/
+/krtek*.tar.gz
+/krtek*.deb
+/krtek*.sha256
+/krtek.rb
 smoke.txt
 /.claude/settings.local.json
