@@ -12,3 +12,4 @@ __pycache__/
 *.sql
 links.txt
 smoke.txt
+/.claude/settings.local.json
