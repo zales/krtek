@@ -11,14 +11,16 @@
 //! with `SCAN`, and the numbered databases as schemas, so `#` switches between
 //! them. There is no DDL, no index beyond the key itself, and no foreign key.
 //!
-//! **The SQL the app generates is recognised, not parsed.** The interface asks
-//! for rows with `SELECT * FROM "data" …` and changes them with UPDATE, INSERT
-//! and DELETE, so those four shapes - and only those, in the form this app itself
-//! writes them - are turned into `SCAN`, `SET`, `EXPIRE` and `DEL`. Anything else
-//! is passed to Redis as a command line, which is what makes the SQL editor a
-//! Redis console: `KEYS user:*`, `HGETALL cart:7`, `INFO memory`. If a third
-//! engine like this one ever appears, the interface should grow a non-SQL path
-//! instead of every such driver growing a recogniser.
+//! **No SQL is involved.** The interface asks with `ask.Select` and changes rows
+//! with `ask.Change`, so this driver reads what it wants out of a structure -
+//! which table, which key, which value - and answers with `SCAN`, `SET`,
+//! `EXPIRE`, `RENAME` or `DEL`. It used to recognise the SQL the interface
+//! printed, which worked and was the wrong way round; `speaks_sql = false` is
+//! what replaced it.
+//!
+//! What the user types in the editor is still passed to Redis as a command line,
+//! which is what makes it a Redis console: `KEYS user:*`, `HGETALL cart:7`,
+//! `INFO memory`.
 
 const std = @import("std");
 const db = @import("db.zig");
@@ -93,13 +95,13 @@ pub const Db = struct {
 		self.count = self.databaseCount();
 		try self.host.appendSlice(allocator, parts.host);
 		self.port = parts.port;
-		self.rename();
+		self.relabel();
 		try self.version_text.print(allocator, "Redis {s}", .{self.fact("redis_version") orelse "?"});
 		return self;
 	}
 
 	/// `host:port/index`, as the header shows it.
-	fn rename(self: *Db) void {
+	fn relabel(self: *Db) void {
 		self.label.clearRetainingCapacity();
 		self.label.print(self.allocator, "{s}:{d}/{d}", .{ self.host.items, self.port, self.index }) catch {};
 	}
@@ -134,6 +136,8 @@ pub const Db = struct {
 			.databases = true,
 			.label = "Redis",
 			.text_cast = "TEXT",
+			// Redis is asked with a structure; only the console takes a command.
+			.speaks_sql = false,
 		};
 	}
 
@@ -281,7 +285,7 @@ pub const Db = struct {
 		rows.close();
 	}
 
-	/// Either one of the shapes this app writes, or a Redis command line.
+	/// A Redis command line, as typed in the editor.
 	pub fn query(self: *Db, sql: []const u8, rest: ?*[]const u8) db.Error!?db.Rows {
 		if (rest) |out| {
 			out.* = sql[sql.len..];
@@ -290,24 +294,154 @@ pub const Db = struct {
 		if (trimmed.len == 0) {
 			return null;
 		}
+		self.begin();
+		return .{ .redis = try self.console(trimmed) };
+	}
+
+	/// Rows for a request from the interface. There is one table and its rows are
+	/// keys, so a request is a `SCAN` with the pattern the filter on the key
+	/// implies - an equality is that key, a LIKE is the same pattern with Redis's
+	/// wildcards, and no filter at all is everything.
+	pub fn select(self: *Db, request: db.ask.Select) db.Error!?db.Rows {
+		self.begin();
+		if (!std.mem.eql(u8, request.table.name, TABLE)) {
+			self.remember("redis has one table, called data");
+			return error.Driver;
+		}
+		if (request.where_text.len != 0) {
+			self.remember("a raw WHERE is SQL - filter the key with = or LIKE, or use KEYS in the console");
+			return error.Driver;
+		}
+		const pattern = try self.match(request.where);
+		if (request.count) {
+			// Without a pattern Redis knows the answer; with one it has to be counted,
+			// and one page of keys is as far as that goes.
+			if (pattern.len == 1 and pattern[0] == '*') {
+				return .{ .redis = try self.oneNumber("keys", self.dbSize() orelse 0) };
+			}
+			var rows = try self.scan(pattern);
+			const found: i64 = @intCast(rows.rows.items.len);
+			rows.close();
+			return .{ .redis = try self.oneNumber("keys", found) };
+		}
+		return .{ .redis = try self.scan(pattern) };
+	}
+
+	/// Insert, update or delete one key.
+	pub fn apply(self: *Db, change: db.ask.Change) db.Error!void {
+		self.begin();
+		if (!std.mem.eql(u8, change.table.name, TABLE)) {
+			self.remember("redis has one table, called data");
+			return error.Driver;
+		}
+		const named = db.ask.only(change.where, KEY);
+		switch (change.kind) {
+			.delete => {
+				const key = named orelse {
+					self.remember("which key? redis addresses a row by its key");
+					return error.Driver;
+				};
+				_ = try self.deleteKey(key);
+			},
+			.insert => {
+				const key = flat(db.ask.valueOf(change.cells, KEY)) orelse "";
+				if (key.len == 0) {
+					self.remember("a redis row needs a key");
+					return error.Driver;
+				}
+				_ = try self.setValue(.{
+					.key = key,
+					.value = flat(db.ask.valueOf(change.cells, VALUE)) orelse "",
+					.ttl = flat(db.ask.valueOf(change.cells, TTL)),
+				});
+			},
+			.update => {
+				const key = named orelse {
+					self.remember("which key? redis addresses a row by its key");
+					return error.Driver;
+				};
+				// The columns that were set decide the command, and a row form sets
+				// all of them at once: the value first, then the ttl, and a changed
+				// key last because it moves what the others were about.
+				var did_something = false;
+				if (flat(db.ask.valueOf(change.cells, VALUE))) |value| {
+					_ = try self.setValue(.{ .key = key, .value = value });
+					did_something = true;
+				}
+				if (flat(db.ask.valueOf(change.cells, TTL))) |ttl| {
+					_ = try self.setTtl(.{ .key = key, .value = ttl });
+					did_something = true;
+				}
+				if (flat(db.ask.valueOf(change.cells, KEY))) |renamed| {
+					if (!std.mem.eql(u8, renamed, key)) {
+						_ = try self.rename(key, renamed);
+						did_something = true;
+					}
+				}
+				if (!did_something) {
+					self.remember("nothing to change: a redis row is its value, its ttl and its key");
+					return error.Driver;
+				}
+			},
+		}
+	}
+
+	/// What a request comes to as a command line, for the history and the report.
+	pub fn wording(self: *Db, allocator: std.mem.Allocator, request: db.Request) db.Error![]u8 {
+		var out: List = .empty;
+		errdefer out.deinit(allocator);
+		switch (request) {
+			.select => |value| {
+				const pattern = try self.match(value.where);
+				if (value.count) {
+					try out.appendSlice(allocator, "DBSIZE");
+				} else {
+					try out.print(allocator, "SCAN 0 MATCH {s} COUNT {d}", .{ pattern, PAGE });
+				}
+			},
+			.change => |value| {
+				const key = db.ask.only(value.where, KEY) orelse
+					flat(db.ask.valueOf(value.cells, KEY)) orelse "?";
+				switch (value.kind) {
+					.delete => try out.print(allocator, "DEL {s}", .{key}),
+					.insert, .update => {
+						if (flat(db.ask.valueOf(value.cells, VALUE))) |text| {
+							try out.print(allocator, "SET {s} {s}", .{ key, text });
+						}
+						if (flat(db.ask.valueOf(value.cells, TTL))) |ttl| {
+							if (out.items.len != 0) {
+								try out.appendSlice(allocator, "; ");
+							}
+							try out.print(allocator, "EXPIRE {s} {s}", .{ key, ttl });
+						}
+						if (out.items.len == 0) {
+							try out.print(allocator, "SET {s} ''", .{key});
+						}
+					},
+				}
+			},
+		}
+		return out.toOwnedSlice(allocator);
+	}
+
+	fn match(self: *Db, where: []const db.ask.Filter) db.Error![]const u8 {
+		return matchOf(self.replies.allocator(), where);
+	}
+
+	/// A key renamed, which is what changing the key of a row means.
+	fn rename(self: *Db, from: []const u8, to: []const u8) db.Error!void {
+		const reply = try self.command(&[_][]const u8{ "RENAME", from, to });
+		if (reply == .failure) {
+			self.remember(reply.failure);
+			return error.Driver;
+		}
+	}
+
+	/// A statement is starting: the spinner is told, and the last reply is let go.
+	fn begin(self: *Db) void {
 		self.starting();
 		self.last_error.clearRetainingCapacity();
 		_ = self.replies.reset(.retain_capacity);
-
-		if (Request.recognise(trimmed)) |request| {
-			return switch (request) {
-				.refuse => |why| {
-					self.remember(why);
-					return error.Driver;
-				},
-				.scan => |like| .{ .redis = try self.scan(try Request.glob(self.replies.allocator(), like)) },
-				.set => |pair| try self.setValue(pair),
-				.expire => |pair| try self.setTtl(pair),
-				.delete => |key| try self.deleteKey(key),
-				.count => .{ .redis = try self.oneNumber("keys", self.dbSize() orelse 0) },
-			};
-		}
-		return .{ .redis = try self.console(trimmed) };
 	}
 
 	/// A command typed in the editor, with its reply laid out as rows.
@@ -458,7 +592,7 @@ pub const Db = struct {
 		}
 	}
 
-	fn setValue(self: *Db, pair: Request.Pair) db.Error!?db.Rows {
+	fn setValue(self: *Db, pair: Pair) db.Error!?db.Rows {
 		const reply = try self.command(&[_][]const u8{ "SET", pair.key, pair.value });
 		if (reply == .failure) {
 			self.remember(reply.failure);
@@ -473,7 +607,7 @@ pub const Db = struct {
 		return .{ .redis = .{ .owner = self, .changed = 1 } };
 	}
 
-	fn setTtl(self: *Db, pair: Request.Pair) db.Error!?db.Rows {
+	fn setTtl(self: *Db, pair: Pair) db.Error!?db.Rows {
 		// A ttl of -1 in the grid means "no expiry", which is PERSIST.
 		const seconds = std.fmt.parseInt(i64, pair.value, 10) catch -1;
 		const reply = if (seconds < 0)
@@ -553,7 +687,7 @@ pub const Db = struct {
 			return error.Driver;
 		}
 		self.index = wanted;
-		self.rename();
+		self.relabel();
 	}
 
 	pub fn columns(_: *Db, arena: std.mem.Allocator, _: db.Table) db.Error![]db.Column {
@@ -822,212 +956,54 @@ pub const Ddl = struct {
 	}
 };
 
-// ------------------------------------------------------- reading the app's SQL
+// ---------------------------------------------------------------- patterns
 
-/// The four shapes this app writes, recognised well enough to answer them. Not a
-/// SQL parser: it knows the text `app.zig` generates and nothing else.
-pub const Request = union(enum) {
-	pub const Pair = struct { key: []const u8, value: []const u8, ttl: ?[]const u8 = null };
+pub const TABLE = "data";
+pub const KEY = "key";
+pub const VALUE = "value";
+pub const TTL = "ttl";
 
-	/// `SELECT * FROM "data" …` - with a MATCH pattern taken from a WHERE on the
-	/// key, if there is one.
-	scan: []const u8,
-	set: Pair,
-	expire: Pair,
-	delete: []const u8,
-	count: void,
-	/// Something the interface can build but Redis cannot answer.
-	refuse: []const u8,
+/// What one key is set to, and for how long.
+pub const Pair = struct { key: []const u8, value: []const u8, ttl: ?[]const u8 = null };
 
-	pub fn recognise(sql: []const u8) ?Request {
-		// The search screen builds one SELECT per column of every table and unions
-		// them; there is nothing to map that onto.
-		if (std.mem.indexOf(u8, sql, "UNION ALL") != null or std.mem.indexOf(u8, sql, "AS \"table\"") != null) {
-			return .{ .refuse = "searching every table is not a redis idea - filter the key with W, or use KEYS in the console" };
-		}
-		if (std.ascii.startsWithIgnoreCase(sql, "SELECT count(*)")) {
-			return .{ .count = {} };
-		}
-		if (std.ascii.startsWithIgnoreCase(sql, "SELECT ")) {
-			// Only a select over the pseudo table; anything else is a command.
-			if (std.mem.indexOf(u8, sql, "\"data\"") == null) {
-				return null;
-			}
-			return .{ .scan = pattern(sql) };
-		}
-		if (std.ascii.startsWithIgnoreCase(sql, "UPDATE ")) {
-			const key = valueOf(sql, "\"key\" = ") orelse return null;
-			if (valueOf(sql, "\"value\" = ")) |text| {
-				return .{ .set = .{ .key = key, .value = text } };
-			}
-			if (valueOf(sql, "\"ttl\" = ")) |text| {
-				return .{ .expire = .{ .key = key, .value = text } };
-			}
-			return null;
-		}
-		if (std.ascii.startsWithIgnoreCase(sql, "INSERT INTO ")) {
-			// `INSERT INTO "data" ("key", "value") VALUES ('a', 'b')` - matched by
-			// column name rather than by position, because the form may leave any of
-			// them out.
-			const open = std.mem.indexOf(u8, sql, "VALUES") orelse return null;
-			// From the bracket on, so the table - which may be `"0"."data"` - is not
-			// mistaken for the first column.
-			const bracket = std.mem.indexOfScalar(u8, sql[0..open], '(') orelse return null;
-			var names = identifiers(sql[bracket..open]);
-			var cells = Cells{ .rest = sql[open..] };
-			var key: ?[]const u8 = null;
-			var text: []const u8 = "";
-			var ttl: ?[]const u8 = null;
-			while (names.next()) |name| {
-				// Every column is in the statement, NULL included, so the two lists
-				// have to be walked together rather than by counting quotes.
-				const cell = cells.next() orelse break;
-				const value = switch (cell) {
-					.nul => continue,
-					.text => |bytes| bytes,
-				};
-				if (std.mem.eql(u8, name, "key")) {
-					key = value;
-				} else if (std.mem.eql(u8, name, "value")) {
-					text = value;
-				} else if (std.mem.eql(u8, name, "ttl")) {
-					ttl = value;
-				}
-			}
-			if (key == null or key.?.len == 0) {
-				return .{ .refuse = "a redis row needs a key" };
-			}
-			return .{ .set = .{ .key = key.?, .value = text, .ttl = ttl } };
-		}
-		if (std.ascii.startsWithIgnoreCase(sql, "DELETE FROM ")) {
-			const key = valueOf(sql, "\"key\" = ") orelse return null;
-			return .{ .delete = key };
-		}
-		return null;
+/// `%a_b%` as Redis spells it: `*a?b*`.
+pub fn glob(arena: std.mem.Allocator, like: []const u8) ![]const u8 {
+	var out: List = .empty;
+	for (like) |char| {
+		try out.append(arena, switch (char) {
+			'%' => '*',
+			'_' => '?',
+			else => char,
+		});
 	}
+	return out.items;
+}
 
-	/// The `MATCH` pattern for SCAN, out of a WHERE on the key: an equality is the
-	/// key itself, and a LIKE is translated - `%` is Redis's `*` and `_` its `?`.
-	/// Anything else scans everything.
-	fn pattern(sql: []const u8) []const u8 {
-		if (valueOf(sql, "\"key\" = ")) |key| {
-			return key;
+/// The MATCH pattern a filter on the key comes to: the key itself for an
+/// equality, the same pattern with Redis's wildcards for a LIKE, and everything
+/// for anything else - Redis can only match a glob, so a `<` on a key is not a
+/// filter it can push down.
+pub fn matchOf(arena: std.mem.Allocator, where: []const db.ask.Filter) ![]const u8 {
+	for (where) |filter| {
+		if (!std.mem.eql(u8, filter.column, KEY)) {
+			continue;
 		}
-		if (valueOf(sql, "\"key\" LIKE ")) |like| {
-			return like;
-		}
-		return "*";
+		return switch (filter.op) {
+			.eq => filter.value,
+			.like => try glob(arena, filter.value),
+			else => "*",
+		};
 	}
+	return "*";
+}
 
-	/// `%a_b%` as Redis spells it: `*a?b*`.
-	pub fn glob(arena: std.mem.Allocator, like: []const u8) ![]const u8 {
-		var out: List = .empty;
-		for (like) |char| {
-			try out.append(arena, switch (char) {
-				'%' => '*',
-				'_' => '?',
-				else => char,
-			});
-		}
-		return out.items;
-	}
-
-	/// The single quoted literal that follows `needle`.
-	fn valueOf(sql: []const u8, needle: []const u8) ?[]const u8 {
-		const at = std.mem.indexOf(u8, sql, needle) orelse return null;
-		var values = literals(sql[at + needle.len ..]);
-		return values.next();
-	}
-
-	/// The double quoted identifiers of a statement, in order.
-	const Identifiers = struct {
-		rest: []const u8,
-
-		fn next(self: *Identifiers) ?[]const u8 {
-			const open = std.mem.indexOfScalar(u8, self.rest, '"') orelse return null;
-			const close = std.mem.indexOfScalarPos(u8, self.rest, open + 1, '"') orelse return null;
-			const text = self.rest[open + 1 .. close];
-			self.rest = self.rest[close + 1 ..];
-			return text;
-		}
-	};
-
-	fn identifiers(sql: []const u8) Identifiers {
-		return .{ .rest = sql };
-	}
-
-	/// One value out of a `VALUES (…)` list: either a literal or SQL NULL.
-	const Cell = union(enum) { nul: void, text: []const u8 };
-
-	/// Walks a `VALUES (…)` list, keeping NULLs in place so the values stay lined
-	/// up with the column names.
-	const Cells = struct {
-		rest: []const u8,
-		started: bool = false,
-
-		fn next(self: *Cells) ?Cell {
-			if (!self.started) {
-				const open = std.mem.indexOfScalar(u8, self.rest, '(') orelse return null;
-				self.rest = self.rest[open + 1 ..];
-				self.started = true;
-			}
-			// Skip to the value itself.
-			var at: usize = 0;
-			while (at < self.rest.len and (self.rest[at] == ' ' or self.rest[at] == ',')) : (at += 1) {}
-			if (at >= self.rest.len or self.rest[at] == ')') {
-				return null;
-			}
-			if (self.rest[at] != '\'') {
-				const stop = std.mem.indexOfAnyPos(u8, self.rest, at, ",)") orelse self.rest.len;
-				const word = std.mem.trim(u8, self.rest[at..stop], " ");
-				self.rest = self.rest[stop..];
-				return if (std.ascii.eqlIgnoreCase(word, "NULL")) .{ .nul = {} } else .{ .text = word };
-			}
-			const open = at;
-			at += 1;
-			while (at < self.rest.len) : (at += 1) {
-				if (self.rest[at] != '\'') {
-					continue;
-				}
-				if (at + 1 < self.rest.len and self.rest[at + 1] == '\'') {
-					at += 1;
-					continue;
-				}
-				const text = self.rest[open + 1 .. at];
-				self.rest = self.rest[at + 1 ..];
-				return .{ .text = text };
-			}
-			return null;
-		}
-	};
-
-	const Literals = struct {
-		rest: []const u8,
-
-		fn next(self: *Literals) ?[]const u8 {
-			const open = std.mem.indexOfScalar(u8, self.rest, '\'') orelse return null;
-			var at = open + 1;
-			while (at < self.rest.len) : (at += 1) {
-				if (self.rest[at] != '\'') {
-					continue;
-				}
-				// A doubled quote is one inside the string.
-				if (at + 1 < self.rest.len and self.rest[at + 1] == '\'') {
-					at += 1;
-					continue;
-				}
-				const text = self.rest[open + 1 .. at];
-				self.rest = self.rest[at + 1 ..];
-				return text;
-			}
-			return null;
-		}
-	};
-
-	fn literals(sql: []const u8) Literals {
-		return .{ .rest = sql };
-	}
-};
+/// A cell of a change that was actually given a value: a change may set a column
+/// to NULL, and for Redis that is the same as not setting it.
+fn flat(value: ??[]const u8) ?[]const u8 {
+	const inner = value orelse return null;
+	const text = inner orelse return null;
+	return text;
+}
 
 /// A command line as a list of arguments, with quotes honoured so a value may
 /// contain spaces.
@@ -1197,50 +1173,42 @@ test "a redis target is taken apart" {
 	try std.testing.expect(!owns("mysql://localhost/demo"));
 }
 
-test "the app's own SQL is recognised" {
-	const scan = Request.recognise("SELECT * FROM \"0\".\"data\" LIMIT 200").?;
-	try std.testing.expectEqualStrings("*", scan.scan);
+test "a filter on the key becomes a MATCH pattern" {
+	var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+	defer arena.deinit();
+	const a = arena.allocator();
 
-	const one = Request.recognise("SELECT * FROM \"data\" WHERE \"key\" = 'user:7'").?;
-	try std.testing.expectEqualStrings("user:7", one.scan);
+	try std.testing.expectEqualStrings("*", try matchOf(a, &.{}));
+	try std.testing.expectEqualStrings("user:7", try matchOf(a, &.{.{ .column = KEY, .value = "user:7" }}));
+	try std.testing.expectEqualStrings("*user*", try matchOf(a, &.{
+		.{ .column = KEY, .op = .like, .value = "%user%" },
+	}));
+	try std.testing.expectEqualStrings("user:?", try matchOf(a, &.{
+		.{ .column = KEY, .op = .like, .value = "user:_" },
+	}));
+	// Redis matches a glob and nothing else, so anything it cannot push down
+	// scans everything rather than quietly dropping rows.
+	try std.testing.expectEqualStrings("*", try matchOf(a, &.{
+		.{ .column = KEY, .op = .gt, .value = "user:1" },
+	}));
+	// A filter on another column is not a key pattern.
+	try std.testing.expectEqualStrings("*", try matchOf(a, &.{
+		.{ .column = VALUE, .value = "hello" },
+	}));
+}
 
-	const set = Request.recognise("UPDATE \"data\" SET \"value\" = 'hello' WHERE \"key\" = 'greeting'").?;
-	try std.testing.expectEqualStrings("greeting", set.set.key);
-	try std.testing.expectEqualStrings("hello", set.set.value);
-
-	const ttl = Request.recognise("UPDATE \"data\" SET \"ttl\" = '60' WHERE \"key\" = 'greeting'").?;
-	try std.testing.expectEqualStrings("60", ttl.expire.value);
-
-	const gone = Request.recognise("DELETE FROM \"data\" WHERE \"key\" = 'greeting'").?;
-	try std.testing.expectEqualStrings("greeting", gone.delete);
-
-	const added = Request.recognise("INSERT INTO \"data\" (\"key\", \"value\") VALUES ('a', 'b')").?;
-	try std.testing.expectEqualStrings("a", added.set.key);
-	try std.testing.expectEqualStrings("b", added.set.value);
-
-	// A NULL keeps its place, so the columns after it still line up.
-	const sparse = Request.recognise("INSERT INTO \"0\".\"data\" (\"key\", \"type\", \"ttl\", \"value\") VALUES ('k', NULL, NULL, 'v')").?;
-	try std.testing.expectEqualStrings("k", sparse.set.key);
-	try std.testing.expectEqualStrings("v", sparse.set.value);
-	try std.testing.expect(sparse.set.ttl == null);
-
-	// The table may be schema qualified, which is not a column.
-	const qualified = Request.recognise("INSERT INTO \"0\".\"data\" (\"key\", \"value\") VALUES ('k', 'v')").?;
-	try std.testing.expectEqualStrings("k", qualified.set.key);
-	try std.testing.expectEqualStrings("v", qualified.set.value);
-
-	// The columns are matched by name, so a form that leaves one out still works.
-	const with_ttl = Request.recognise("INSERT INTO \"data\" (\"key\", \"ttl\") VALUES ('a', '60')").?;
-	try std.testing.expectEqualStrings("a", with_ttl.set.key);
-	try std.testing.expectEqualStrings("", with_ttl.set.value);
-	try std.testing.expectEqualStrings("60", with_ttl.set.ttl.?);
-
-	// A row with no key is refused rather than writing an empty one.
-	try std.testing.expect(Request.recognise("INSERT INTO \"data\" (\"value\") VALUES ('b')").? == .refuse);
-
-	// A command is not SQL and is left alone.
-	try std.testing.expect(Request.recognise("HGETALL cart:7") == null);
-	try std.testing.expect(Request.recognise("SELECT 2") == null);
+test "a change says which columns it sets, and NULL is not one of them" {
+	const cells = [_]db.ask.Cell{
+		.{ .column = KEY, .value = "greeting" },
+		.{ .column = VALUE, .value = "hello" },
+		.{ .column = TTL, .value = null },
+	};
+	try std.testing.expectEqualStrings("greeting", flat(db.ask.valueOf(&cells, KEY)).?);
+	try std.testing.expectEqualStrings("hello", flat(db.ask.valueOf(&cells, VALUE)).?);
+	// Set to NULL, which for Redis is nothing to do.
+	try std.testing.expect(flat(db.ask.valueOf(&cells, TTL)) == null);
+	// Not in the change at all.
+	try std.testing.expect(flat(db.ask.valueOf(&cells, "type")) == null);
 }
 
 test "a command line is split with quotes honoured" {

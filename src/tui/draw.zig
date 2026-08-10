@@ -1210,7 +1210,11 @@ fn editorPanel(app: *App, size: Size, side: usize, rows: usize) void {
 		fill(app, ' ', width - hint);
 	}
 	screen.reset();
-	box(app, top, outer_left, outer_width, height, "SQL", "", C.accent);
+	// An engine without SQL gets its own name on the panel, because what is typed
+	// there is its command line and calling that SQL would be a lie.
+	const caps = app.conn.caps();
+	const title = if (caps.speaks_sql) "SQL" else if (caps.label.len != 0) caps.label else "command";
+	box(app, top, outer_left, outer_width, height, title, "", C.accent);
 
 	// The completion list, hanging under the word being completed.
 	if (editor.completing()) {

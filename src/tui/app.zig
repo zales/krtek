@@ -174,6 +174,9 @@ pub const App = struct {
 	conditions: std.ArrayListUnmanaged(database.ask.Filter) = .empty,
 	/// The raw box of the filter form, which only an engine with SQL can use.
 	where_text: std.ArrayListUnmanaged(u8) = .empty,
+	/// The last reload could not be answered, and has said why. Whoever asked for
+	/// it must not then report a count as though it had worked.
+	grid_failed: bool = false,
 	text_limit: usize = 44, // widest column in the grid
 	history: std.ArrayListUnmanaged([]const u8) = .empty,
 	reports: std.ArrayListUnmanaged(Report) = .empty,
@@ -810,10 +813,13 @@ pub const App = struct {
 		request.limit = self.limit;
 		request.offset = self.page * self.limit;
 
+		self.grid_failed = false;
 		self.loadSelect(request, table, hidden_key) catch {
 			self.cols.clearRetainingCapacity();
 			self.rows.clearRetainingCapacity();
 			self.widths.clearRetainingCapacity();
+			self.total = 0;
+			self.grid_failed = true;
 			self.complain("{s}", .{self.conn.message()});
 			return;
 		};
@@ -2485,6 +2491,9 @@ pub const App = struct {
 			self.complain("{s}", .{@errorName(err)});
 			return;
 		};
+		if (self.grid_failed) {
+			return; // the reason is already on screen
+		}
 		if (!self.isFiltered()) {
 			self.say("filter cleared", .{});
 		} else {
@@ -2494,6 +2503,13 @@ pub const App = struct {
 
 	/// Look for a string in every text-ish column of every table.
 	fn searchEverything(self: *App, needle: []const u8) !void {
+		// One SELECT per column of every table, unioned - which is SQL, and there is
+		// no honest way to put it to an engine that has none. Filtering one table
+		// works there, and says so.
+		if (!self.conn.caps().speaks_sql) {
+			self.complain("searching every table needs SQL - filter one table with W instead", .{});
+			return;
+		}
 		var arena = std.heap.ArenaAllocator.init(self.allocator);
 		defer arena.deinit();
 		const a = arena.allocator();
