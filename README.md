@@ -30,17 +30,17 @@ Debian and Ubuntu have an APT repository, so `apt upgrade` keeps krtek up to dat
 like anything else:
 
 ```sh
-echo "deb [trusted=yes] https://zales.github.io/krtek ./" | sudo tee /etc/apt/sources.list.d/krtek.list
+sudo install -d /etc/apt/keyrings
+sudo curl -fsSLo /etc/apt/keyrings/krtek.gpg https://zales.github.io/krtek/krtek-archive-keyring.gpg
+echo "deb [signed-by=/etc/apt/keyrings/krtek.gpg] https://zales.github.io/krtek ./" | sudo tee /etc/apt/sources.list.d/krtek.list
 sudo apt update && sudo apt install krtek
 ```
 
-`trusted=yes` is there because the metadata is not signed: it says do not check
-who built these packages. The checksums in the index are still checked. To sign
-them, put an armoured secret key in the `APT_GPG_PRIVATE_KEY` secret and
-[.github/workflows/apt.yml](.github/workflows/apt.yml) signs `Release`, publishes
-the public key beside it, and verifies its own signature before it goes out - then
-the sources line becomes
-`deb [signed-by=/etc/apt/keyrings/krtek.gpg] https://zales.github.io/krtek ./`.
+The metadata is signed, so apt checks it the way it checks any other repository -
+no `trusted=yes` anywhere. [.github/workflows/apt.yml](.github/workflows/apt.yml)
+signs `Release`, publishes the public key beside it, and verifies its own signature
+before it goes out, because a repository whose signature does not check out breaks
+`apt update` for everyone who already trusts the key.
 
 That repository is [GitHub Pages](https://zales.github.io/krtek), built from the
 `.deb` files attached to the releases rather than from a build, so it can be
@@ -247,14 +247,18 @@ built the binary. [packaging/formula.sh](packaging/formula.sh) writes the Homebr
 formula from the checksums the archives were actually packaged with, so it cannot
 name a checksum that does not exist; the release attaches it and, given a
 `TAP_TOKEN` secret that may push to `zales/homebrew-krtek`, commits it there as
-`Formula/krtek.rb`. That tap is what `brew install zales/krtek/krtek` reads.
+`Formula/krtek.rb`, and the release attaches it. The tap fetches it from there with
+a workflow of its own rather than being pushed to from here: that way it writes to
+itself with the token it already has, and no personal access token has to live in
+either repository as a secret. It is what `brew install zales/krtek/krtek` reads.
 homebrew-core is a different matter: it wants a formula that builds from source and
 would have to be worth its while.
 
 The APT repository is [.github/workflows/apt.yml](.github/workflows/apt.yml), which
 takes the `.deb` files off the releases - all of them, so nothing is lost - runs
 `dpkg-scanpackages` over the lot, writes the `Release` file, signs it if there is a
-key, and pushes the result to the `gh-pages` branch together with the landing page
+key - the `APT_GPG_PRIVATE_KEY` secret - and pushes the result to the `gh-pages`
+branch together with the landing page
 in [docs/index.html](docs/index.html). It runs when a release is published, and by
 hand from the Actions tab whenever the repository needs rebuilding.
 

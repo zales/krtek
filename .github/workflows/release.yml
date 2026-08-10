@@ -153,10 +153,6 @@ jobs:
   release:
     needs: [macos, linux]
     runs-on: ubuntu-24.04
-    # At the job level so the step below can ask whether there is a token at all;
-    # the secrets context is not readable from a step's `if`.
-    env:
-      TAP_TOKEN: ${{ secrets.TAP_TOKEN }}
     steps:
       - uses: actions/checkout@v4
 
@@ -201,22 +197,8 @@ jobs:
             artifacts/*.deb artifacts/*.deb.sha256 \
             artifacts/krtek.rb
 
-      # And into the tap, so `brew upgrade` sees it. Needs a token that may push
-      # to zales/homebrew-krtek; without one the formula is still on the release
-      # above and can be copied over by hand.
-      - name: the tap
-        if: ${{ env.TAP_TOKEN != '' }}
-        run: |
-          version="${{ inputs.tag || github.ref_name }}"
-          git clone --depth 1 "https://x-access-token:$TAP_TOKEN@github.com/zales/homebrew-krtek.git" tap
-          mkdir -p tap/Formula
-          cp artifacts/krtek.rb tap/Formula/krtek.rb
-          cd tap
-          git config user.name "github-actions"
-          git config user.email "github-actions@users.noreply.github.com"
-          git add Formula/krtek.rb
-          git diff --cached --quiet || git commit -m "krtek $version"
-          git push
+      # The tap picks the formula up from this release on its own - see the
+      # comment in packaging/formula.sh.
 
   # And the APT repository on GitHub Pages, from the .deb files the release just
   # attached. Called, not triggered: see the comment at the top of apt.yml.

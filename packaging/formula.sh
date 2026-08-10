@@ -8,7 +8,12 @@
 #
 # The archives hold one static binary each, so the formula installs rather than
 # builds: that is what a tap is for. homebrew-core would want to compile from
-# source, and would want the repository to be public and to have a licence.
+# source instead.
+#
+# The release attaches what this prints as krtek.rb, and the tap - zales/krtek,
+# the repository homebrew-krtek - fetches it from there hourly with a workflow of
+# its own. That way round on purpose: pushing into the tap from here would need a
+# personal access token kept as a secret, and the tap can already write to itself.
 set -e
 cd "$(dirname "$0")/.."
 

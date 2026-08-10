@@ -86,17 +86,19 @@ footer { margin-top: 3.5rem; padding-top: 1.5rem; border-top: 1px solid var(--li
 <p>This page is also the APT repository, so Debian and Ubuntu can install and
 upgrade krtek the ordinary way:</p>
 
-<pre><code>echo "deb [trusted=yes] https://zales.github.io/krtek ./" \
+<pre><code>sudo install -d /etc/apt/keyrings
+sudo curl -fsSLo /etc/apt/keyrings/krtek.gpg \
+  https://zales.github.io/krtek/krtek-archive-keyring.gpg
+echo "deb [signed-by=/etc/apt/keyrings/krtek.gpg] https://zales.github.io/krtek ./" \
   | sudo tee /etc/apt/sources.list.d/krtek.list
 sudo apt update
 sudo apt install krtek</code></pre>
 
-<p class="note"><code>trusted=yes</code> is there because the metadata is not
-signed yet. It says: do not check who made these packages. The checksums in the
-index are still checked, so a corrupted download is still caught - but if that
-trade is not for you, take the <code>.deb</code> from the
-<a href="https://github.com/zales/krtek/releases/latest">release</a> and check its
-<code>.sha256</code> yourself.</p>
+<p class="note">The metadata is signed, so apt checks it the way it checks Debian's
+own repositories - no <code>trusted=yes</code> anywhere. The key above is the one
+that signs it, and the build verifies its own signature before publishing, because a
+repository whose signature does not check out breaks <code>apt update</code> for
+everyone who already trusts it.</p>
 
 <h2>Homebrew</h2>
 
