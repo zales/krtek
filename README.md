@@ -404,6 +404,7 @@ permanent.
 | `src/db/ask.zig` | what the interface asks for, and the SQL it renders to |
 | `src/tui/keychain.zig` | the macOS keychain, through Security.framework |
 | `vendor/sqlite3.c` | the unmodified SQLite amalgamation, compiled by Zig's clang |
+| `src/db/kafka/` | the Kafka protocol, the codecs, the target and SCRAM - the parts with no connection in them |
 | `packaging/` | the `.deb` and the Homebrew formula |
 | `docs/index.html` | the landing page, which is also the APT repository |
 | `docs/krtek.1` | the man page, installed by both of them |

@@ -25,11 +25,64 @@
 //! Nothing here parses SQL: the interface asks with `ask.Select` and `ask.Change`
 //! (`speaks_sql = false`), and what the user types in the editor is a Kafka
 //! command line - `TOPICS`, `DESCRIBE orders`, `PRODUCE orders k v`.
+//!
+//! **What is in this file is the connection.** The parts that are not - what a
+//! request is made of, how a batch is unpacked, what a target says, how a SCRAM
+//! message is written - are files of their own under `kafka/`, because they take
+//! bytes and give bytes back and can be read, tested and fuzzed without a broker
+//! anywhere near them:
+//!
+//! * `kafka/wire.zig` - the APIs and their versions, the encoder and the decoder,
+//!   CRC-32C, murmur2, and what a broker's error codes mean.
+//! * `kafka/compress.zig` - gzip, snappy, lz4 and zstd, two of them written out.
+//! * `kafka/target.zig` - what `kafka+ssl://user@host:9093?mechanism=…` means.
+//! * `kafka/scram.zig` - the text half of SCRAM, against the RFC's own example.
 
 const std = @import("std");
 const db = @import("db.zig");
 
+/// The formats a batch can be packed with, and what a request is made of: two
+/// files that know nothing of a connection.
+pub const compress = @import("kafka/compress.zig");
+pub const wire = @import("kafka/wire.zig");
+pub const address = @import("kafka/target.zig");
+pub const scram = @import("kafka/scram.zig");
+
 const List = db.List;
+
+pub const Codec = compress.Codec;
+pub const decompress = compress.decompress;
+pub const MAX_UNPACKED = compress.MAX_UNPACKED;
+const codecName = compress.codecName;
+
+const Api = wire.Api;
+const versionOf = wire.versionOf;
+const Encoder = wire.Encoder;
+const Decoder = wire.Decoder;
+const DecodeError = wire.DecodeError;
+const crc32c = wire.crc32c;
+const murmur2 = wire.murmur2;
+const movedOn = wire.movedOn;
+const errorText = wire.errorText;
+
+pub const Mechanism = address.Mechanism;
+pub const Parts = address.Parts;
+pub const parse = address.parse;
+pub const owns = address.owns;
+
+// The files this driver is made of, named so that `zig build test` collects the
+// tests in them: analysis is lazy, and a file whose declarations are all reached
+// through an alias contributes none. Learned the same way twice.
+comptime {
+	_ = compress;
+	_ = wire;
+	_ = address;
+	_ = scram;
+}
+
+const fieldOf = scram.fieldOf;
+const escapeName = scram.escapeName;
+const randomBytes = scram.randomBytes;
 
 /// The pseudo-columns of every topic.
 pub const PARTITION = "partition";
@@ -40,6 +93,11 @@ pub const VALUE = "value";
 pub const HEADERS = "headers";
 
 const COLUMNS = [_][]const u8{ PARTITION, OFFSET, TIMESTAMP, KEY, VALUE, HEADERS };
+
+/// How long a description of the cluster is worth keeping. Long enough that one
+/// screen is drawn from one set of answers, short enough that a topic somebody else
+/// created shows up without being asked for.
+const META_MS: i64 = 2000;
 
 /// The end of the year 9999, in milliseconds. Past this a Kafka timestamp is not
 /// a time at all, whatever it says.
@@ -57,44 +115,6 @@ const WAIT_MS: i32 = 400;
 /// How much one Fetch may bring back, per partition and in total.
 const PARTITION_BYTES: i32 = 1 << 20;
 const FETCH_BYTES: i32 = 8 << 20;
-
-// ------------------------------------------------------------------ the APIs
-
-const Api = enum(i16) {
-	produce = 0,
-	fetch = 1,
-	list_offsets = 2,
-	metadata = 3,
-	api_versions = 18,
-	create_topics = 19,
-	delete_topics = 20,
-	delete_records = 21,
-	describe_configs = 32,
-	list_groups = 16,
-	sasl_handshake = 17,
-	sasl_authenticate = 36,
-};
-
-/// The version this driver speaks for each API: the last one before that API
-/// became flexible, so there are no compact strings or tagged fields anywhere.
-fn versionOf(api: Api) i16 {
-	return switch (api) {
-		.produce => 8,
-		.fetch => 11,
-		.list_offsets => 5,
-		.metadata => 7,
-		.api_versions => 0,
-		.create_topics => 3,
-		.delete_topics => 3,
-		.delete_records => 1,
-		.describe_configs => 2,
-		.list_groups => 2,
-		.sasl_handshake => 1,
-		.sasl_authenticate => 1,
-	};
-}
-
-pub const Error = db.Error;
 
 // -------------------------------------------------------------- the transport
 
@@ -321,189 +341,6 @@ fn connect(allocator: std.mem.Allocator, host: []const u8, port: u16) !Stream {
 	}
 	return error.Refused;
 }
-
-// --------------------------------------------------------------- encode/decode
-
-/// Big-endian, which is the only endianness Kafka has.
-const Encoder = struct {
-	out: *List,
-	a: std.mem.Allocator,
-
-	fn int8(self: Encoder, value: i8) !void {
-		try self.out.append(self.a, @bitCast(value));
-	}
-
-	fn int16(self: Encoder, value: i16) !void {
-		var buf: [2]u8 = undefined;
-		std.mem.writeInt(i16, &buf, value, .big);
-		try self.out.appendSlice(self.a, &buf);
-	}
-
-	fn int32(self: Encoder, value: i32) !void {
-		var buf: [4]u8 = undefined;
-		std.mem.writeInt(i32, &buf, value, .big);
-		try self.out.appendSlice(self.a, &buf);
-	}
-
-	fn int64(self: Encoder, value: i64) !void {
-		var buf: [8]u8 = undefined;
-		std.mem.writeInt(i64, &buf, value, .big);
-		try self.out.appendSlice(self.a, &buf);
-	}
-
-	fn boolean(self: Encoder, value: bool) !void {
-		try self.int8(if (value) 1 else 0);
-	}
-
-	fn string(self: Encoder, text: []const u8) !void {
-		try self.int16(@intCast(text.len));
-		try self.out.appendSlice(self.a, text);
-	}
-
-	/// A string that may be absent, which is a length of -1.
-	fn nullableString(self: Encoder, text: ?[]const u8) !void {
-		if (text) |bytes| {
-			try self.string(bytes);
-		} else {
-			try self.int16(-1);
-		}
-	}
-
-	fn byteArray(self: Encoder, value: ?[]const u8) !void {
-		if (value) |slice| {
-			try self.int32(@intCast(slice.len));
-			try self.out.appendSlice(self.a, slice);
-		} else {
-			try self.int32(-1);
-		}
-	}
-
-	fn array(self: Encoder, count: usize) !void {
-		try self.int32(@intCast(count));
-	}
-
-	fn varint(self: Encoder, value: i32) !void {
-		try self.varlong(value);
-	}
-
-	/// Zig-zag, as the record format uses it.
-	fn varlong(self: Encoder, value: i64) !void {
-		var rest: u64 = @bitCast((value << 1) ^ (value >> 63));
-		while (true) {
-			const byte: u8 = @intCast(rest & 0x7f);
-			rest >>= 7;
-			if (rest == 0) {
-				try self.out.append(self.a, byte);
-				return;
-			}
-			try self.out.append(self.a, byte | 0x80);
-		}
-	}
-};
-
-const DecodeError = error{ Malformed, OutOfMemory };
-
-const Decoder = struct {
-	bytes: []const u8,
-	at: usize = 0,
-
-	fn take(self: *Decoder, count: usize) DecodeError![]const u8 {
-		if (self.at + count > self.bytes.len) {
-			return error.Malformed;
-		}
-		defer self.at += count;
-		return self.bytes[self.at .. self.at + count];
-	}
-
-	fn int8(self: *Decoder) DecodeError!i8 {
-		const slice = try self.take(1);
-		return @bitCast(slice[0]);
-	}
-
-	fn int16(self: *Decoder) DecodeError!i16 {
-		return std.mem.readInt(i16, (try self.take(2))[0..2], .big);
-	}
-
-	fn int32(self: *Decoder) DecodeError!i32 {
-		return std.mem.readInt(i32, (try self.take(4))[0..4], .big);
-	}
-
-	fn int64(self: *Decoder) DecodeError!i64 {
-		return std.mem.readInt(i64, (try self.take(8))[0..8], .big);
-	}
-
-	fn uint32(self: *Decoder) DecodeError!u32 {
-		return std.mem.readInt(u32, (try self.take(4))[0..4], .big);
-	}
-
-	fn string(self: *Decoder) DecodeError![]const u8 {
-		const length = try self.int16();
-		if (length < 0) {
-			return "";
-		}
-		return self.take(@intCast(length));
-	}
-
-	fn nullableBytes(self: *Decoder) DecodeError!?[]const u8 {
-		const length = try self.int32();
-		if (length < 0) {
-			return null;
-		}
-		return try self.take(@intCast(length));
-	}
-
-	fn boolean(self: *Decoder) DecodeError!bool {
-		return (try self.int8()) != 0;
-	}
-
-	fn arrayLength(self: *Decoder) DecodeError!usize {
-		const count = try self.int32();
-		if (count < 0) {
-			return 0;
-		}
-		return @intCast(count);
-	}
-
-	fn varint(self: *Decoder) DecodeError!i32 {
-		const value = try self.varlong();
-		// A varint that does not fit is malformed, not a reason to abort: every
-		// length inside a record is one of these, so this is the first thing a
-		// corrupted batch reaches.
-		if (value > std.math.maxInt(i32) or value < std.math.minInt(i32)) {
-			return error.Malformed;
-		}
-		return @intCast(value);
-	}
-
-	fn varlong(self: *Decoder) DecodeError!i64 {
-		var shift: u6 = 0;
-		var raw: u64 = 0;
-		while (true) {
-			const byte = (try self.take(1))[0];
-			raw |= @as(u64, byte & 0x7f) << shift;
-			if (byte & 0x80 == 0) {
-				break;
-			}
-			if (shift >= 63) {
-				return error.Malformed;
-			}
-			shift += 7;
-		}
-		// Zig-zag back to a signed number, without arithmetic that can overflow:
-		// negating (raw >> 1) + 1 blows up when the halved value is i64's largest,
-		// which any ten bytes of 0xff off the wire produce. Two's complement does the
-		// same job with a mask - all ones for an odd number, all zeroes for an even
-		// one - and cannot.
-		const shifted: u64 = raw >> 1;
-		const mask: u64 = 0 -% (raw & 1);
-		return @bitCast(shifted ^ mask);
-	}
-
-	fn rest(self: *Decoder) []const u8 {
-		defer self.at = self.bytes.len;
-		return self.bytes[self.at..];
-	}
-};
 
 // ------------------------------------------------------------------ the cluster
 
@@ -2899,519 +2736,6 @@ pub fn likeMatch(pattern: []const u8, text: []const u8) bool {
 	return false;
 }
 
-// ------------------------------------------------------------------ the target
-
-pub fn owns(target: []const u8) bool {
-	for ([_][]const u8{ "kafka://", "kafka+ssl://", "kafka+tls://", "kafkas://" }) |prefix| {
-		if (std.mem.startsWith(u8, target, prefix)) {
-			return true;
-		}
-	}
-	return false;
-}
-
-/// Which SASL mechanism, in the names the protocol uses.
-pub const Mechanism = enum {
-	none,
-	plain,
-	scram_sha_256,
-	scram_sha_512,
-
-	pub fn name(self: Mechanism) []const u8 {
-		return switch (self) {
-			.none => "",
-			.plain => "PLAIN",
-			.scram_sha_256 => "SCRAM-SHA-256",
-			.scram_sha_512 => "SCRAM-SHA-512",
-		};
-	}
-
-	pub fn of(text: []const u8) ?Mechanism {
-		if (std.ascii.eqlIgnoreCase(text, "PLAIN")) {
-			return .plain;
-		}
-		if (std.ascii.eqlIgnoreCase(text, "SCRAM-SHA-256")) {
-			return .scram_sha_256;
-		}
-		if (std.ascii.eqlIgnoreCase(text, "SCRAM-SHA-512")) {
-			return .scram_sha_512;
-		}
-		return null;
-	}
-};
-
-pub const Parts = struct {
-	host: []const u8,
-	port: u16 = 9092,
-	user: []const u8 = "",
-	password: []const u8 = "",
-	mechanism: Mechanism = .none,
-	tls: bool = false,
-	/// Whether the broker's certificate has to check out. Off is for a cluster
-	/// with a certificate of its own making, and has to be asked for.
-	verify: bool = true,
-
-	pub fn deinit(self: Parts, allocator: std.mem.Allocator) void {
-		allocator.free(self.host);
-		allocator.free(self.user);
-		allocator.free(self.password);
-	}
-};
-
-/// `kafka://user:password@host:port?tls=1&mechanism=SCRAM-SHA-256`, with
-/// `kafka+ssl://` as a shorter way of asking for TLS and the port defaulting to
-/// 9092. A mechanism is only used when there is a user; with a user and no
-/// mechanism it is PLAIN, which is what most brokers are set up for.
-pub fn parse(allocator: std.mem.Allocator, target: []const u8) !Parts {
-	var rest = target;
-	var tls = false;
-	for ([_][]const u8{ "kafka+ssl://", "kafka+tls://", "kafkas://" }) |prefix| {
-		if (std.mem.startsWith(u8, rest, prefix)) {
-			rest = rest[prefix.len..];
-			tls = true;
-		}
-	}
-	if (std.mem.startsWith(u8, rest, "kafka://")) {
-		rest = rest["kafka://".len..];
-	}
-
-	// The query first, so a password with an @ or a : in it cannot be mistaken for
-	// part of the address.
-	var user: []const u8 = "";
-	var password: []const u8 = "";
-	var mechanism: ?Mechanism = null;
-	var verify = true;
-	if (std.mem.indexOfScalar(u8, rest, '?')) |mark| {
-		var options = std.mem.tokenizeScalar(u8, rest[mark + 1 ..], '&');
-		rest = rest[0..mark];
-		while (options.next()) |option| {
-			const equals = std.mem.indexOfScalar(u8, option, '=') orelse continue;
-			const key = option[0..equals];
-			const value = option[equals + 1 ..];
-			if (std.mem.eql(u8, key, "password")) {
-				password = value;
-			} else if (std.mem.eql(u8, key, "user") or std.mem.eql(u8, key, "username")) {
-				user = value;
-			} else if (std.mem.eql(u8, key, "mechanism") or std.mem.eql(u8, key, "sasl")) {
-				mechanism = Mechanism.of(value);
-			} else if (std.mem.eql(u8, key, "tls") or std.mem.eql(u8, key, "ssl")) {
-				tls = !std.mem.eql(u8, value, "0");
-			} else if (std.mem.eql(u8, key, "insecure")) {
-				verify = std.mem.eql(u8, value, "0");
-			}
-		}
-	}
-	// A path is not part of the address: Kafka has no database to name.
-	if (std.mem.indexOfScalar(u8, rest, '/')) |slash| {
-		rest = rest[0..slash];
-	}
-	if (std.mem.lastIndexOfScalar(u8, rest, '@')) |at| {
-		const userinfo = rest[0..at];
-		rest = rest[at + 1 ..];
-		if (std.mem.indexOfScalar(u8, userinfo, ':')) |colon| {
-			user = userinfo[0..colon];
-			password = userinfo[colon + 1 ..];
-		} else {
-			user = userinfo;
-		}
-	}
-
-	var host = rest;
-	var port: u16 = if (tls) 9093 else 9092;
-	if (std.mem.lastIndexOfScalar(u8, rest, ':')) |colon| {
-		host = rest[0..colon];
-		port = std.fmt.parseInt(u16, rest[colon + 1 ..], 10) catch port;
-	}
-	if (host.len == 0) {
-		host = "127.0.0.1";
-	}
-	return .{
-		.host = try allocator.dupe(u8, host),
-		.port = port,
-		.user = try unescape(allocator, user),
-		.password = try unescape(allocator, password),
-		.mechanism = if (user.len == 0) .none else (mechanism orelse .plain),
-		.tls = tls,
-		.verify = verify,
-	};
-}
-
-/// %20 and the like, as a URL carries them.
-fn unescape(allocator: std.mem.Allocator, text: []const u8) ![]const u8 {
-	var out: List = .empty;
-	errdefer out.deinit(allocator);
-	var at: usize = 0;
-	while (at < text.len) {
-		if (text[at] == '%' and at + 2 < text.len) {
-			const high = std.fmt.charToDigit(text[at + 1], 16) catch {
-				try out.append(allocator, text[at]);
-				at += 1;
-				continue;
-			};
-			const low = std.fmt.charToDigit(text[at + 2], 16) catch {
-				try out.append(allocator, text[at]);
-				at += 1;
-				continue;
-			};
-			try out.append(allocator, high * 16 + low);
-			at += 3;
-			continue;
-		}
-		try out.append(allocator, text[at]);
-		at += 1;
-	}
-	return out.toOwnedSlice(allocator);
-}
-
-// ----------------------------------------------------------------- compression
-//
-// Kafka compresses a whole batch of records, and which codec is in the batch's
-// attributes. gzip and zstd come out of the standard library; snappy and lz4 are
-// written out here, because they are small formats and a driver that cannot read
-// half the topics in the world is not much of a driver.
-
-pub const Codec = enum(u3) {
-	none = 0,
-	gzip = 1,
-	snappy = 2,
-	lz4 = 3,
-	zstd = 4,
-	_,
-};
-
-/// What to call a codec in a message. Not `@tagName`: the attributes of a batch
-/// carry three bits, so five of the eight values have names and three do not, and
-/// `@tagName` of one that does not is a panic rather than a string. A broker only
-/// has to set those bits - by corruption, or by being newer than this program - to
-/// bring krtek down, which is what the fuzzer found within seconds of existing.
-pub fn codecName(codec: Codec) []const u8 {
-	return switch (codec) {
-		.none => "none",
-		.gzip => "gzip",
-		.snappy => "snappy",
-		.lz4 => "lz4",
-		.zstd => "zstd",
-		// The number is what a person needs in order to look it up.
-		_ => "an unknown codec",
-	};
-}
-
-/// How long a description of the cluster is worth keeping. Long enough that one
-/// screen is drawn from one set of answers, short enough that a topic somebody else
-/// created shows up without being asked for.
-const META_MS: i64 = 2000;
-
-/// How much readable slack to leave after a compressed payload. A bit reader that
-/// runs off the end lands here rather than past the buffer.
-const SLACK = 64;
-
-/// The most a batch may unpack to. A fetch brings back at most PARTITION_BYTES per
-/// partition, so even very compressible records cannot honestly exceed this - and
-/// the length that says otherwise is a number out of the bytes being parsed. Before
-/// this, snappy reserved whatever its input claimed: a corrupt batch asking for
-/// four gigabytes got four gigabytes, which the fuzzer demonstrated by taking the
-/// machine down to its last page of memory.
-pub const MAX_UNPACKED: usize = 64 << 20;
-
-pub const CompressError = error{ Malformed, Unsupported, OutOfMemory };
-
-pub fn decompress(arena: std.mem.Allocator, codec: Codec, bytes: []const u8) CompressError![]const u8 {
-	return switch (codec) {
-		.none => bytes,
-		.gzip => unzip(arena, bytes),
-		.snappy => unsnap(arena, bytes),
-		.lz4 => unlz4(arena, bytes),
-		.zstd => unzstd(arena, bytes),
-		_ => error.Unsupported,
-	};
-}
-
-/// Read a decompressing stream to its end, into memory.
-///
-/// Through a writer that owns a growing buffer rather than through
-/// `allocRemaining`: the inflater asks its writer to keep the last 32 KB of output
-/// available - that is where a back reference points - and a writer that cannot
-/// hits `unreachable` inside the standard library on input that is merely corrupt.
-/// The fuzzer found that with a mangled gzip member.
-fn drain(arena: std.mem.Allocator, reader: *std.Io.Reader) CompressError![]const u8 {
-	var out = std.Io.Writer.Allocating.initCapacity(arena, 64 * 1024) catch return error.OutOfMemory;
-	var written: usize = 0;
-	// The same shape as streamRemaining, with a running total: a stream that keeps
-	// producing is stopped at the ceiling rather than followed to the end of memory.
-	while (true) {
-		written += reader.stream(&out.writer, .unlimited) catch |err| switch (err) {
-			error.EndOfStream => break,
-			error.WriteFailed => return error.OutOfMemory,
-			else => return error.Malformed,
-		};
-		if (written > MAX_UNPACKED) {
-			return error.Malformed;
-		}
-	}
-	const list = out.toArrayList();
-	return list.items;
-}
-
-fn unzip(arena: std.mem.Allocator, bytes: []const u8) CompressError![]const u8 {
-	// Room after the input, and this is not tidiness: Zig 0.16.0's inflater, given a
-	// corrupt stream, tosses more bits than it has read and trips
-	// `assert(seek <= end)` inside the reader it is tossing from. The slack is where
-	// that over-toss lands, so it reaches its own error instead of an unreachable.
-	// A deflate stream ends where its own bits say it ends, so trailing zeroes change
-	// nothing about a sound one. Found by the fuzzer, held by it across millions of
-	// inputs, and to be taken out when the standard library stops needing it.
-	const padded = try arena.alloc(u8, bytes.len + SLACK);
-	@memcpy(padded[0..bytes.len], bytes);
-	@memset(padded[bytes.len..], 0);
-	var input = std.Io.Reader.fixed(padded);
-	// And no window of its own: with one, the inflater keeps the history itself and
-	// streams through a writer that cannot make room. With none it writes straight
-	// into the caller's, which grows - see `drain`.
-	var stream = std.compress.flate.Decompress.init(&input, .gzip, &.{});
-	return drain(arena, &stream.reader);
-}
-
-fn unzstd(arena: std.mem.Allocator, bytes: []const u8) CompressError![]const u8 {
-	var input = std.Io.Reader.fixed(bytes);
-	// Buffer-less for the same reason as gzip above.
-	var stream = std.compress.zstd.Decompress.init(&input, &.{}, .{});
-	return drain(arena, &stream.reader);
-}
-
-/// Snappy, as Kafka writes it: the raw format, not the framed one. A varint
-/// length, then a run of elements which either copy literal bytes or repeat what
-/// has already been written.
-pub fn unsnap(arena: std.mem.Allocator, bytes: []const u8) CompressError![]const u8 {
-	// Kafka's own producers write "xerial" framing when the java client is used:
-	// a magic header, then length-prefixed snappy blocks. Both shapes appear in
-	// the wild, so the header decides.
-	const xerial = [_]u8{ 0x82, 'S', 'N', 'A', 'P', 'P', 'Y', 0 };
-	if (bytes.len > 16 and std.mem.eql(u8, bytes[0..8], &xerial)) {
-		var out: List = .empty;
-		var at: usize = 16; // magic, version, minimum compatible version
-		while (at + 4 <= bytes.len) {
-			const size = std.mem.readInt(u32, bytes[at..][0..4], .big);
-			at += 4;
-			if (at + size > bytes.len) {
-				return error.Malformed;
-			}
-			const piece = try snappyBlock(arena, bytes[at .. at + size]);
-			if (out.items.len + piece.len > MAX_UNPACKED) {
-				return error.Malformed;
-			}
-			try out.appendSlice(arena, piece);
-			at += size;
-		}
-		return out.items;
-	}
-	return snappyBlock(arena, bytes);
-}
-
-fn snappyBlock(arena: std.mem.Allocator, bytes: []const u8) CompressError![]const u8 {
-	var at: usize = 0;
-	// The uncompressed length, as a plain varint - not zig-zagged.
-	var length: usize = 0;
-	var shift: u6 = 0;
-	while (true) {
-		if (at >= bytes.len) {
-			return error.Malformed;
-		}
-		const byte = bytes[at];
-		at += 1;
-		length |= @as(usize, byte & 0x7f) << shift;
-		if (byte & 0x80 == 0) {
-			break;
-		}
-		if (shift >= 28) {
-			return error.Malformed;
-		}
-		shift += 7;
-	}
-	if (length > MAX_UNPACKED) {
-		return error.Malformed;
-	}
-	var out = try std.ArrayListUnmanaged(u8).initCapacity(arena, length);
-	while (at < bytes.len) {
-		const tag = bytes[at];
-		at += 1;
-		switch (tag & 0x3) {
-			0 => {
-				// A literal: its length is in the tag, or in the bytes after it.
-				var count: usize = (tag >> 2) + 1;
-				if (tag >> 2 >= 60) {
-					const extra: usize = (tag >> 2) - 59;
-					if (at + extra > bytes.len) {
-						return error.Malformed;
-					}
-					count = 0;
-					for (0..extra) |i| {
-						count |= @as(usize, bytes[at + i]) << @intCast(8 * i);
-					}
-					count += 1;
-					at += extra;
-				}
-				if (at + count > bytes.len) {
-					return error.Malformed;
-				}
-				if (out.items.len + count > MAX_UNPACKED) {
-					return error.Malformed;
-				}
-				try out.appendSlice(arena, bytes[at .. at + count]);
-				at += count;
-			},
-			1, 2, 3 => {
-				var count: usize = 0;
-				var distance: usize = 0;
-				switch (tag & 0x3) {
-					1 => {
-						if (at + 1 > bytes.len) {
-							return error.Malformed;
-						}
-						count = 4 + ((tag >> 2) & 0x7);
-						distance = (@as(usize, (tag >> 5) & 0x7) << 8) | bytes[at];
-						at += 1;
-					},
-					2 => {
-						if (at + 2 > bytes.len) {
-							return error.Malformed;
-						}
-						count = (tag >> 2) + 1;
-						distance = std.mem.readInt(u16, bytes[at..][0..2], .little);
-						at += 2;
-					},
-					else => {
-						if (at + 4 > bytes.len) {
-							return error.Malformed;
-						}
-						count = (tag >> 2) + 1;
-						distance = std.mem.readInt(u32, bytes[at..][0..4], .little);
-						at += 4;
-					},
-				}
-				if (distance == 0 or distance > out.items.len) {
-					return error.Malformed;
-				}
-				if (out.items.len + count > MAX_UNPACKED) {
-					return error.Malformed;
-				}
-				// Byte by byte on purpose: a copy may overlap itself, which is how a
-				// run of the same bytes is encoded.
-				var left = count;
-				while (left > 0) : (left -= 1) {
-					try out.append(arena, out.items[out.items.len - distance]);
-				}
-			},
-			else => unreachable,
-		}
-	}
-	return out.items;
-}
-
-/// LZ4, in the frame format Kafka uses. Only the parts a broker's payload can
-/// contain: no dictionaries, no legacy frames.
-pub fn unlz4(arena: std.mem.Allocator, bytes: []const u8) CompressError![]const u8 {
-	if (bytes.len < 7 or std.mem.readInt(u32, bytes[0..4], .little) != 0x184D2204) {
-		return error.Malformed;
-	}
-	const flags = bytes[4];
-	// Block independence is not read: dependent blocks may copy from the block
-	// before them, and since every block is appended to one buffer here and a copy
-	// looks that far back regardless, both kinds come out the same.
-	const has_content_size = (flags & 0x08) != 0;
-	const has_dictionary = (flags & 0x01) != 0;
-	if (has_dictionary) {
-		return error.Unsupported;
-	}
-	// magic(4) FLG(1) BD(1) [content size(8)] HC(1), and no dictionary id because
-	// a dictionary was refused above.
-	var at: usize = 4 + 1 + 1;
-	if (has_content_size) {
-		at += 8;
-	}
-	at += 1; // the header checksum, which the broker has already honoured
-	var out: List = .empty;
-	while (at + 4 <= bytes.len) {
-		const word = std.mem.readInt(u32, bytes[at..][0..4], .little);
-		at += 4;
-		if (word == 0) {
-			break; // the end mark
-		}
-		const stored = (word & 0x80000000) != 0;
-		const size: usize = word & 0x7fffffff;
-		if (at + size > bytes.len) {
-			return error.Malformed;
-		}
-		const block = bytes[at .. at + size];
-		at += size;
-		if (out.items.len + size > MAX_UNPACKED) {
-			return error.Malformed;
-		}
-		if (stored) {
-			try out.appendSlice(arena, block);
-		} else {
-			try lz4Block(arena, block, &out);
-		}
-		if ((flags & 0x10) != 0) {
-			at += 4; // a checksum per block
-		}
-	}
-	return out.items;
-}
-
-fn lz4Block(arena: std.mem.Allocator, block: []const u8, out: *List) CompressError!void {
-	var at: usize = 0;
-	while (at < block.len) {
-		const token = block[at];
-		at += 1;
-		var literals: usize = token >> 4;
-		if (literals == 15) {
-			while (at < block.len) {
-				const byte = block[at];
-				at += 1;
-				literals += byte;
-				if (byte != 255) {
-					break;
-				}
-			}
-		}
-		if (at + literals > block.len) {
-			return error.Malformed;
-		}
-		if (out.items.len + literals > MAX_UNPACKED) {
-			return error.Malformed;
-		}
-		try out.appendSlice(arena, block[at .. at + literals]);
-		at += literals;
-		if (at >= block.len) {
-			return; // the last sequence has no match
-		}
-		if (at + 2 > block.len) {
-			return error.Malformed;
-		}
-		const distance: usize = std.mem.readInt(u16, block[at..][0..2], .little);
-		at += 2;
-		var length: usize = token & 0xf;
-		if (length == 15) {
-			while (at < block.len) {
-				const byte = block[at];
-				at += 1;
-				length += byte;
-				if (byte != 255) {
-					break;
-				}
-			}
-		}
-		length += 4; // the minimum match
-		if (distance == 0 or distance > out.items.len or out.items.len + length > MAX_UNPACKED) {
-			return error.Malformed;
-		}
-		var left = length;
-		while (left > 0) : (left -= 1) {
-			try out.append(arena, out.items[out.items.len - distance]);
-		}
-	}
-}
-
 // ---------------------------------------------------------------------- pieces
 
 /// A length-prefixed field inside a record: a varint length, -1 for absent.
@@ -3502,49 +2826,8 @@ pub fn stamp(arena: std.mem.Allocator, millis: i64) ![]const u8 {
 	});
 }
 
-/// Bytes nobody can guess, for a SCRAM nonce. std.crypto.random is gone in this
-/// Zig and arc4random is not on musl, so this is the source both systems have.
-pub fn randomBytes(into: []u8) !void {
-	const fd = std.c.open("/dev/urandom", .{ .ACCMODE = .RDONLY });
-	if (fd < 0) {
-		return error.NoRandom;
-	}
-	defer _ = std.c.close(fd);
-	var got: usize = 0;
-	while (got < into.len) {
-		const read = std.c.read(fd, into[got..].ptr, into.len - got);
-		if (read <= 0) {
-			return error.NoRandom;
-		}
-		got += @intCast(read);
-	}
-}
 
-/// A SCRAM message is a comma-separated list of `k=value`, and this is one of
-/// them - the first with that letter, which is all SCRAM has.
-pub fn fieldOf(message: []const u8, key: u8) ?[]const u8 {
-	var parts = std.mem.tokenizeScalar(u8, message, ',');
-	while (parts.next()) |part| {
-		if (part.len >= 2 and part[0] == key and part[1] == '=') {
-			return part[2..];
-		}
-	}
-	return null;
-}
 
-/// A user name inside a SCRAM message, where a comma and an equals sign have to
-/// be spelled out or they would end the field.
-pub fn escapeName(arena: std.mem.Allocator, name: []const u8) ![]const u8 {
-	var out: List = .empty;
-	for (name) |char| {
-		switch (char) {
-			'=' => try out.appendSlice(arena, "=3D"),
-			',' => try out.appendSlice(arena, "=2C"),
-			else => try out.append(arena, char),
-		}
-	}
-	return out.items;
-}
 
 /// A cell of a change that was given a value: a change may set a column to NULL,
 /// and for a record that is not a value.
@@ -3553,108 +2836,9 @@ fn flat(value: ??[]const u8) ?[]const u8 {
 	return inner orelse null;
 }
 
-/// CRC-32C, which is what a record batch carries. Table built at compile time.
-pub fn crc32c(bytes: []const u8) u32 {
-	const table = comptime blk: {
-		@setEvalBranchQuota(20000);
-		var built: [256]u32 = undefined;
-		for (0..256) |i| {
-			var value: u32 = @intCast(i);
-			for (0..8) |_| {
-				value = if (value & 1 != 0) (value >> 1) ^ 0x82f63b78 else value >> 1;
-			}
-			built[i] = value;
-		}
-		break :blk built;
-	};
-	var crc: u32 = 0xffffffff;
-	for (bytes) |byte| {
-		crc = table[(crc ^ byte) & 0xff] ^ (crc >> 8);
-	}
-	return crc ^ 0xffffffff;
-}
 
-/// The hash Kafka's own clients use to choose a partition for a key, so a key
-/// written from here lands where it would have landed from anywhere else.
-pub fn murmur2(bytes: []const u8) i32 {
-	const seed: u32 = 0x9747b28c;
-	const m: u32 = 0x5bd1e995;
-	const r: u5 = 24;
-	var h: u32 = seed ^ @as(u32, @intCast(bytes.len));
-	var at: usize = 0;
-	while (at + 4 <= bytes.len) : (at += 4) {
-		var k: u32 = std.mem.readInt(u32, bytes[at..][0..4], .little);
-		k *%= m;
-		k ^= k >> r;
-		k *%= m;
-		h *%= m;
-		h ^= k;
-	}
-	const left = bytes.len - at;
-	if (left == 3) {
-		h ^= @as(u32, bytes[at + 2]) << 16;
-	}
-	if (left >= 2) {
-		h ^= @as(u32, bytes[at + 1]) << 8;
-	}
-	if (left >= 1) {
-		h ^= @as(u32, bytes[at]);
-		h *%= m;
-	}
-	h ^= h >> 13;
-	h *%= m;
-	h ^= h >> 15;
-	return @bitCast(h);
-}
 
-/// Codes that mean the cluster has moved on rather than that the request was
-/// wrong: a leader election, a broker restarting, a partition being reassigned.
-/// The answer to all of them is the same - ask for metadata again and try once
-/// more - which is what every Kafka client does and what this one did not.
-pub fn movedOn(code: i16) bool {
-	return switch (code) {
-		5, // the leader is not available yet
-		6, // this broker is not the leader for that partition
-		7, // the request timed out
-		9, // the replica is not available
-		17, // the topic is being reassigned
-		41, // this broker is not the controller
-		=> true,
-		else => false,
-	};
-}
 
-/// The error codes a broker sends back, in the words the protocol gives them.
-pub fn errorText(code: i16) []const u8 {
-	return switch (code) {
-		0 => "none",
-		1 => "the offset is out of range",
-		2 => "the record is corrupt",
-		3 => "no such topic or partition",
-		5 => "the leader is not available yet",
-		6 => "this broker is not the leader for that partition",
-		7 => "the request timed out",
-		8 => "the broker is not available",
-		9 => "the replica is not available",
-		10 => "the message is larger than the broker allows",
-		13 => "the network failed mid-request",
-		15 => "the coordinator is not available",
-		17 => "the topic is being reassigned",
-		19 => "not enough replicas to accept the write",
-		20 => "not enough replicas after appending",
-		21 => "the requested acks are invalid",
-		29, 30, 31 => "not authorised for that",
-		36 => "the topic already exists",
-		37 => "the number of partitions is invalid",
-		38 => "the replication factor is invalid",
-		39 => "the replica assignment is invalid",
-		40 => "the configuration is invalid",
-		41 => "this broker is not the controller",
-		58 => "the request is not allowed on that resource",
-		87 => "the records are not in order",
-		else => "an error the broker did not name",
-	};
-}
 
 // -------------------------------------------------------------------------- DDL
 
@@ -3733,166 +2917,15 @@ fn refuse(out: *List, a: std.mem.Allocator, what: []const u8) !void {
 
 const testing = std.testing;
 
-test "a varint survives the round trip, sign and all" {
-	var out: List = .empty;
-	defer out.deinit(testing.allocator);
-	const write = Encoder{ .out = &out, .a = testing.allocator };
-	const numbers = [_]i64{ 0, 1, -1, 63, 64, -64, -65, 127, 128, 300, -300, 1 << 20, -(1 << 20), std.math.maxInt(i32), std.math.minInt(i32) };
-	for (numbers) |number| {
-		try write.varlong(number);
-	}
-	var read = Decoder{ .bytes = out.items };
-	for (numbers) |number| {
-		try testing.expectEqual(number, try read.varlong());
-	}
-	try testing.expectEqual(out.items.len, read.at);
-}
 
-test "a varint of ten 0xff bytes is a number, not a crash" {
-	// The largest zig-zag encoding there is. Decoding it used to negate i64's
-	// largest value plus one, which overflows - and every length inside a record is
-	// a varint, so any corrupt batch reached it.
-	const worst = [_]u8{ 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x01 };
-	var read = Decoder{ .bytes = &worst };
-	const value = try read.varlong();
-	try testing.expectEqual(std.math.minInt(i64), value);
 
-	// And as an i32, which is what a record's lengths are read as: too large to fit
-	// is malformed rather than truncated to something plausible.
-	var again = Decoder{ .bytes = &worst };
-	try testing.expectError(error.Malformed, again.varint());
 
-	// The two ends of the range still come back as themselves.
-	var out: List = .empty;
-	defer out.deinit(testing.allocator);
-	const write = Encoder{ .out = &out, .a = testing.allocator };
-	try write.varlong(std.math.minInt(i64));
-	try write.varlong(std.math.maxInt(i64));
-	var back = Decoder{ .bytes = out.items };
-	try testing.expectEqual(std.math.minInt(i64), try back.varlong());
-	try testing.expectEqual(std.math.maxInt(i64), try back.varlong());
-}
 
-test "the fixed width numbers are big endian, as the protocol says" {
-	var out: List = .empty;
-	defer out.deinit(testing.allocator);
-	const write = Encoder{ .out = &out, .a = testing.allocator };
-	try write.int16(1);
-	try write.int32(-2);
-	try write.int64(258);
-	try testing.expectEqualSlices(u8, &[_]u8{
-		0, 1,
-		0xff, 0xff, 0xff, 0xfe,
-		0, 0, 0, 0, 0, 0, 1, 2,
-	}, out.items);
 
-	var read = Decoder{ .bytes = out.items };
-	try testing.expectEqual(@as(i16, 1), try read.int16());
-	try testing.expectEqual(@as(i32, -2), try read.int32());
-	try testing.expectEqual(@as(i64, 258), try read.int64());
-}
 
-test "a string and a byte array carry their own length, and absence is -1" {
-	var out: List = .empty;
-	defer out.deinit(testing.allocator);
-	const write = Encoder{ .out = &out, .a = testing.allocator };
-	try write.string("orders");
-	try write.nullableString(null);
-	try write.byteArray(null);
-	try write.byteArray("ab");
 
-	var read = Decoder{ .bytes = out.items };
-	try testing.expectEqualStrings("orders", try read.string());
-	try testing.expectEqualStrings("", try read.string());
-	try testing.expect((try read.nullableBytes()) == null);
-	try testing.expectEqualStrings("ab", (try read.nullableBytes()).?);
-}
 
-test "CRC-32C is the one a record batch carries" {
-	// The check value every CRC-32C implementation is measured by.
-	try testing.expectEqual(@as(u32, 0xe3069283), crc32c("123456789"));
-	try testing.expectEqual(@as(u32, 0), crc32c(""));
-}
 
-test "murmur2 puts a key where kafka's own client would put it" {
-	// Nine keys were written to a three-partition topic by kafka-console-producer,
-	// which chooses the partition with murmur2 of the key. This is where its Java
-	// implementation put them, so it is where this one has to put them too.
-	const expected = [_]struct { key: []const u8, partition: i32 }{
-		.{ .key = "key1", .partition = 2 },
-		.{ .key = "key2", .partition = 2 },
-		.{ .key = "key3", .partition = 1 },
-		.{ .key = "key4", .partition = 0 },
-		.{ .key = "key5", .partition = 1 },
-		.{ .key = "key6", .partition = 0 },
-		.{ .key = "key7", .partition = 0 },
-		.{ .key = "key8", .partition = 1 },
-		.{ .key = "key9", .partition = 2 },
-	};
-	for (expected) |one| {
-		const hash = murmur2(one.key) & 0x7fffffff;
-		try testing.expectEqual(one.partition, @mod(hash, 3));
-	}
-}
-
-test "snappy: a literal, and a copy that overlaps itself" {
-	var arena = std.heap.ArenaAllocator.init(testing.allocator);
-	defer arena.deinit();
-	const a = arena.allocator();
-
-	// Length 3, then one literal element of three bytes.
-	try testing.expectEqualStrings("abc", try unsnap(a, &[_]u8{ 0x03, 0x08, 'a', 'b', 'c' }));
-	// Length 9: the same literal, then six bytes copied from three back - which
-	// runs into what it is writing, and that is how a repeat is spelled.
-	try testing.expectEqualStrings("abcabcabc", try unsnap(a, &[_]u8{
-		0x09, 0x08, 'a', 'b', 'c', 0x09, 0x03,
-	}));
-}
-
-test "lz4: a stored block and a compressed one" {
-	var arena = std.heap.ArenaAllocator.init(testing.allocator);
-	defer arena.deinit();
-	const a = arena.allocator();
-
-	const stored = [_]u8{
-		0x04, 0x22, 0x4d, 0x18, // magic
-		0x40, 0x70, 0x00, // flags, block descriptor, header checksum
-		0x03, 0x00, 0x00, 0x80, // one stored block of three bytes
-		'a',  'b',  'c',
-		0x00, 0x00, 0x00, 0x00, // the end mark
-	};
-	try testing.expectEqualStrings("abc", try unlz4(a, &stored));
-
-	const packed_block = [_]u8{ 0x32, 'a', 'b', 'c', 0x03, 0x00 };
-	var frame: List = .empty;
-	try frame.appendSlice(a, &[_]u8{ 0x04, 0x22, 0x4d, 0x18, 0x40, 0x70, 0x00 });
-	try frame.appendSlice(a, &[_]u8{ @intCast(packed_block.len), 0x00, 0x00, 0x00 });
-	try frame.appendSlice(a, &packed_block);
-	try frame.appendSlice(a, &[_]u8{ 0x00, 0x00, 0x00, 0x00 });
-	try testing.expectEqualStrings("abcabcabc", try unlz4(a, frame.items));
-}
-
-test "gzip comes out of the standard library, and is checked here anyway" {
-	var arena = std.heap.ArenaAllocator.init(testing.allocator);
-	defer arena.deinit();
-	// "abc" as gzip, from gzip -9n, so this is a real member and not a fixture of
-	// this program's own making.
-	const packed_bytes = [_]u8{
-		0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x03,
-		0x4b, 0x4c, 0x4a, 0x06, 0x00,
-		0xc2, 0x41, 0x24, 0x35, 0x03, 0x00, 0x00, 0x00,
-	};
-	try testing.expectEqualStrings("abc", try decompress(arena.allocator(), .gzip, &packed_bytes));
-}
-
-test "a codec krtek does not know says so rather than returning rubbish" {
-	var arena = std.heap.ArenaAllocator.init(testing.allocator);
-	defer arena.deinit();
-	const made_up: Codec = @enumFromInt(6);
-	try testing.expectError(error.Unsupported, decompress(arena.allocator(), made_up, "anything"));
-	// And no compression is the bytes themselves.
-	try testing.expectEqualStrings("plain", try decompress(arena.allocator(), .none, "plain"));
-}
 
 test "LIKE, as far as a log needs it" {
 	try testing.expect(likeMatch("%user%", "my-user-7"));
@@ -4033,174 +3066,12 @@ test "a timestamp is readable, and zero is nothing" {
 	try testing.expectEqualStrings("", try stamp(a, 0));
 }
 
-test "a kafka target is taken apart" {
-	const a = testing.allocator;
-	{
-		const parts = try parse(a, "kafka://broker.example:9095");
-		defer parts.deinit(a);
-		try testing.expectEqualStrings("broker.example", parts.host);
-		try testing.expectEqual(@as(u16, 9095), parts.port);
-	}
-	{
-		const parts = try parse(a, "kafka://127.0.0.1");
-		defer parts.deinit(a);
-		try testing.expectEqualStrings("127.0.0.1", parts.host);
-		try testing.expectEqual(@as(u16, 9092), parts.port);
-	}
-	{
-		// A path is not part of the address; Kafka has no database to name.
-		const parts = try parse(a, "kafka://127.0.0.1:9093/whatever");
-		defer parts.deinit(a);
-		try testing.expectEqualStrings("127.0.0.1", parts.host);
-		try testing.expectEqual(@as(u16, 9093), parts.port);
-	}
-	try testing.expect(owns("kafka://localhost"));
-	try testing.expect(!owns("redis://localhost"));
-	try testing.expect(!owns("postgres://localhost"));
-}
 
-test "every API this driver speaks is one the broker still answers without flexible encoding" {
-	// The point of these versions: none of them uses compact strings or tagged
-	// fields, so there is one encoding in this file instead of two.
-	try testing.expectEqual(@as(i16, 11), versionOf(.fetch));
-	try testing.expectEqual(@as(i16, 7), versionOf(.metadata));
-	try testing.expectEqual(@as(i16, 0), versionOf(.api_versions));
-	inline for (std.meta.fields(Api)) |field| {
-		const api: Api = @enumFromInt(field.value);
-		try testing.expect(versionOf(api) >= 0);
-	}
-}
 
-test "a target carries what it takes to reach the cluster" {
-	const a = testing.allocator;
-	{
-		// TLS by scheme, and a port that follows from it.
-		const parts = try parse(a, "kafka+ssl://broker.example");
-		defer parts.deinit(a);
-		try testing.expect(parts.tls);
-		try testing.expectEqual(@as(u16, 9093), parts.port);
-		try testing.expectEqual(Mechanism.none, parts.mechanism);
-	}
-	{
-		// A user with no mechanism named is PLAIN, which is what brokers are set up
-		// for; the password may be escaped, and an @ inside it is not the host.
-		const parts = try parse(a, "kafka://alice@broker:9095?password=p%40ss%20word");
-		defer parts.deinit(a);
-		try testing.expectEqualStrings("broker", parts.host);
-		try testing.expectEqual(@as(u16, 9095), parts.port);
-		try testing.expectEqualStrings("alice", parts.user);
-		try testing.expectEqualStrings("p@ss word", parts.password);
-		try testing.expectEqual(Mechanism.plain, parts.mechanism);
-		try testing.expect(!parts.tls);
-	}
-	{
-		const parts = try parse(a, "kafka://bob:hunter2@broker:9093?tls=1&mechanism=SCRAM-SHA-512&insecure=1");
-		defer parts.deinit(a);
-		try testing.expectEqualStrings("bob", parts.user);
-		try testing.expectEqualStrings("hunter2", parts.password);
-		try testing.expectEqual(Mechanism.scram_sha_512, parts.mechanism);
-		try testing.expect(parts.tls);
-		try testing.expect(!parts.verify); // asked for, not assumed
-	}
-	{
-		// No user at all: no authentication, and the certificate still verified.
-		const parts = try parse(a, "kafka://127.0.0.1:9093");
-		defer parts.deinit(a);
-		try testing.expectEqual(Mechanism.none, parts.mechanism);
-		try testing.expect(parts.verify);
-	}
-	try testing.expect(owns("kafka+ssl://x"));
-	try testing.expectEqualStrings("SCRAM-SHA-256", Mechanism.scram_sha_256.name());
-	try testing.expectEqual(Mechanism.plain, Mechanism.of("plain").?);
-	try testing.expect(Mechanism.of("GSSAPI") == null);
-}
 
-test "SCRAM's messages are read and written the way the standard spells them" {
-	var arena = std.heap.ArenaAllocator.init(testing.allocator);
-	defer arena.deinit();
-	const a = arena.allocator();
 
-	const server_first = "r=abcdefXYZ,s=QSXCR+Q6sek8bf92,i=4096";
-	try testing.expectEqualStrings("abcdefXYZ", fieldOf(server_first, 'r').?);
-	try testing.expectEqualStrings("QSXCR+Q6sek8bf92", fieldOf(server_first, 's').?);
-	try testing.expectEqualStrings("4096", fieldOf(server_first, 'i').?);
-	try testing.expect(fieldOf(server_first, 'v') == null);
-	try testing.expectEqualStrings("rmF9pqV8S7suAoZWja4dJRkFsKQ=", fieldOf("v=rmF9pqV8S7suAoZWja4dJRkFsKQ=", 'v').?);
-	try testing.expectEqualStrings("invalid-proof", fieldOf("e=invalid-proof", 'e').?);
 
-	// A comma or an equals sign in a user name would end the field, so they are
-	// spelled out.
-	try testing.expectEqualStrings("a=2Cb=3Dc", try escapeName(a, "a,b=c"));
-	try testing.expectEqualStrings("plain", try escapeName(a, "plain"));
-}
 
-test "the proof is the client key against its signature, as RFC 5802 has it" {
-	// The example from the RFC: user "user", password "pencil", and the salt and
-	// nonces it gives. If this matches, the derivation and the exclusive-or are
-	// right, which is the part a broker checks.
-	const Hmac = std.crypto.auth.hmac.HmacSha1;
-	const Hash = std.crypto.hash.Sha1;
-	const base64 = std.base64.standard;
-	// Twelve bytes, not sixteen: the length has to come from the base64 itself, and
-	// getting that wrong is exactly the bug this test caught when it was written.
-	const salt_text = "QSXCR+Q6sek8bf92";
-	var salt: [try base64.Decoder.calcSizeForSlice(salt_text)]u8 = undefined;
-	try base64.Decoder.decode(&salt, salt_text);
-
-	var salted: [Hmac.mac_length]u8 = undefined;
-	try std.crypto.pwhash.pbkdf2(&salted, "pencil", &salt, 4096, Hmac);
-	var client_key: [Hmac.mac_length]u8 = undefined;
-	Hmac.create(&client_key, "Client Key", &salted);
-	var stored_key: [Hash.digest_length]u8 = undefined;
-	Hash.hash(&client_key, &stored_key, .{});
-
-	const auth_message = "n=user,r=fyko+d2lbbFgONRv9qkxdawL," ++
-		"r=fyko+d2lbbFgONRv9qkxdawL3rfcNHYJY1ZVvWVs7j,s=QSXCR+Q6sek8bf92,i=4096," ++
-		"c=biws,r=fyko+d2lbbFgONRv9qkxdawL3rfcNHYJY1ZVvWVs7j";
-	var signature: [Hmac.mac_length]u8 = undefined;
-	Hmac.create(&signature, auth_message, &stored_key);
-	var proof: [Hmac.mac_length]u8 = undefined;
-	for (client_key, signature, 0..) |key_byte, signature_byte, i| {
-		proof[i] = key_byte ^ signature_byte;
-	}
-	var buffer: [base64.Encoder.calcSize(Hmac.mac_length)]u8 = undefined;
-	try testing.expectEqualStrings("v0X8v3Bz2T0CJGbJQyF0X+HI4Ts=", base64.Encoder.encode(&buffer, &proof));
-
-	// And the server's half, which this driver checks so that a broker cannot
-	// merely claim the password was right.
-	var server_key: [Hmac.mac_length]u8 = undefined;
-	Hmac.create(&server_key, "Server Key", &salted);
-	var server_signature: [Hmac.mac_length]u8 = undefined;
-	Hmac.create(&server_signature, auth_message, &server_key);
-	try testing.expectEqualStrings("rmF9pqV8S7suAoZWja4dJRkFsKQ=", base64.Encoder.encode(&buffer, &server_signature));
-}
-
-test "randomness is available, and different every time" {
-	var first: [24]u8 = undefined;
-	var second: [24]u8 = undefined;
-	try randomBytes(&first);
-	try randomBytes(&second);
-	try testing.expect(!std.mem.eql(u8, &first, &second));
-	// And not simply left as it was.
-	try testing.expect(!std.mem.allEqual(u8, &first, 0));
-}
-
-test "the codes that mean the cluster moved, and the ones that mean no" {
-	// A leader election, a broker restarting, a partition being reassigned: ask for
-	// metadata again and try once more.
-	for ([_]i16{ 5, 6, 7, 9, 17, 41 }) |code| {
-		try testing.expect(movedOn(code));
-	}
-	// And the ones where trying again would only ask the same wrong question.
-	for ([_]i16{ 0, 1, 2, 3, 36, 37, 38, 58 }) |code| {
-		try testing.expect(!movedOn(code));
-	}
-	// Every one of them still has words of its own; a code nobody named says so
-	// rather than pretending.
-	try testing.expectEqualStrings("this broker is not the leader for that partition", errorText(6));
-	try testing.expectEqualStrings("the topic already exists", errorText(36));
-	try testing.expectEqualStrings("an error the broker did not name", errorText(1234));
-}
 
 // -------------------------------------------------------------------- fuzzing
 //
