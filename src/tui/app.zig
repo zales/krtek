@@ -1111,7 +1111,7 @@ pub const App = struct {
 		const arena = self.reports_arena.allocator();
 		self.reports.clearRetainingCapacity();
 
-		var last_select: ?[]const u8 = null;
+		var shown = false;
 		var failures: usize = 0;
 		// The engine's own parser decides where one statement ends.
 		const statements = self.conn.split(arena, sql) catch &[_]database.Statement{};
@@ -1127,10 +1127,15 @@ pub const App = struct {
 					var rows = cursor;
 					result_set = rows.columnCount() > 0;
 					if (result_set) {
-						// Not stepped here: the statement is run again to fill the
-						// grid, and stepping now would consume its rows.
-						rows.close();
-						last_select = statement.sql;
+						// The grid is filled from this cursor rather than by running the
+						// statement a second time. It used to run it again, which is
+						// harmless for a SELECT and not at all harmless for an engine
+						// whose console has PRODUCE and SET in it: those happened twice.
+						self.fill(&rows, null, false) catch {
+							failure = try arena.dupe(u8, self.conn.message());
+						};
+						produced = @intCast(self.rows.items.len);
+						shown = failure == null;
 					} else {
 						while (true) {
 							const more = rows.next() catch {
@@ -1188,16 +1193,15 @@ pub const App = struct {
 			return;
 		}
 
-		if (last_select) |statement| {
+		if (shown) {
+			// The rows are already on the grid; what is left is to look at them.
 			try self.setTable(null);
 			self.page = 0;
 			self.cursor_row = 0;
 			self.cursor_col = 0;
 			self.row_scroll = 0;
 			self.col_scroll = 0;
-			self.load(statement, null, false) catch {
-				self.complain("{s}", .{self.conn.message()});
-			};
+			self.clampCursor();
 			self.total = @intCast(self.rows.items.len);
 			self.setTitle("query result", .{});
 			self.view = .grid;

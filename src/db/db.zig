@@ -15,6 +15,7 @@ pub const sqlite = @import("sqlite.zig");
 pub const postgres = @import("postgres.zig");
 const mysql = @import("mysql.zig");
 const redis = @import("redis.zig");
+const kafka = @import("kafka.zig");
 
 /// What the interface asks for, as a structure: see the file for why.
 pub const ask = @import("ask.zig");
@@ -28,6 +29,7 @@ comptime {
 	_ = postgres;
 	_ = mysql;
 	_ = redis;
+	_ = kafka;
 }
 
 pub const Error = error{ Driver, OutOfMemory };
@@ -140,6 +142,7 @@ pub const Rows = union(enum) {
 	postgres: postgres.Rows,
 	mysql: mysql.Rows,
 	redis: redis.Rows,
+	kafka: kafka.Rows,
 
 	pub fn next(self: *Rows) Error!bool {
 		switch (self.*) {
@@ -208,10 +211,14 @@ pub const Db = union(enum) {
 	postgres: *postgres.Db,
 	mysql: *mysql.Db,
 	redis: *redis.Db,
+	kafka: *kafka.Db,
 
 	/// Open whatever the target describes: a file path, or a URL like
 	/// postgres://user:password@host:port/database.
 	pub fn open(allocator: std.mem.Allocator, target: []const u8, report: *std.ArrayListUnmanaged(u8)) !Db {
+		if (kafka.owns(target)) {
+			return .{ .kafka = try kafka.Db.open(allocator, target, report) };
+		}
 		if (redis.owns(target)) {
 			return .{ .redis = try redis.Db.open(allocator, target, report) };
 		}
@@ -474,6 +481,7 @@ pub const Ddl = union(enum) {
 	postgres: postgres.Ddl,
 	mysql: mysql.Ddl,
 	redis: redis.Ddl,
+	kafka: kafka.Ddl,
 
 	pub fn createTable(self: Ddl, out: *List, a: std.mem.Allocator, table: Table, cols: []const Column, keys: []const ForeignKey) !void {
 		switch (self) {
