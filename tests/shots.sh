@@ -52,6 +52,7 @@ mkdir -p "$CONFIG/krtek"
 	printf 'shop (docker)\tpostgres://postgres@127.0.0.1:5432/shop\n'
 	printf 'orders\tmysql://root@127.0.0.1:3306/orders\tkeychain\n'
 	printf 'cache\tredis://127.0.0.1:6379/0\n'
+	printf 'events\tkafka+ssl://alice@broker.example:9093\n'
 } > "$CONFIG/krtek/connections"
 export XDG_CONFIG_HOME="$CONFIG"
 trap 'rm -rf "$CONFIG"' EXIT
@@ -72,6 +73,6 @@ SHOT_ROWS=16 take editor "$DB" 's' 'select title, year, price from books' '{ente
 	"where year < 1950 -- the old ones" '{enter}' 'order by year desc'
 SHOT_ROWS=18 take palette "$DB" '{ctrl-k}' 'exp'
 # An empty target is what opens the list of connections.
-SHOT_ROWS=16 take connections ''
+SHOT_ROWS=17 take connections ''
 
 echo "screenshots in docs/"
