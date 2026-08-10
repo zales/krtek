@@ -701,9 +701,15 @@ pub const Db = struct {
 
 	// --- one request, one reply ---
 
+	/// A request that failed because the connection did, rather than because the
+	/// broker refused it: the difference decides whether trying again is worth
+	/// anything. A broker that restarts, or that reaps an idle connection, lands
+	/// here - and used to need krtek restarting with it.
+	pub const CallError = db.Error || error{Gone};
+
 	/// Send a request to a broker and hand back its response body. The body lives
 	/// in `replies`.
-	fn call(self: *Db, stream: *Stream, api: Api, body: []const u8) db.Error![]const u8 {
+	fn call(self: *Db, stream: *Stream, api: Api, body: []const u8) CallError![]const u8 {
 		const arena = self.replies.allocator();
 		self.correlation += 1;
 
@@ -724,13 +730,13 @@ pub const Db = struct {
 
 		stream.write(framed.items) catch {
 			self.remember("the connection to kafka is gone");
-			return error.Driver;
+			return error.Gone;
 		};
 
 		var size_bytes: [4]u8 = undefined;
 		stream.readExactly(&size_bytes) catch {
 			self.remember("kafka closed the connection");
-			return error.Driver;
+			return error.Gone;
 		};
 		const size = std.mem.readInt(i32, &size_bytes, .big);
 		if (size < 4 or size > 256 * 1024 * 1024) {
@@ -740,15 +746,75 @@ pub const Db = struct {
 		const reply = try arena.alloc(u8, @intCast(size));
 		stream.readExactly(reply) catch {
 			self.remember("kafka stopped halfway through a reply");
-			return error.Driver;
+			return error.Gone;
 		};
 		// The response header of a non-flexible API is the correlation id alone.
 		return reply[4..];
 	}
 
-	/// The same, to the broker the target named.
+	/// The same, to the broker the target named. Metadata goes through this one, so
+	/// a broker that restarts takes it with it - and then it is opened again, TLS
+	/// and authentication and all, and the request asked once more. Without that,
+	/// every later request failed and went on failing until krtek was restarted.
 	fn ask(self: *Db, api: Api, body: []const u8) db.Error![]const u8 {
-		return self.call(&self.stream, api, body);
+		if (self.call(&self.stream, api, body)) |reply| {
+			return reply;
+		} else |err| {
+			if (err == error.OutOfMemory) {
+				return error.OutOfMemory;
+			}
+			if (err != error.Gone) {
+				return error.Driver;
+			}
+		}
+		self.reconnect() catch return error.Driver;
+		return self.call(&self.stream, api, body) catch |err| switch (err) {
+			error.OutOfMemory => error.OutOfMemory,
+			else => error.Driver,
+		};
+	}
+
+	/// Open the connection the target named again, and put it back the way it was.
+	fn reconnect(self: *Db) db.Error!void {
+		self.stream.close();
+		var stream = connect(self.allocator, self.host.items, self.port) catch {
+			self.complain("kafka at {s}:{d} is not answering any more", .{ self.host.items, self.port });
+			return error.Driver;
+		};
+		errdefer stream.close();
+		if (self.tls) {
+			var why: List = .empty;
+			defer why.deinit(self.allocator);
+			startTls(self.allocator, &stream, self.host.items, self.verify, &why) catch {
+				self.complain("TLS to {s}:{d} failed on reconnecting: {s}", .{
+					self.host.items, self.port,
+					if (why.items.len != 0) why.items else "no reason given",
+				});
+				return error.Driver;
+			};
+		}
+		self.stream = stream;
+		try self.authenticate(&self.stream);
+		self.last_error.clearRetainingCapacity();
+	}
+
+	/// The cluster has moved: every cached connection is dropped and metadata asked
+	/// for again, so the next attempt goes to whoever leads the partition now.
+	fn clusterMoved(self: *Db) db.Error!void {
+		var walk = self.leaders.valueIterator();
+		while (walk.next()) |stream| {
+			stream.close();
+		}
+		self.leaders.clearRetainingCapacity();
+		// The complaint that got us here is replaced by whatever happens next; if the
+		// retry works, the user should see no complaint at all.
+		const was = try self.allocator.dupe(u8, self.last_error.items);
+		defer self.allocator.free(was);
+		self.describeCluster() catch {
+			self.remember(was);
+			return error.Driver;
+		};
+		self.last_error.clearRetainingCapacity();
 	}
 
 	/// The connection to a particular broker, opened if this is the first time.
@@ -797,7 +863,7 @@ pub const Db = struct {
 		defer body.deinit(self.allocator);
 		const write = Encoder{ .out = &body, .a = self.allocator };
 		try write.string(self.mechanism.name());
-		const reply = try self.call(stream, .sasl_handshake, body.items);
+		const reply = self.call(stream, .sasl_handshake, body.items) catch return error.Driver;
 		var read = Decoder{ .bytes = reply };
 		const code = read.int16() catch {
 			self.remember("kafka answered the handshake with something unexpected");
@@ -847,7 +913,7 @@ pub const Db = struct {
 		defer body.deinit(self.allocator);
 		const write = Encoder{ .out = &body, .a = self.allocator };
 		try write.byteArray(token);
-		const reply = try self.call(stream, .sasl_authenticate, body.items);
+		const reply = self.call(stream, .sasl_authenticate, body.items) catch return error.Driver;
 		var read = Decoder{ .bytes = reply };
 		const code = read.int16() catch {
 			self.remember("kafka answered the authentication with something unexpected");
@@ -1095,6 +1161,10 @@ pub const Db = struct {
 	}
 
 	fn oneOffset(self: *Db, topic: []const u8, partition: *Partition, at_time: i64) db.Error!i64 {
+		return self.oneOffsetTrying(topic, partition, at_time, false);
+	}
+
+	fn oneOffsetTrying(self: *Db, topic: []const u8, partition: *Partition, at_time: i64, retrying: bool) db.Error!i64 {
 		var body: List = .empty;
 		defer body.deinit(self.allocator);
 		const write = Encoder{ .out = &body, .a = self.allocator };
@@ -1108,12 +1178,53 @@ pub const Db = struct {
 		try write.int64(at_time);
 
 		const stream = try self.leader(partition.leader);
-		const reply = try self.call(stream, .list_offsets, body.items);
+		const reply = self.call(stream, .list_offsets, body.items) catch |err| {
+			return self.afterLoss(err, retrying, topic, partition.id, at_time);
+		};
 		var read = Decoder{ .bytes = reply };
-		return self.readOneOffset(&read) catch {
-			self.remember("kafka answered the offset request with something unexpected");
+		return self.readOneOffset(&read) catch |err| {
+			if (err == error.MovedOn and !retrying) {
+				try self.clusterMoved();
+				// The partition is a pointer into the metadata that was just replaced,
+				// so it is looked up again rather than reused.
+				if (self.partitionOf(topic, partition.id)) |fresh| {
+					return self.oneOffsetTrying(topic, fresh, at_time, true);
+				}
+				self.complain("partition {d} of {s} is gone", .{ partition.id, topic });
+				return error.Driver;
+			}
+			if (self.last_error.items.len == 0) {
+				self.remember("kafka answered the offset request with something unexpected");
+			}
 			return error.Driver;
 		};
+	}
+
+	/// A lost connection while asking for offsets: find who leads it now and ask
+	/// once more, or give up with the reason.
+	fn afterLoss(self: *Db, err: CallError, retrying: bool, topic: []const u8, id: i32, at_time: i64) db.Error!i64 {
+		if (err == error.OutOfMemory) {
+			return error.OutOfMemory;
+		}
+		if (err == error.Gone and !retrying) {
+			try self.clusterMoved();
+			if (self.partitionOf(topic, id)) |fresh| {
+				return self.oneOffsetTrying(topic, fresh, at_time, true);
+			}
+			self.complain("partition {d} of {s} is gone", .{ id, topic });
+		}
+		return error.Driver;
+	}
+
+	/// The partition of that id as the metadata now describes it.
+	fn partitionOf(self: *Db, topic: []const u8, id: i32) ?*Partition {
+		const found = self.topicOf(topic) orelse return null;
+		for (found.partitions) |*partition| {
+			if (partition.id == id) {
+				return partition;
+			}
+		}
+		return null;
 	}
 
 	fn readOneOffset(self: *Db, read: *Decoder) !i64 {
@@ -1131,7 +1242,7 @@ pub const Db = struct {
 				_ = try read.int32(); // leader epoch
 				if (code != 0) {
 					self.complain("kafka refused the offset request: {s}", .{errorText(code)});
-					return error.Malformed;
+					return if (movedOn(code)) error.MovedOn else error.Malformed;
 				}
 				answer = offset;
 			}
@@ -1154,6 +1265,9 @@ pub const Db = struct {
 		filter: Match,
 	) db.Error!i64 {
 		var at = from;
+		// One recovery per fetch: a cluster that keeps moving is a cluster to
+		// complain about, not to spin against.
+		var moved = false;
 		while (rows.rows.items.len < wanted and at < partition.latest) {
 			if (!self.keepGoing()) {
 				self.remember("given up on");
@@ -1181,12 +1295,36 @@ pub const Db = struct {
 			try write.string(""); // rack id
 
 			const stream = try self.leader(partition.leader);
-			const reply = try self.call(stream, .fetch, body.items);
+			const reply = self.call(stream, .fetch, body.items) catch |err| {
+				if (err == error.Gone and !moved) {
+					moved = true;
+					try self.clusterMoved();
+					const fresh = self.partitionOf(topic.name, partition.id) orelse return error.Driver;
+					partition.leader = fresh.leader;
+					partition.latest = fresh.latest;
+					continue;
+				}
+				return if (err == error.OutOfMemory) error.OutOfMemory else error.Driver;
+			};
 			var read = Decoder{ .bytes = reply };
 			const before = rows.rows.items.len;
 			const stopped = self.readFetch(&read, rows, topic.name, partition.id, wanted, filter, at) catch |err| {
 				if (err == error.OutOfMemory) {
 					return error.OutOfMemory;
+				}
+				// A leader election in the middle of a read: ask who leads it now and
+				// carry on from the offset already reached, so the rows already
+				// gathered are kept and none is read twice.
+				if (err == error.MovedOn and !moved) {
+					moved = true;
+					try self.clusterMoved();
+					const fresh = self.partitionOf(topic.name, partition.id) orelse {
+						self.complain("partition {d} of {s} is gone", .{ partition.id, topic.name });
+						return error.Driver;
+					};
+					partition.leader = fresh.leader;
+					partition.latest = fresh.latest;
+					continue;
 				}
 				if (self.last_error.items.len == 0) {
 					self.remember("kafka answered the fetch with something unexpected");
@@ -1246,7 +1384,7 @@ pub const Db = struct {
 				const records = try read.nullableBytes();
 				if (part_code != 0) {
 					self.complain("kafka refused the fetch: {s}", .{errorText(part_code)});
-					return error.Malformed;
+					return if (movedOn(part_code)) error.MovedOn else error.Malformed;
 				}
 				stopped = high_water;
 				if (records) |bytes| {
@@ -1561,6 +1699,10 @@ pub const Db = struct {
 	/// One record into one topic. The batch is built by hand, CRC included, because
 	/// Produce takes exactly what a Fetch hands back.
 	fn produce(self: *Db, topic: *Topic, wanted: i32, key: ?[]const u8, value: []const u8) db.Error!void {
+		return self.produceTrying(topic, wanted, key, value, false);
+	}
+
+	fn produceTrying(self: *Db, topic: *Topic, wanted: i32, key: ?[]const u8, value: []const u8, retrying: bool) db.Error!void {
 		if (topic.partitions.len == 0) {
 			self.complain("{s} has no partition with a leader", .{topic.name});
 			return error.Driver;
@@ -1600,9 +1742,27 @@ pub const Db = struct {
 		try write.byteArray(batch);
 
 		const stream = try self.leader(target.leader);
-		const reply = try self.call(stream, .produce, body.items);
+		const reply = self.call(stream, .produce, body.items) catch |err| {
+			// A connection that died before the request went out means the record was
+			// not written, so sending it again writes it once.
+			if (err == error.Gone and !retrying) {
+				try self.clusterMoved();
+				const fresh = self.topicOf(topic.name) orelse return error.Driver;
+				return self.produceTrying(fresh, wanted, key, value, true);
+			}
+			return if (err == error.OutOfMemory) error.OutOfMemory else error.Driver;
+		};
 		var read = Decoder{ .bytes = reply };
-		self.readProduce(&read) catch {
+		self.readProduce(&read) catch |err| {
+			if (err == error.MovedOn and !retrying) {
+				try self.clusterMoved();
+				const fresh = self.topicOf(topic.name) orelse {
+					self.complain("{s} is gone", .{topic.name});
+					return error.Driver;
+				};
+				// The record has not been written, so sending it again writes it once.
+				return self.produceTrying(fresh, wanted, key, value, true);
+			}
 			if (self.last_error.items.len == 0) {
 				self.remember("kafka did not accept the record");
 			}
@@ -1629,7 +1789,7 @@ pub const Db = struct {
 				_ = try read.string(); // error message
 				if (code != 0) {
 					self.complain("kafka refused the record: {s}", .{errorText(code)});
-					return error.Malformed;
+					return if (movedOn(code)) error.MovedOn else error.Malformed;
 				}
 			}
 		}
@@ -2155,7 +2315,9 @@ pub const Db = struct {
 		try write.int32(15000);
 
 		const stream = try self.leader(node);
-		const reply = try self.call(stream, .delete_records, body.items);
+		const reply = self.call(stream, .delete_records, body.items) catch {
+			return error.Driver;
+		};
 		var read = Decoder{ .bytes = reply };
 		const now = self.readDeleteRecords(&read) catch {
 			if (self.last_error.items.len == 0) {
@@ -2974,6 +3136,23 @@ pub fn murmur2(bytes: []const u8) i32 {
 	return @bitCast(h);
 }
 
+/// Codes that mean the cluster has moved on rather than that the request was
+/// wrong: a leader election, a broker restarting, a partition being reassigned.
+/// The answer to all of them is the same - ask for metadata again and try once
+/// more - which is what every Kafka client does and what this one did not.
+pub fn movedOn(code: i16) bool {
+	return switch (code) {
+		5, // the leader is not available yet
+		6, // this broker is not the leader for that partition
+		7, // the request timed out
+		9, // the replica is not available
+		17, // the topic is being reassigned
+		41, // this broker is not the controller
+		=> true,
+		else => false,
+	};
+}
+
 /// The error codes a broker sends back, in the words the protocol gives them.
 pub fn errorText(code: i16) []const u8 {
 	return switch (code) {
@@ -3508,4 +3687,21 @@ test "randomness is available, and different every time" {
 	try testing.expect(!std.mem.eql(u8, &first, &second));
 	// And not simply left as it was.
 	try testing.expect(!std.mem.allEqual(u8, &first, 0));
+}
+
+test "the codes that mean the cluster moved, and the ones that mean no" {
+	// A leader election, a broker restarting, a partition being reassigned: ask for
+	// metadata again and try once more.
+	for ([_]i16{ 5, 6, 7, 9, 17, 41 }) |code| {
+		try testing.expect(movedOn(code));
+	}
+	// And the ones where trying again would only ask the same wrong question.
+	for ([_]i16{ 0, 1, 2, 3, 36, 37, 38, 58 }) |code| {
+		try testing.expect(!movedOn(code));
+	}
+	// Every one of them still has words of its own; a code nobody named says so
+	// rather than pretending.
+	try testing.expectEqualStrings("this broker is not the leader for that partition", errorText(6));
+	try testing.expectEqualStrings("the topic already exists", errorText(36));
+	try testing.expectEqualStrings("an error the broker did not name", errorText(1234));
 }

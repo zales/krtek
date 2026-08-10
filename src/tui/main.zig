@@ -60,7 +60,14 @@ pub fn main(init: std.process.Init) !void {
 		const size = app.screen.size();
 		for (keys.items) |key| {
 			input.handle(&app, key, size) catch |err| {
-				app.complain("{s}", .{@errorName(err)});
+				// What the engine said, if it said anything: "Driver" on the status
+				// line tells nobody anything.
+				const said = app.conn.message();
+				if (said.len != 0) {
+					app.complain("{s}", .{said});
+				} else {
+					app.complain("{s}", .{@errorName(err)});
+				}
 			};
 		}
 		try draw.frame(&app, size);
