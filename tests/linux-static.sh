@@ -44,4 +44,6 @@ file zig-out/bin/krtek
 # shared library here for a plain `zig build test` to find.
 if [ "${TEST:-0}" = "1" ]; then
 	zig build test -Dstatic -Dmariadb="$PREFIX"
+	# And malformed bytes at the protocol parsers, from a fixed seed.
+	zig build fuzz -Doptimize=ReleaseSafe -Dstatic -Dmariadb="$PREFIX" -- 150000
 fi

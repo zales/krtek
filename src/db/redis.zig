@@ -875,6 +875,27 @@ const PREVIEW: usize = 50;
 
 // ------------------------------------------------------------------- values
 
+/// Parse one RESP reply out of a buffer, with no connection behind it. Here for
+/// the fuzzer and for tests: the protocol reader is the part that takes bytes
+/// straight off a socket and believes their length fields.
+pub fn parseReply(allocator: std.mem.Allocator, arena: std.mem.Allocator, bytes: []const u8) !Value {
+	var self = Db{
+		.allocator = allocator,
+		.socket = -1,
+		.replies = std.heap.ArenaAllocator.init(allocator),
+	};
+	defer {
+		self.replies.deinit();
+		self.buffer.deinit(allocator);
+		self.label.deinit(allocator);
+		self.version_text.deinit(allocator);
+		self.last_error.deinit(allocator);
+		self.host.deinit(allocator);
+	}
+	try self.buffer.appendSlice(allocator, bytes);
+	return self.parseValue(arena);
+}
+
 pub const Value = union(enum) {
 	nil: void,
 	text: ?[]const u8,

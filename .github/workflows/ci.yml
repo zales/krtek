@@ -55,6 +55,12 @@ jobs:
       - name: it runs
         run: ./tests/smoke.sh
 
+      # Malformed bytes at the protocol parsers. A fixed seed, so this is a
+      # regression check rather than a lottery: whatever it found once, it finds
+      # again. `zig build fuzz -- 2000000 <seed>` is the long version, by hand.
+      - name: the parsers survive malformed input
+        run: zig build fuzz -Doptimize=ReleaseSafe -Dlibpq="$(brew --prefix libpq)" -Dmariadb="$(brew --prefix mariadb-connector-c)" -- 150000
+
   # Linux is built static against musl inside an Alpine container, which gets one
   # binary that runs on any distribution - verified on Debian, with nothing
   # installed. It cannot be done on the runner itself: Debian's libpq.a is missing

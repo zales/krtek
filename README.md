@@ -441,6 +441,27 @@ rather than as the byte `S`, and `{shift}`, `{f13}` or `{kpdown}` as the private
 use codepoints that protocol gives to keys which are not text. A plain pty cannot
 express either difference, and both are where keyboard bugs live.
 
+**The parsers that read from a socket are fuzzed**, because three of them - the
+snappy and lz4 unpackers and the walker over record batches - are written out in
+this repository by hand, and they read lengths off the wire and then believe them:
+
+```sh
+zig build fuzz                      # a few seconds, from a fixed seed
+zig build fuzz -- 1000000 7         # a million inputs, from another
+zig build fuzz -- replay gzip 1f8b… # one input, once, for a debug build to look at
+```
+
+Every iteration gets a fixed budget of memory and nothing else, so a parser that
+would allocate whatever its input asked for reports `OutOfMemory` instead of taking
+the machine with it. That is not hypothetical: it is what the first run did, and
+five of the six things it has found were real -
+[the details are in the driver](src/db/kafka.zig). CI runs 150 000 inputs from a
+fixed seed on every push, so whatever it found once it finds again.
+
+`zig build test --fuzz` is what this would otherwise be; it does not compile with
+Zig 0.16.0, whose test runner passes a `*builtin.StackTrace` where a
+`*const debug.StackTrace` is wanted.
+
 The same harness records the colours, so the screenshots in this file are written
 out of it: [tests/shot.py](tests/shot.py) turns a captured screen into an SVG and
 [tests/shots.sh](tests/shots.sh) builds a small demo database and takes all of

@@ -162,6 +162,34 @@ pub fn build(b: *std.Build) void {
 		run_check.addArgs(args);
 	}
 	b.step("dbcheck", "Talk to a real server, without the interface").dependOn(&run_check.step);
+	// Malformed bytes at the parsers that read from a socket. Its own executable
+	// rather than `zig build test --fuzz`, which does not compile with Zig 0.16.0 -
+	// see tests/fuzz.zig.
+	const fuzz_module = b.createModule(.{
+		.root_source_file = b.path("tests/fuzz.zig"),
+		.target = target,
+		// Whatever was asked for: Debug by default, because a crash here is read
+		// rather than counted, and `-Doptimize=ReleaseSafe` for a long run, which is
+		// many times the inputs for the same wait and keeps every check that matters.
+		.optimize = optimize,
+		.link_libc = true,
+	});
+	fuzz_module.addImport("db", database);
+	fuzz_module.addIncludePath(b.path("vendor"));
+	fuzz_module.addCSourceFile(.{ .file = b.path("vendor/sqlite3.c"), .flags = &sqlite_flags });
+	linkPostgres(b, fuzz_module, target, libpq, linking);
+	linkMysql(b, fuzz_module, target, mariadb, linking);
+	linkTls(b, fuzz_module, target, openssl, linking);
+	if (static) {
+		linkClientLibraries(b, fuzz_module);
+	}
+	const fuzz = b.addExecutable(.{ .name = "fuzz", .root_module = fuzz_module });
+	const run_fuzz = b.addRunArtifact(fuzz);
+	if (b.args) |args| {
+		run_fuzz.addArgs(args);
+	}
+	b.step("fuzz", "Throw malformed bytes at the protocol parsers").dependOn(&run_fuzz.step);
+
 	// A one-off check that the keychain really answers on this machine.
 	const kc_module = b.createModule(.{
 		.root_source_file = b.path("tests/keychain_check.zig"),

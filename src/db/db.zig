@@ -14,8 +14,8 @@ const std = @import("std");
 pub const sqlite = @import("sqlite.zig");
 pub const postgres = @import("postgres.zig");
 const mysql = @import("mysql.zig");
-const redis = @import("redis.zig");
-const kafka = @import("kafka.zig");
+pub const redis = @import("redis.zig");
+pub const kafka = @import("kafka.zig");
 
 /// What the interface asks for, as a structure: see the file for why.
 pub const ask = @import("ask.zig");

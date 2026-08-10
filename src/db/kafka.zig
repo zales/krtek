@@ -41,6 +41,15 @@ pub const HEADERS = "headers";
 
 const COLUMNS = [_][]const u8{ PARTITION, OFFSET, TIMESTAMP, KEY, VALUE, HEADERS };
 
+/// The end of the year 9999, in milliseconds. Past this a Kafka timestamp is not
+/// a time at all, whatever it says.
+const LAST_DATE_MS: i64 = 253402300799999;
+
+/// The largest offset this driver will believe. Kafka's own are bounded by how
+/// much has ever been written to a partition; this is far above any of that and far
+/// below where adding a delta to it could overflow.
+const OFFSET_CEILING: i64 = 1 << 56;
+
 /// How long a Fetch may wait for records before answering, in milliseconds. Short
 /// on purpose: an empty topic should not hold the interface, and a long wait is
 /// what makes ctrl+c feel broken.
@@ -457,6 +466,12 @@ const Decoder = struct {
 
 	fn varint(self: *Decoder) DecodeError!i32 {
 		const value = try self.varlong();
+		// A varint that does not fit is malformed, not a reason to abort: every
+		// length inside a record is one of these, so this is the first thing a
+		// corrupted batch reaches.
+		if (value > std.math.maxInt(i32) or value < std.math.minInt(i32)) {
+			return error.Malformed;
+		}
 		return @intCast(value);
 	}
 
@@ -474,9 +489,14 @@ const Decoder = struct {
 			}
 			shift += 7;
 		}
-		// Zig-zag back to a signed number.
-		const half: i64 = @bitCast(raw >> 1);
-		return if (raw & 1 == 1) -(half + 1) else half;
+		// Zig-zag back to a signed number, without arithmetic that can overflow:
+		// negating (raw >> 1) + 1 blows up when the halved value is i64's largest,
+		// which any ten bytes of 0xff off the wire produce. Two's complement does the
+		// same job with a mask - all ones for an odd number, all zeroes for an even
+		// one - and cannot.
+		const shifted: u64 = raw >> 1;
+		const mask: u64 = 0 -% (raw & 1);
+		return @bitCast(shifted ^ mask);
 	}
 
 	fn rest(self: *Decoder) []const u8 {
@@ -1553,6 +1573,14 @@ pub const Db = struct {
 		const attributes = try read.int16();
 		const last_delta = try read.int32();
 		const base_time = try read.int64();
+		// An offset is a count from the beginning of a partition: never negative, and
+		// nowhere near where adding to it could overflow. Kafka would never send
+		// anything else; a corrupted batch would, and then every offset computed from
+		// it is arithmetic on a wire value.
+		if (base_offset < 0 or base_offset > OFFSET_CEILING or last_delta < 0) {
+			self.remember("this batch claims an offset that cannot be one");
+			return error.Malformed;
+		}
 		_ = try read.int64(); // max timestamp
 		_ = try read.int64(); // producer id
 		_ = try read.int16(); // producer epoch
@@ -1569,11 +1597,11 @@ pub const Db = struct {
 		const plain = decompress(arena, codec, packed_records) catch |err| switch (err) {
 			error.OutOfMemory => return error.OutOfMemory,
 			error.Unsupported => {
-				self.complain("these records are compressed with {s}, which krtek cannot unpack", .{@tagName(codec)});
+				self.complain("these records are compressed with {s}, which krtek cannot unpack", .{codecName(codec)});
 				return error.Malformed;
 			},
 			else => {
-				self.complain("these records are compressed with {s} and did not unpack", .{@tagName(codec)});
+				self.complain("these records are compressed with {s} and did not unpack", .{codecName(codec)});
 				return error.Malformed;
 			},
 		};
@@ -1597,6 +1625,9 @@ pub const Db = struct {
 			const value = try takeVarBytes(&one);
 			const headers = try readHeaders(arena, &one);
 
+			if (offset_delta < 0) {
+				break; // a record before the batch it is in
+			}
 			const offset = base_offset + @as(i64, offset_delta);
 			// Before where this fetch was told to start: part of the batch, not part
 			// of the answer.
@@ -1609,7 +1640,9 @@ pub const Db = struct {
 			try rows.add(&[_]Value{
 				.{ .number = partition },
 				.{ .number = offset },
-				.{ .text = try stamp(arena, base_time + time_delta) },
+				// Saturating: a timestamp is shown, not counted with, and two wire
+				// values added together are not to be trusted with a plain +.
+				.{ .text = try stamp(arena, base_time +| time_delta) },
 				if (key) |bytes| .{ .text = try arena.dupe(u8, bytes) } else .{ .nil = {} },
 				if (value) |bytes| .{ .text = try arena.dupe(u8, bytes) } else .{ .nil = {} },
 				if (headers.len != 0) .{ .text = headers } else .{ .nil = {} },
@@ -2818,6 +2851,35 @@ pub const Codec = enum(u3) {
 	_,
 };
 
+/// What to call a codec in a message. Not `@tagName`: the attributes of a batch
+/// carry three bits, so five of the eight values have names and three do not, and
+/// `@tagName` of one that does not is a panic rather than a string. A broker only
+/// has to set those bits - by corruption, or by being newer than this program - to
+/// bring krtek down, which is what the fuzzer found within seconds of existing.
+pub fn codecName(codec: Codec) []const u8 {
+	return switch (codec) {
+		.none => "none",
+		.gzip => "gzip",
+		.snappy => "snappy",
+		.lz4 => "lz4",
+		.zstd => "zstd",
+		// The number is what a person needs in order to look it up.
+		_ => "an unknown codec",
+	};
+}
+
+/// How much readable slack to leave after a compressed payload. A bit reader that
+/// runs off the end lands here rather than past the buffer.
+const SLACK = 64;
+
+/// The most a batch may unpack to. A fetch brings back at most PARTITION_BYTES per
+/// partition, so even very compressible records cannot honestly exceed this - and
+/// the length that says otherwise is a number out of the bytes being parsed. Before
+/// this, snappy reserved whatever its input claimed: a corrupt batch asking for
+/// four gigabytes got four gigabytes, which the fuzzer demonstrated by taking the
+/// machine down to its last page of memory.
+pub const MAX_UNPACKED: usize = 64 << 20;
+
 pub const CompressError = error{ Malformed, Unsupported, OutOfMemory };
 
 pub fn decompress(arena: std.mem.Allocator, codec: Codec, bytes: []const u8) CompressError![]const u8 {
@@ -2831,18 +2893,56 @@ pub fn decompress(arena: std.mem.Allocator, codec: Codec, bytes: []const u8) Com
 	};
 }
 
+/// Read a decompressing stream to its end, into memory.
+///
+/// Through a writer that owns a growing buffer rather than through
+/// `allocRemaining`: the inflater asks its writer to keep the last 32 KB of output
+/// available - that is where a back reference points - and a writer that cannot
+/// hits `unreachable` inside the standard library on input that is merely corrupt.
+/// The fuzzer found that with a mangled gzip member.
+fn drain(arena: std.mem.Allocator, reader: *std.Io.Reader) CompressError![]const u8 {
+	var out = std.Io.Writer.Allocating.initCapacity(arena, 64 * 1024) catch return error.OutOfMemory;
+	var written: usize = 0;
+	// The same shape as streamRemaining, with a running total: a stream that keeps
+	// producing is stopped at the ceiling rather than followed to the end of memory.
+	while (true) {
+		written += reader.stream(&out.writer, .unlimited) catch |err| switch (err) {
+			error.EndOfStream => break,
+			error.WriteFailed => return error.OutOfMemory,
+			else => return error.Malformed,
+		};
+		if (written > MAX_UNPACKED) {
+			return error.Malformed;
+		}
+	}
+	const list = out.toArrayList();
+	return list.items;
+}
+
 fn unzip(arena: std.mem.Allocator, bytes: []const u8) CompressError![]const u8 {
-	var input = std.Io.Reader.fixed(bytes);
-	var window: [std.compress.flate.max_window_len]u8 = undefined;
-	var stream = std.compress.flate.Decompress.init(&input, .gzip, &window);
-	return stream.reader.allocRemaining(arena, .unlimited) catch return error.Malformed;
+	// Room after the input, and this is not tidiness: Zig 0.16.0's inflater, given a
+	// corrupt stream, tosses more bits than it has read and trips
+	// `assert(seek <= end)` inside the reader it is tossing from. The slack is where
+	// that over-toss lands, so it reaches its own error instead of an unreachable.
+	// A deflate stream ends where its own bits say it ends, so trailing zeroes change
+	// nothing about a sound one. Found by the fuzzer, held by it across millions of
+	// inputs, and to be taken out when the standard library stops needing it.
+	const padded = try arena.alloc(u8, bytes.len + SLACK);
+	@memcpy(padded[0..bytes.len], bytes);
+	@memset(padded[bytes.len..], 0);
+	var input = std.Io.Reader.fixed(padded);
+	// And no window of its own: with one, the inflater keeps the history itself and
+	// streams through a writer that cannot make room. With none it writes straight
+	// into the caller's, which grows - see `drain`.
+	var stream = std.compress.flate.Decompress.init(&input, .gzip, &.{});
+	return drain(arena, &stream.reader);
 }
 
 fn unzstd(arena: std.mem.Allocator, bytes: []const u8) CompressError![]const u8 {
 	var input = std.Io.Reader.fixed(bytes);
-	const window = try arena.alloc(u8, std.compress.zstd.default_window_len + std.compress.zstd.block_size_max);
-	var stream = std.compress.zstd.Decompress.init(&input, window, .{});
-	return stream.reader.allocRemaining(arena, .unlimited) catch return error.Malformed;
+	// Buffer-less for the same reason as gzip above.
+	var stream = std.compress.zstd.Decompress.init(&input, &.{}, .{});
+	return drain(arena, &stream.reader);
 }
 
 /// Snappy, as Kafka writes it: the raw format, not the framed one. A varint
@@ -2863,6 +2963,9 @@ pub fn unsnap(arena: std.mem.Allocator, bytes: []const u8) CompressError![]const
 				return error.Malformed;
 			}
 			const piece = try snappyBlock(arena, bytes[at .. at + size]);
+			if (out.items.len + piece.len > MAX_UNPACKED) {
+				return error.Malformed;
+			}
 			try out.appendSlice(arena, piece);
 			at += size;
 		}
@@ -2891,6 +2994,9 @@ fn snappyBlock(arena: std.mem.Allocator, bytes: []const u8) CompressError![]cons
 		}
 		shift += 7;
 	}
+	if (length > MAX_UNPACKED) {
+		return error.Malformed;
+	}
 	var out = try std.ArrayListUnmanaged(u8).initCapacity(arena, length);
 	while (at < bytes.len) {
 		const tag = bytes[at];
@@ -2912,6 +3018,9 @@ fn snappyBlock(arena: std.mem.Allocator, bytes: []const u8) CompressError![]cons
 					at += extra;
 				}
 				if (at + count > bytes.len) {
+					return error.Malformed;
+				}
+				if (out.items.len + count > MAX_UNPACKED) {
 					return error.Malformed;
 				}
 				try out.appendSlice(arena, bytes[at .. at + count]);
@@ -2947,6 +3056,9 @@ fn snappyBlock(arena: std.mem.Allocator, bytes: []const u8) CompressError![]cons
 					},
 				}
 				if (distance == 0 or distance > out.items.len) {
+					return error.Malformed;
+				}
+				if (out.items.len + count > MAX_UNPACKED) {
 					return error.Malformed;
 				}
 				// Byte by byte on purpose: a copy may overlap itself, which is how a
@@ -2998,6 +3110,9 @@ pub fn unlz4(arena: std.mem.Allocator, bytes: []const u8) CompressError![]const 
 		}
 		const block = bytes[at .. at + size];
 		at += size;
+		if (out.items.len + size > MAX_UNPACKED) {
+			return error.Malformed;
+		}
 		if (stored) {
 			try out.appendSlice(arena, block);
 		} else {
@@ -3029,6 +3144,9 @@ fn lz4Block(arena: std.mem.Allocator, block: []const u8, out: *List) CompressErr
 		if (at + literals > block.len) {
 			return error.Malformed;
 		}
+		if (out.items.len + literals > MAX_UNPACKED) {
+			return error.Malformed;
+		}
 		try out.appendSlice(arena, block[at .. at + literals]);
 		at += literals;
 		if (at >= block.len) {
@@ -3051,7 +3169,7 @@ fn lz4Block(arena: std.mem.Allocator, block: []const u8, out: *List) CompressErr
 			}
 		}
 		length += 4; // the minimum match
-		if (distance == 0 or distance > out.items.len) {
+		if (distance == 0 or distance > out.items.len or out.items.len + length > MAX_UNPACKED) {
 			return error.Malformed;
 		}
 		var left = length;
@@ -3109,6 +3227,13 @@ pub fn wallMs() i64 {
 pub fn stamp(arena: std.mem.Allocator, millis: i64) ![]const u8 {
 	if (millis <= 0) {
 		return arena.dupe(u8, "");
+	}
+	// Beyond what a date can be, the number is shown as it stands: the calendar
+	// arithmetic below counts years one at a time from 1970 and overflows long
+	// before it arrives. A record whose timestamp says the year 291 million is
+	// corrupt, and saying so beats both a wrong date and a crash.
+	if (millis > LAST_DATE_MS) {
+		return std.fmt.allocPrint(arena, "{d} (not a date)", .{millis});
 	}
 	const seconds: u64 = @intCast(@divFloor(millis, 1000));
 	const ms: u64 = @intCast(@mod(millis, 1000));
@@ -3372,6 +3497,31 @@ test "a varint survives the round trip, sign and all" {
 		try testing.expectEqual(number, try read.varlong());
 	}
 	try testing.expectEqual(out.items.len, read.at);
+}
+
+test "a varint of ten 0xff bytes is a number, not a crash" {
+	// The largest zig-zag encoding there is. Decoding it used to negate i64's
+	// largest value plus one, which overflows - and every length inside a record is
+	// a varint, so any corrupt batch reached it.
+	const worst = [_]u8{ 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x01 };
+	var read = Decoder{ .bytes = &worst };
+	const value = try read.varlong();
+	try testing.expectEqual(std.math.minInt(i64), value);
+
+	// And as an i32, which is what a record's lengths are read as: too large to fit
+	// is malformed rather than truncated to something plausible.
+	var again = Decoder{ .bytes = &worst };
+	try testing.expectError(error.Malformed, again.varint());
+
+	// The two ends of the range still come back as themselves.
+	var out: List = .empty;
+	defer out.deinit(testing.allocator);
+	const write = Encoder{ .out = &out, .a = testing.allocator };
+	try write.varlong(std.math.minInt(i64));
+	try write.varlong(std.math.maxInt(i64));
+	var back = Decoder{ .bytes = out.items };
+	try testing.expectEqual(std.math.minInt(i64), try back.varlong());
+	try testing.expectEqual(std.math.maxInt(i64), try back.varlong());
 }
 
 test "the fixed width numbers are big endian, as the protocol says" {
@@ -3801,4 +3951,203 @@ test "the codes that mean the cluster moved, and the ones that mean no" {
 	try testing.expectEqualStrings("this broker is not the leader for that partition", errorText(6));
 	try testing.expectEqualStrings("the topic already exists", errorText(36));
 	try testing.expectEqualStrings("an error the broker did not name", errorText(1234));
+}
+
+// -------------------------------------------------------------------- fuzzing
+//
+// These four take bytes straight off a socket, and three of them - the snappy and
+// lz4 unpackers and the record walker - were written here by hand. A malformed
+// input has to come back as an error, never as a panic: an overflow, a slice out
+// of bounds or an allocation of whatever a length field happened to say.
+//
+//     zig build test --fuzz          # until it finds something
+//
+// Without --fuzz these run over the corpus below, so the inputs that once broke
+// something stay checked on every ordinary test run.
+
+/// Anything the unpackers are handed must come back as bytes or as an error.
+fn fuzzOneCodec(codec: Codec, input: []const u8) anyerror!void {
+	var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+	defer arena.deinit();
+	const out = decompress(arena.allocator(), codec, input) catch return;
+	// A successful unpacking has to be readable memory of the length it claims.
+	var sum: usize = 0;
+	for (out) |byte| {
+		sum += byte;
+	}
+	std.mem.doNotOptimizeAway(sum);
+}
+
+test "fuzz: snappy" {
+	try std.testing.fuzz({}, struct {
+		fn one(_: void, smith: *std.testing.Smith) anyerror!void {
+			var buffer: [4096]u8 = undefined;
+			const length = smith.slice(&buffer);
+			try fuzzOneCodec(.snappy, buffer[0..length]);
+		}
+	}.one, .{ .corpus = &.{
+		// A literal, and a copy that overlaps itself.
+		&.{ 0x03, 0x08, 'a', 'b', 'c' },
+		&.{ 0x09, 0x08, 'a', 'b', 'c', 0x09, 0x03 },
+		// A copy that reaches further back than anything written: must not read
+		// before the buffer.
+		&.{ 0x09, 0x08, 'a', 'b', 'c', 0x09, 0xff },
+		// A length that promises far more than the input holds.
+		&.{ 0xff, 0xff, 0xff, 0x7f, 0x08, 'a' },
+		// The xerial framing kafka's java producer writes, with a block length
+		// running off the end.
+		&.{ 0x82, 'S', 'N', 'A', 'P', 'P', 'Y', 0, 0, 0, 0, 1, 0, 0, 0, 1, 0xff, 0xff, 0xff, 0xff },
+		"",
+	} });
+}
+
+test "fuzz: lz4" {
+	try std.testing.fuzz({}, struct {
+		fn one(_: void, smith: *std.testing.Smith) anyerror!void {
+			var buffer: [4096]u8 = undefined;
+			const length = smith.slice(&buffer);
+			try fuzzOneCodec(.lz4, buffer[0..length]);
+		}
+	}.one, .{ .corpus = &.{
+		// A stored block, and a compressed one.
+		&.{ 0x04, 0x22, 0x4d, 0x18, 0x40, 0x70, 0x00, 0x03, 0x00, 0x00, 0x80, 'a', 'b', 'c', 0, 0, 0, 0 },
+		&.{ 0x04, 0x22, 0x4d, 0x18, 0x40, 0x70, 0x00, 0x06, 0x00, 0x00, 0x00, 0x32, 'a', 'b', 'c', 0x03, 0x00, 0, 0, 0, 0 },
+		// A match offset with nothing behind it, and a token promising more
+		// literals than the block has.
+		&.{ 0x04, 0x22, 0x4d, 0x18, 0x40, 0x70, 0x00, 0x06, 0x00, 0x00, 0x00, 0x32, 'a', 'b', 'c', 0xff, 0xff, 0, 0, 0, 0 },
+		&.{ 0x04, 0x22, 0x4d, 0x18, 0x40, 0x70, 0x00, 0x02, 0x00, 0x00, 0x00, 0xf0, 0xff, 0, 0, 0, 0 },
+		// A frame that says it carries a dictionary, and a block length of 2 GB.
+		&.{ 0x04, 0x22, 0x4d, 0x18, 0x41, 0x70, 0x00, 0, 0, 0, 0 },
+		&.{ 0x04, 0x22, 0x4d, 0x18, 0x40, 0x70, 0x00, 0xff, 0xff, 0xff, 0x7f, 'a' },
+		&.{ 0x04, 0x22, 0x4d, 0x18 },
+		"",
+	} });
+}
+
+test "fuzz: gzip and zstd, which are the standard library's" {
+	try std.testing.fuzz({}, struct {
+		fn one(_: void, smith: *std.testing.Smith) anyerror!void {
+			var buffer: [4096]u8 = undefined;
+			const length = smith.slice(&buffer);
+			try fuzzOneCodec(.gzip, buffer[0..length]);
+			try fuzzOneCodec(.zstd, buffer[0..length]);
+		}
+	}.one, .{ .corpus = &.{
+		&.{ 0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x03, 0x4b, 0x4c, 0x4a, 0x06, 0x00, 0xc2, 0x41, 0x24, 0x35, 0x03, 0x00, 0x00, 0x00 },
+		&.{ 0x1f, 0x8b, 0x08, 0x00 },
+		&.{ 0x28, 0xb5, 0x2f, 0xfd },
+		"",
+	} });
+}
+
+/// The record walker with no socket behind it, for the fuzzer in tests/fuzz.zig.
+pub fn fuzzBatches(allocator: std.mem.Allocator, input: []const u8) anyerror!void {
+	var self = Db{
+		.allocator = allocator,
+		.stream = .{ .fd = -1 },
+		.replies = std.heap.ArenaAllocator.init(allocator),
+	};
+	defer {
+		self.replies.deinit();
+		self.host.deinit(self.allocator);
+		self.label.deinit(self.allocator);
+		self.version_text.deinit(self.allocator);
+		self.last_error.deinit(self.allocator);
+		self.cluster_id.deinit(self.allocator);
+		self.brokers.deinit(self.allocator);
+		self.leaders.deinit(self.allocator);
+	}
+	var rows = Rows{ .owner = &self, .names = &COLUMNS };
+	_ = try self.readBatches(input, &rows, "topic", 0, 50, .{}, 0);
+	while (try rows.next()) {
+		for (0..rows.columnCount()) |i| {
+			switch (rows.value(i)) {
+				.text => |text| std.mem.doNotOptimizeAway(text.len),
+				.int => |number| std.mem.doNotOptimizeAway(number),
+				else => {},
+			}
+		}
+	}
+}
+
+/// The record walker, which is the one that reads lengths out of the bytes and
+/// then trusts them. Driven without a socket: a Db is needed for the arena and the
+/// row list, and nothing here touches the connection.
+fn fuzzOneBatch(input: []const u8) anyerror!void {
+	var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+	defer arena.deinit();
+	var self = Db{
+		.allocator = std.testing.allocator,
+		.stream = .{ .fd = -1 },
+		.replies = std.heap.ArenaAllocator.init(std.testing.allocator),
+	};
+	defer {
+		self.replies.deinit();
+		self.host.deinit(self.allocator);
+		self.label.deinit(self.allocator);
+		self.version_text.deinit(self.allocator);
+		self.last_error.deinit(self.allocator);
+		self.cluster_id.deinit(self.allocator);
+		self.brokers.deinit(self.allocator);
+		self.leaders.deinit(self.allocator);
+	}
+	var rows = Rows{ .owner = &self, .names = &COLUMNS };
+	_ = self.readBatches(input, &rows, "topic", 0, 50, .{}, 0) catch return;
+	// Whatever came out has to be a row of six readable values.
+	while (rows.next() catch return) {
+		for (0..rows.columnCount()) |i| {
+			switch (rows.value(i)) {
+				.text => |text| std.mem.doNotOptimizeAway(text.len),
+				.int => |number| std.mem.doNotOptimizeAway(number),
+				.null => {},
+				else => {},
+			}
+		}
+	}
+}
+
+test "fuzz: record batches" {
+	try std.testing.fuzz({}, struct {
+		fn one(_: void, smith: *std.testing.Smith) anyerror!void {
+			var buffer: [8192]u8 = undefined;
+			const length = smith.slice(&buffer);
+			try fuzzOneBatch(buffer[0..length]);
+		}
+	}.one, .{ .corpus = &.{
+		// One record, uncompressed: base offset, length, epoch, magic 2, crc,
+		// attributes, deltas, producer fields, one record with a key and a value.
+		&.{
+			0,    0,    0,    0,    0,    0,    0,    0, // base offset
+			0,    0,    0,    59, // length
+			0,    0,    0,    0, // leader epoch
+			2, // magic
+			0,    0,    0,    0, // crc
+			0,    0, // attributes
+			0,    0,    0,    0, // last offset delta
+			0,    0,    0,    0,    0,    0,    0,    0, // base timestamp
+			0,    0,    0,    0,    0,    0,    0,    0, // max timestamp
+            0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, // producer id
+            0xff, 0xff, // producer epoch
+            0xff, 0xff, 0xff, 0xff, // base sequence
+            0,    0,    0,    1, // one record
+            14,   0,    0,    0,    2,    'k',  'v',  4,
+            'v',  'a',  'l',  'u',  0,
+		},
+		// A batch that says magic 1, which is the old format.
+		&([_]u8{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 49, 0, 0, 0, 0, 1 } ++ [_]u8{0} ** 48),
+		// A batch whose length runs past the buffer, and one that claims a record
+		// count of two billion.
+		&([_]u8{ 0, 0, 0, 0, 0, 0, 0, 0, 0x7f, 0xff, 0xff, 0xff, 0, 0, 0, 0, 2 } ++ [_]u8{0} ** 44),
+		&.{
+			0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 49, 0, 0, 0, 0, 2,
+			0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+			0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+			0x7f, 0xff, 0xff, 0xff,
+		},
+		// A batch that says it is compressed with snappy but holds nothing of the
+		// kind, and a control batch, which carries no records anybody wrote.
+		&([_]u8{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 49, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 2 } ++ [_]u8{0} ** 41),
+		&([_]u8{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 49, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0x20 } ++ [_]u8{0} ** 41),
+		"",
+	} });
 }
