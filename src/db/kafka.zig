@@ -1056,6 +1056,11 @@ pub const Db = struct {
 			if (code != 0) {
 				continue;
 			}
+			// By id, and not because it looks tidier: a page is a window over the
+			// partitions in the order they are walked, so that order has to be the
+			// same every time it is asked for. Metadata hands them over in whatever
+			// order it likes, which made page 2 and page 3 overlap.
+			std.mem.sort(Partition, partitions.items, {}, byPartitionId);
 			try topics.append(arena, .{
 				.name = name,
 				.internal = internal,
@@ -1063,6 +1068,10 @@ pub const Db = struct {
 			});
 		}
 		self.topics = topics.items;
+	}
+
+	fn byPartitionId(_: void, a: Partition, b: Partition) bool {
+		return a.id < b.id;
 	}
 
 	/// The topic by that name out of the metadata just read.
@@ -1175,7 +1184,7 @@ pub const Db = struct {
 			const reply = try self.call(stream, .fetch, body.items);
 			var read = Decoder{ .bytes = reply };
 			const before = rows.rows.items.len;
-			const stopped = self.readFetch(&read, rows, topic.name, partition.id, wanted, filter) catch |err| {
+			const stopped = self.readFetch(&read, rows, topic.name, partition.id, wanted, filter, at) catch |err| {
 				if (err == error.OutOfMemory) {
 					return error.OutOfMemory;
 				}
@@ -1195,6 +1204,11 @@ pub const Db = struct {
 		return at;
 	}
 
+	/// `floor` is the offset the fetch asked to start at. It matters: a fetch
+	/// answers with whole record batches, so the batch holding that offset arrives
+	/// from its own beginning and everything before the offset has to be dropped -
+	/// otherwise every page begins at the start of a batch instead of where it was
+	/// asked to begin.
 	fn readFetch(
 		self: *Db,
 		read: *Decoder,
@@ -1203,6 +1217,7 @@ pub const Db = struct {
 		partition: i32,
 		wanted: usize,
 		filter: Match,
+		floor: i64,
 	) !i64 {
 		_ = try read.int32(); // throttle
 		const code = try read.int16();
@@ -1235,7 +1250,7 @@ pub const Db = struct {
 				}
 				stopped = high_water;
 				if (records) |bytes| {
-					stopped = try self.readBatches(bytes, rows, topic, partition, wanted, filter);
+					stopped = try self.readBatches(bytes, rows, topic, partition, wanted, filter, floor);
 				}
 			}
 		}
@@ -1253,6 +1268,7 @@ pub const Db = struct {
 		partition: i32,
 		wanted: usize,
 		filter: Match,
+		floor: i64,
 	) !i64 {
 		var at: usize = 0;
 		var stopped: i64 = -1;
@@ -1269,7 +1285,7 @@ pub const Db = struct {
 			}
 			const batch = bytes[at .. at + total];
 			at += total;
-			stopped = try self.readBatch(batch, base_offset, rows, topic, partition, wanted, filter);
+			stopped = try self.readBatch(batch, base_offset, rows, topic, partition, wanted, filter, floor);
 			if (rows.rows.items.len >= wanted) {
 				break;
 			}
@@ -1286,6 +1302,7 @@ pub const Db = struct {
 		partition: i32,
 		wanted: usize,
 		filter: Match,
+		floor: i64,
 	) !i64 {
 		const arena = self.replies.allocator();
 		var read = Decoder{ .bytes = batch };
@@ -1346,6 +1363,11 @@ pub const Db = struct {
 			const headers = try readHeaders(arena, &one);
 
 			const offset = base_offset + @as(i64, offset_delta);
+			// Before where this fetch was told to start: part of the batch, not part
+			// of the answer.
+			if (offset < floor) {
+				continue;
+			}
 			if (!filter.keeps(key, value, offset)) {
 				continue;
 			}
@@ -1380,18 +1402,12 @@ pub const Db = struct {
 		try self.readOffsets(topic);
 
 		const filter = Match.of(request.where);
+		const total = filter.countAcross(topic.partitions);
 		if (request.count) {
 			// A filter on the partition or the offset is exact and costs nothing - it
 			// is arithmetic on what ListOffsets already said. One on a key or a value
 			// cannot be answered without reading the log, so the count stays the
 			// number of records those bounds cover: what will be looked through.
-			var total: i64 = 0;
-			for (topic.partitions) |partition| {
-				if (!filter.wantsPartition(partition.id)) {
-					continue;
-				}
-				total += filter.countIn(&partition);
-			}
 			return .{ .kafka = try self.oneNumber("records", total) };
 		}
 
@@ -1402,24 +1418,42 @@ pub const Db = struct {
 			.table = topic.name,
 		};
 		const wanted = if (request.limit != 0) request.limit else 50;
-		// Which partitions, and where in each of them: an explicit offset wins, then
-		// the page, and reading in reverse takes the end of the log.
-		const backwards = request.descending;
+
+		// A page is a window over the topic's records, taken partition by partition
+		// in the order the partitions come in - which is the same order the count
+		// above adds them up in, so page 2 begins exactly where page 1 stopped and
+		// no record is shown twice. Reading each partition from its own offset
+		// instead, which is what this did at first, skips `limit` records in every
+		// partition and makes the pages overlap.
+		//
+		// Records have no order across partitions, only within one, so this is the
+		// only arrangement in which paging means anything at all.
+		var skip: i64 = @intCast(request.offset);
+		if (request.descending) {
+			// The same window, counted from the end: the last page first.
+			const from_end = total - @as(i64, @intCast(request.offset + wanted));
+			skip = @max(0, from_end);
+		}
 		for (topic.partitions) |*partition| {
-			if (!filter.wantsPartition(partition.id)) {
-				continue;
-			}
 			if (rows.rows.items.len >= wanted) {
 				break;
 			}
-			const room = wanted - rows.rows.items.len;
-			const start = filter.startOffset(partition, request.offset, room, backwards);
+			if (!filter.wantsPartition(partition.id)) {
+				continue;
+			}
+			const available = filter.countIn(partition);
+			if (skip >= available) {
+				skip -= available;
+				continue;
+			}
+			const start = filter.lowerBound(partition) + skip;
+			skip = 0;
 			_ = self.fetchInto(&rows, topic, partition, start, wanted, filter) catch |err| {
 				rows.close();
 				return err;
 			};
 		}
-		if (backwards) {
+		if (request.descending) {
 			std.mem.reverse([]const Value, rows.rows.items);
 		}
 		return .{ .kafka = rows };
@@ -2204,6 +2238,7 @@ pub const Match = struct {
 	upto: ?i64 = null,
 	key: ?[]const u8 = null,
 	key_like: ?[]const u8 = null,
+	value: ?[]const u8 = null,
 	value_like: ?[]const u8 = null,
 
 	pub fn of(where: []const db.ask.Filter) Match {
@@ -2233,10 +2268,10 @@ pub const Match = struct {
 					else => {},
 				}
 			} else if (std.mem.eql(u8, filter.column, VALUE)) {
-				if (filter.op == .like) {
-					self.value_like = filter.value;
-				} else if (filter.op == .eq) {
-					self.value_like = filter.value;
+				switch (filter.op) {
+					.eq => self.value = filter.value,
+					.like => self.value_like = filter.value,
+					else => {},
 				}
 			}
 		}
@@ -2260,18 +2295,26 @@ pub const Match = struct {
 		return if (last > first) last - first else 0;
 	}
 
-	/// Where to start reading one partition: an offset that was asked for, else the
-	/// page, and for a reverse read the tail of the log.
-	pub fn startOffset(self: Match, partition: *const Partition, page_offset: usize, room: usize, backwards: bool) i64 {
+	/// The first offset of a partition this request could want: what is still there,
+	/// or what was asked for, whichever is later.
+	pub fn lowerBound(self: Match, partition: *const Partition) i64 {
 		if (self.from) |from| {
 			return @max(from, partition.earliest);
 		}
-		if (backwards) {
-			const back: i64 = @intCast(room);
-			return @max(partition.earliest, partition.latest - back);
+		return partition.earliest;
+	}
+
+	/// How many records the whole topic offers this request, which is what the page
+	/// numbers are counted against.
+	pub fn countAcross(self: Match, partitions: []const Partition) i64 {
+		var total: i64 = 0;
+		for (partitions) |*partition| {
+			if (!self.wantsPartition(partition.id)) {
+				continue;
+			}
+			total += self.countIn(partition);
 		}
-		const skip: i64 = @intCast(page_offset);
-		return @min(partition.earliest + skip, partition.latest);
+		return total;
 	}
 
 	pub fn keeps(self: Match, key: ?[]const u8, value: ?[]const u8, offset: i64) bool {
@@ -2292,6 +2335,11 @@ pub const Match = struct {
 		}
 		if (self.key_like) |pattern| {
 			if (!likeMatch(pattern, key orelse "")) {
+				return false;
+			}
+		}
+		if (self.value) |wanted| {
+			if (value == null or !std.mem.eql(u8, value.?, wanted)) {
 				return false;
 			}
 		}
@@ -2662,8 +2710,9 @@ pub fn unlz4(arena: std.mem.Allocator, bytes: []const u8) CompressError![]const 
 		return error.Malformed;
 	}
 	const flags = bytes[4];
-	const independent = (flags & 0x20) != 0;
-	_ = independent;
+	// Block independence is not read: dependent blocks may copy from the block
+	// before them, and since every block is appended to one buffer here and a copy
+	// looks that far back regardless, both kinds come out the same.
 	const has_content_size = (flags & 0x08) != 0;
 	const has_dictionary = (flags & 0x01) != 0;
 	if (has_dictionary) {
@@ -3201,16 +3250,103 @@ test "conditions become the fetch's bounds, and the rest is compared as records 
 	const partition = Partition{ .id = 2, .leader = 1, .earliest = 50, .latest = 500 };
 	// The window the bounds describe, which is what the count reports.
 	try testing.expectEqual(@as(i64, 10), filter.countIn(&partition));
-	// Reading starts at the offset that was asked for.
-	try testing.expectEqual(@as(i64, 100), filter.startOffset(&partition, 0, 50, false));
+	// Reading starts at the offset that was asked for, not at what is still there.
+	try testing.expectEqual(@as(i64, 100), filter.lowerBound(&partition));
 
 	const nothing = Match{};
 	try testing.expectEqual(@as(i64, 450), nothing.countIn(&partition));
-	// A page is a window of offsets from the earliest one still there.
-	try testing.expectEqual(@as(i64, 50), nothing.startOffset(&partition, 0, 50, false));
-	try testing.expectEqual(@as(i64, 150), nothing.startOffset(&partition, 100, 50, false));
-	// Backwards is the tail of the log, which is what sorting descending means.
-	try testing.expectEqual(@as(i64, 450), nothing.startOffset(&partition, 0, 50, true));
+	try testing.expectEqual(@as(i64, 50), nothing.lowerBound(&partition));
+}
+
+test "an equality on the value is an equality, not a substring" {
+	const exact = Match.of(&.{.{ .column = VALUE, .value = "done" }});
+	try testing.expect(exact.keeps("k", "done", 1));
+	try testing.expect(!exact.keeps("k", "done and dusted", 1));
+	try testing.expect(!exact.keeps("k", null, 1));
+
+	const loose = Match.of(&.{.{ .column = VALUE, .op = .like, .value = "%done%" }});
+	try testing.expect(loose.keeps("k", "done", 1));
+	try testing.expect(loose.keeps("k", "done and dusted", 1));
+	try testing.expect(!loose.keeps("k", "nothing here", 1));
+}
+
+test "a page is a window over the topic, so pages do not overlap" {
+	// Three partitions with three records each: nine altogether, which is what the
+	// count says and therefore what the page numbers are counted against.
+	const partitions = [_]Partition{
+		.{ .id = 0, .leader = 1, .earliest = 0, .latest = 3 },
+		.{ .id = 1, .leader = 1, .earliest = 100, .latest = 103 },
+		.{ .id = 2, .leader = 1, .earliest = 50, .latest = 53 },
+	};
+	const filter = Match{};
+	try testing.expectEqual(@as(i64, 9), filter.countAcross(&partitions));
+
+	// Walking a page of four the way select() does: which partition it starts in
+	// and at which offset. Page two has to begin where page one stopped - that is
+	// the whole point, and applying the page to every partition instead was the bug
+	// this test was written for.
+	const Step = struct { partition: i32, offset: i64 };
+	const walk = struct {
+		fn of(list: []const Partition, match: Match, skip_in: i64, wanted: usize, out: *std.ArrayListUnmanaged(Step), a: std.mem.Allocator) !void {
+			var skip = skip_in;
+			var taken: usize = 0;
+			for (list) |*partition| {
+				if (taken >= wanted) {
+					break;
+				}
+				const available = match.countIn(partition);
+				if (skip >= available) {
+					skip -= available;
+					continue;
+				}
+				const start = match.lowerBound(partition) + skip;
+				skip = 0;
+				var at = start;
+				while (at < partition.latest and taken < wanted) : (at += 1) {
+					try out.append(a, .{ .partition = partition.id, .offset = at });
+					taken += 1;
+				}
+			}
+		}
+	}.of;
+
+	var arena = std.heap.ArenaAllocator.init(testing.allocator);
+	defer arena.deinit();
+	const a = arena.allocator();
+
+	var first: std.ArrayListUnmanaged(Step) = .empty;
+	try walk(&partitions, filter, 0, 4, &first, a);
+	var second: std.ArrayListUnmanaged(Step) = .empty;
+	try walk(&partitions, filter, 4, 4, &second, a);
+	var third: std.ArrayListUnmanaged(Step) = .empty;
+	try walk(&partitions, filter, 8, 4, &third, a);
+
+	try testing.expectEqualSlices(Step, &[_]Step{
+		.{ .partition = 0, .offset = 0 },
+		.{ .partition = 0, .offset = 1 },
+		.{ .partition = 0, .offset = 2 },
+		.{ .partition = 1, .offset = 100 },
+	}, first.items);
+	try testing.expectEqualSlices(Step, &[_]Step{
+		.{ .partition = 1, .offset = 101 },
+		.{ .partition = 1, .offset = 102 },
+		.{ .partition = 2, .offset = 50 },
+		.{ .partition = 2, .offset = 51 },
+	}, second.items);
+	// The last page is short, and stops rather than wrapping.
+	try testing.expectEqualSlices(Step, &[_]Step{.{ .partition = 2, .offset = 52 }}, third.items);
+
+	// Every record exactly once across the three pages.
+	try testing.expectEqual(@as(usize, 9), first.items.len + second.items.len + third.items.len);
+}
+
+test "a partition filter narrows what the pages are counted against" {
+	const partitions = [_]Partition{
+		.{ .id = 0, .leader = 1, .earliest = 0, .latest = 3 },
+		.{ .id = 1, .leader = 1, .earliest = 0, .latest = 5 },
+	};
+	const only_one = Match.of(&.{.{ .column = PARTITION, .value = "1" }});
+	try testing.expectEqual(@as(i64, 5), only_one.countAcross(&partitions));
 }
 
 test "a timestamp is readable, and zero is nothing" {

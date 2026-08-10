@@ -110,7 +110,8 @@ check() {
 	what=$1
 	target=$2
 	wanted=$3
-	out=$(zig build dbcheck -- "$target" 2>&1 || true)
+	table=$4
+	out=$(zig build dbcheck -- "$target" $table 2>&1 || true)
 	printf '%s' "$out" | grep -q "$wanted" || {
 		echo "--- what came back:" >&2
 		printf '%s\n' "$out" >&2
@@ -120,6 +121,19 @@ check() {
 }
 
 check "plaintext" "kafka://127.0.0.1:9093" "connected:"
+
+# Twelve records over three partitions, which is the shape that catches paging:
+# a page is a window over the whole topic, so every record has to come back
+# exactly once across the pages and none of them twice. This was wrong twice -
+# once because the page was applied to every partition separately, once because a
+# fetch answers with whole batches and the records before the offset it was asked
+# for were kept.
+kafka kafka-topics.sh --bootstrap-server localhost:9092 --create --topic pages \
+	--partitions 3 --replication-factor 1 >/dev/null
+docker exec "$NAME" bash -c 'for i in $(seq -w 1 12); do echo "k$i:zaznam-$i"; done |
+	/opt/kafka/bin/kafka-console-producer.sh --bootstrap-server localhost:9092 --topic pages \
+	  --property parse.key=true --property key.separator=:' >/dev/null 2>&1
+check "pages neither overlap nor skip" "kafka://127.0.0.1:9093" "paged: 12 records, 12 distinct" pages
 check "every partition is counted" "kafka://127.0.0.1:9093" "orders rows~9 exact=9"
 for codec in gzip snappy lz4 zstd; do
 	check "$codec unpacks" "kafka://127.0.0.1:9093" "c-$codec rows~3 exact=3"

@@ -319,12 +319,12 @@ pub const Db = struct {
 			if (pattern.len == 1 and pattern[0] == '*') {
 				return .{ .redis = try self.oneNumber("keys", self.dbSize() orelse 0) };
 			}
-			var rows = try self.scan(pattern);
+			var rows = try self.scan(pattern, 0, PAGE);
 			const found: i64 = @intCast(rows.rows.items.len);
 			rows.close();
 			return .{ .redis = try self.oneNumber("keys", found) };
 		}
-		return .{ .redis = try self.scan(pattern) };
+		return .{ .redis = try self.scan(pattern, request.offset, if (request.limit != 0) request.limit else PAGE) };
 	}
 
 	/// Insert, update or delete one key.
@@ -490,12 +490,20 @@ pub const Db = struct {
 	}
 
 	/// The rows of the pseudo table: key, type, ttl and value.
-	fn scan(self: *Db, pattern: []const u8) db.Error!Rows {
+	/// The keys a pattern matches, from `skip` onwards and at most `take` of them.
+	///
+	/// SCAN has no way to start part way in, so a later page is reached by walking
+	/// past the earlier ones - which is what the grid's page numbers mean, and the
+	/// price a keyspace with no index charges for them. Before this, `skip` and
+	/// `take` were ignored altogether and every page showed the same keys.
+	fn scan(self: *Db, pattern: []const u8, skip: usize, take: usize) db.Error!Rows {
 		const arena = self.replies.allocator();
 		var rows = Rows{ .owner = self, .names = &[_][]const u8{ "key", "type", "ttl", "value" } };
 		var cursor: []const u8 = "0";
 		var found: usize = 0;
-		while (found < PAGE) {
+		var passed: usize = 0;
+		const ceiling = @min(take, PAGE);
+		while (found < ceiling) {
 			var buf: [32]u8 = undefined;
 			const reply = try self.command(&[_][]const u8{
 				"SCAN",                                     cursor,
@@ -514,6 +522,15 @@ pub const Db = struct {
 			const keys = pair[1].list orelse &[_]Value{};
 			for (keys) |item| {
 				const key = item.text orelse continue;
+				if (passed < skip) {
+					passed += 1;
+					continue;
+				}
+				if (found >= ceiling) {
+					break;
+				}
+				// The type, the ttl and the value are three more commands per key, so
+				// they are only asked for once a key is going to be shown.
 				try rows.add(&[_]Value{
 					.{ .text = try arena.dupe(u8, key) },
 					.{ .text = try arena.dupe(u8, try self.keyType(key)) },
