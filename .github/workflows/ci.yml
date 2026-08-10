@@ -51,10 +51,12 @@ jobs:
       - name: it runs
         run: ./tests/smoke.sh
 
-  # Linux links the client libraries dynamically: Debian's libpq.a is missing the
-  # pgcommon and pgport archives it needs, so -Dstatic cannot work with the
-  # distribution's own packages, and a binary built there wants libpq5 and
-  # libmariadb3 installed.
+  # Linux is built static against musl inside an Alpine container, which gets one
+  # binary that runs on any distribution - verified on Debian, with nothing
+  # installed. It cannot be done on the runner itself: Debian's libpq.a is missing
+  # the pgcommon and pgport archives it needs, and Alpine, which has those, ships
+  # no archive for the MariaDB connector - so that one is built from source, which
+  # is what tests/linux-static.sh does.
   linux:
     name: linux ${{ matrix.arch }}
     runs-on: ${{ matrix.runner }}
@@ -68,16 +70,28 @@ jobs:
             runner: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v4
-      - uses: mlugg/setup-zig@v2
-        with:
-          version: 0.16.0
 
-      - run: |
-          sudo apt-get update
-          sudo apt-get install -y pkg-config libpq-dev libmariadb-dev
+      - name: build static, in alpine
+        run: |
+          docker run --rm -v "$PWD:/src" -w /src alpine:3.22 sh -euc '
+            apk add --no-cache build-base cmake pkgconf python3 curl tar xz \
+              postgresql-dev openssl-dev openssl-libs-static zlib-static >/dev/null
+            curl -fsSL "https://ziglang.org/download/0.16.0/zig-$(uname -m)-linux-0.16.0.tar.xz" -o /tmp/zig.tar.xz
+            mkdir -p /opt/zig && tar xJf /tmp/zig.tar.xz -C /opt/zig --strip-components=1
+            export PATH=/opt/zig:$PATH ZIG_GLOBAL_CACHE_DIR=/tmp/zig-cache
+            ./fetch-sqlite.sh
+            OPTIMIZE=ReleaseSafe ./tests/linux-static.sh 
+            zig build test
+            ./tests/smoke.sh
+          '
 
-      - run: ./fetch-sqlite.sh
-      - run: zig build -Doptimize=ReleaseSafe
-      - run: zig build test
-      - run: ./tests/smoke.sh
-      - run: ldd zig-out/bin/krtek
+      # Static all the way down: this is the whole point of the Alpine detour, and
+      # a shared library sneaking back in would not be noticed otherwise.
+      - name: it needs nothing at all
+        run: |
+          file zig-out/bin/krtek | tee links.txt
+          grep -q "statically linked" links.txt
+
+      - name: and on a distribution that is not Alpine
+        run: |
+          docker run --rm -v "$PWD:/src" -w /src debian:12 ./zig-out/bin/krtek --help | head -2

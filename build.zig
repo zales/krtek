@@ -65,6 +65,8 @@ pub fn build(b: *std.Build) void {
 		.target = target,
 		.optimize = optimize,
 		.link_libc = true,
+		// A release does not need the debug info, which is most of the file.
+		.strip = b.option(bool, "strip", "leave the debug info out") orelse false,
 	});
 	module.addImport("sqlite", bindings);
 	module.addImport("db", database);
@@ -78,7 +80,14 @@ pub fn build(b: *std.Build) void {
 		linkClientLibraries(b, module);
 	}
 
-	const exe = b.addExecutable(.{ .name = "krtek", .root_module = module });
+	const exe = b.addExecutable(.{
+		.name = "krtek",
+		.root_module = module,
+		// Where there is a static libc - musl - a static build links that too and
+		// the result needs nothing at all. macOS has no static libSystem, so there
+		// only the client libraries go inside.
+		.linkage = if (static and target.result.abi == .musl) .static else null,
+	});
 	b.installArtifact(exe);
 
 	const run = b.addRunArtifact(exe);
@@ -246,18 +255,21 @@ fn linkClientLibraries(b: *std.Build, module: *std.Build.Module) void {
 		// brew ships them beside libpq, Debian builds them into it and its .pc
 		// file mentions them anyway. Asking for one that is not there is a build
 		// error, so it is only asked for when it is on disk.
-		if (internalToPostgres(library)) {
-			if (archive(b, paths.items, library) == null) {
-				continue;
-			}
-			module.linkSystemLibrary(library, .{ .preferred_link_mode = .static });
+
+		// The archive is handed over as a file rather than as `-lname`. That keeps
+		// the linker out of its own search, which is what decides between an
+		// archive and a shared library and is the one thing that must not happen
+		// here: a single shared library in the line makes the whole link dynamic.
+		if (archive(b, paths.items, library)) |found| {
+			module.addObjectFile(.{ .cwd_relative = found });
 			continue;
 		}
-		// An archive if there is one - that is the point - and the system's shared
-		// library otherwise, which is what leaves libc and its stubs dynamic.
-		module.linkSystemLibrary(library, .{
-			.preferred_link_mode = if (archive(b, paths.items, library) != null) .static else .dynamic,
-		});
+		// No archive: on musl these are the pieces libc already contains, and
+		// everywhere else the system's shared library is what was meant.
+		if (inLibc(library)) {
+			continue;
+		}
+		module.linkSystemLibrary(library, .{});
 	}
 }
 
@@ -297,10 +309,15 @@ fn archive(b: *std.Build, paths: []const []const u8, library: []const u8) ?[]con
 	return null;
 }
 
-/// Is this one of PostgreSQL's own pieces, which may or may not be a separate
-/// archive on a given system?
-fn internalToPostgres(library: []const u8) bool {
-	for ([_][]const u8{ "pgcommon", "pgport", "pgcommon_shlib", "pgport_shlib", "pq-oauth" }) |name| {
+/// Libraries that are part of libc rather than libraries of their own: musl has
+/// all of them inside libc.a, and glibc keeps them as stubs. PostgreSQL's own
+/// pieces land here too when a system builds them into libpq.a instead of beside
+/// it, as Debian does - there is then nothing to add and nothing missing.
+fn inLibc(library: []const u8) bool {
+	for ([_][]const u8{
+		"m",         "dl",     "pthread", "rt",     "resolv", "util", "crypt", "c",
+		"pgcommon",  "pgport", "pgcommon_shlib",    "pgport_shlib",   "pq-oauth",
+	}) |name| {
 		if (std.mem.eql(u8, library, name)) {
 			return true;
 		}

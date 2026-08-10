@@ -18,15 +18,11 @@ arrives wrong.
 A [release](https://github.com/zales/krtek/releases/latest) has a binary for
 macOS and Linux, on both architectures.
 
-**On macOS it needs nothing installed**: SQLite, libpq, the MariaDB connector and
-OpenSSL are linked into the binary, Redis is spoken directly, and only Apple's own
-libraries are left dynamic. That is `-Dstatic`.
-
-**On Linux the two client libraries are dynamic** - `apt install libpq5
-libmariadb3` - because Debian ships a `libpq.a` without the pgcommon and pgport
-archives it needs, so there is nothing complete to link. Alpine has all of it, and
-its MariaDB connector has no archive at all; a self-contained Linux binary means
-building one of them from source, which is not done here yet.
+**It needs nothing installed.** SQLite, libpq, the MariaDB connector and OpenSSL
+are linked into the binary and Redis is spoken directly. The Linux builds are
+static against musl and run on any distribution - checked on Debian with nothing
+installed at all; the macOS builds leave only Apple's own libraries dynamic. That
+is `-Dstatic`.
 
 ```sh
 zig build -Doptimize=ReleaseSafe
@@ -157,15 +153,26 @@ Both client libraries are keg-only on Homebrew; `-Dlibpq=/prefix` and
 well, and its licence lets a program that is not GPL link it - Oracle's own client
 library does not.
 
-`-Dstatic` links libpq, the connector and OpenSSL into the binary, leaving only
-the operating system's own libraries dynamic - Kerberos, LDAP, curl and zlib on
-macOS. What that takes is not one `-l` per library, and not the same list twice,
+`-Dstatic` links libpq, the connector and OpenSSL into the binary. On macOS that
+leaves the system's own libraries dynamic - Kerberos, LDAP, curl, zlib - and on
+Linux nothing at all, because musl has a static libc.
+
+A static Linux build cannot be done with a distribution's packages:
+Debian ships a `libpq.a` without the `pgcommon` and `pgport` archives it needs,
+and Alpine, which has those, ships no archive for the MariaDB connector. So
+[tests/linux-static.sh](tests/linux-static.sh) builds the connector from source
+and is meant to run in an Alpine container - `docker run --rm -v "$PWD:/src" -w
+/src alpine:3.22 …`, which is what CI does.
+
+What a static link takes is not one `-l` per library, and not the same list twice,
 so `pkg-config --static` is asked and its answer translated: both libraries in one
 call, because they share zlib and OpenSSL and asking separately puts zlib in
 twice, which dyld refuses to load. Where brew's `libpq.pc` names `libpgcommon`, the
 `_shlib` variant beside it is used instead - the plain archive is built differently
 from the libpq that references it, and linking it leaves `pg_encoding_to_char`
-undefined.
+undefined. Each archive is then handed to the linker as a *file* rather than as
+`-lname`: that keeps it out of its own search, which is where an archive quietly
+becomes a shared library and takes the whole binary with it.
 
 ## What it does
 

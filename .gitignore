@@ -2,9 +2,13 @@
 /zig-out/
 /.zig-cache/
 /zig-pkg/
+# Anything a container run leaves in the tree: a Zig toolchain and its caches.
+/.docker-*/
 __pycache__/
 # Databases and dumps left lying about while working, but not the test fixture.
 *.db
 *.db*
 !tests/sample.db
 *.sql
+links.txt
+smoke.txt

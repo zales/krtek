@@ -39,7 +39,7 @@ jobs:
 
       - name: build
         run: |
-          zig build -Doptimize=ReleaseFast -Dstatic \
+          zig build -Doptimize=ReleaseFast -Dstatic -Dstrip \
             -Dlibpq=$(brew --prefix libpq) -Dmariadb=$(brew --prefix mariadb-connector-c)
 
       - name: nothing but the system is linked
@@ -72,18 +72,32 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.tag || github.ref }}
-      - uses: mlugg/setup-zig@v2
-        with:
-          version: 0.16.0
 
-      - run: |
-          sudo apt-get update
-          sudo apt-get install -y pkg-config libpq-dev libmariadb-dev
+      - name: build static, in alpine
+        run: |
+          docker run --rm -v "$PWD:/src" -w /src alpine:3.22 sh -euc '
+            apk add --no-cache build-base cmake pkgconf python3 curl tar xz \
+              postgresql-dev openssl-dev openssl-libs-static zlib-static >/dev/null
+            curl -fsSL "https://ziglang.org/download/0.16.0/zig-$(uname -m)-linux-0.16.0.tar.xz" -o /tmp/zig.tar.xz
+            mkdir -p /opt/zig && tar xJf /tmp/zig.tar.xz -C /opt/zig --strip-components=1
+            export PATH=/opt/zig:$PATH ZIG_GLOBAL_CACHE_DIR=/tmp/zig-cache
+            ./fetch-sqlite.sh
+            OPTIMIZE=ReleaseFast ./tests/linux-static.sh -Dstrip
+            zig build test
+            ./tests/smoke.sh
+          '
 
-      - run: ./fetch-sqlite.sh
-      - run: zig build -Doptimize=ReleaseFast
-      - run: ldd zig-out/bin/krtek
-      - run: ./tests/package.sh "${{ inputs.tag || github.ref_name }}" "linux-${{ matrix.arch }}"
+      # Static all the way down: this is the whole point of the Alpine detour, and
+      # a shared library sneaking back in would not be noticed otherwise.
+      - name: it needs nothing at all
+        run: |
+          file zig-out/bin/krtek | tee links.txt
+          grep -q "statically linked" links.txt
+
+      - name: package
+        run: |
+          sudo chown -R "$(id -u):$(id -g)" zig-out
+          ./tests/package.sh "${{ inputs.tag || github.ref_name }}" "linux-${{ matrix.arch }}"
 
       - uses: actions/upload-artifact@v4
         with:
@@ -111,16 +125,12 @@ jobs:
           {
             echo "A database manager for the terminal: SQLite, PostgreSQL, MySQL/MariaDB and Redis."
             echo
-            echo "**macOS** needs nothing installed: SQLite, libpq, the MariaDB connector and"
-            echo "OpenSSL are linked into the binary, Redis is spoken directly, and only"
-            echo "Apple's own libraries are left dynamic."
+            echo "Every archive holds one binary that **needs nothing installed**. SQLite,"
+            echo "libpq, the MariaDB connector and OpenSSL are linked into it, and Redis is"
+            echo "spoken directly."
             echo
-            echo "**Linux** links the two client libraries dynamically, because Debian ships a"
-            echo "libpq.a that is missing pieces it needs:"
-            echo
-            echo '```sh'
-            echo "apt install libpq5 libmariadb3"
-            echo '```'""
+            echo "The Linux binaries are static against musl and run on any distribution."
+            echo "The macOS ones leave only Apple's own libraries dynamic."
             echo
             echo '```sh'
             echo "tar xzf krtek-*.tar.gz && ./krtek-*/krtek --help"
