@@ -1441,11 +1441,26 @@ pub const App = struct {
 					continue;
 				}
 			}
+			// An engine's own housekeeping is not the user's data, and dumping it
+			// writes thousands of lines nobody asked for - Kafka's
+			// __consumer_offsets among them.
+			if (object.internal) {
+				continue;
+			}
 			const table = database.Table{ .schema = object.schema, .name = object.name };
 			written += 1;
 			if (structure) {
 				if (try self.conn.definition(scratch, table)) |text| {
-					try out.print(self.allocator, "\n{s};\n", .{std.mem.trimEnd(u8, text, ";\n")});
+					// The semicolon is SQL's; an engine whose statements are lines does
+					// not want one, and its splitter would hand it to the engine.
+					const body = std.mem.trimEnd(u8, text, ";\n");
+					if (body.len != 0) {
+						if (self.conn.caps().speaks_sql) {
+							try out.print(self.allocator, "\n{s};\n", .{body});
+						} else {
+							try out.print(self.allocator, "\n{s}\n", .{body});
+						}
+					}
 				}
 				// The indexes are written from their metadata, so the dump does
 				// not depend on the engine keeping DDL text around.
@@ -1481,6 +1496,9 @@ pub const App = struct {
 		const names = try self.columnsOf(arena.allocator(), table.name);
 		if (names.len == 0) {
 			return;
+		}
+		if (!self.conn.caps().speaks_sql) {
+			return self.dumpCommands(out, table, names);
 		}
 		var rows = (try self.conn.select(.{ .table = table })) orelse return;
 		defer rows.close();
@@ -1533,6 +1551,53 @@ pub const App = struct {
 		}
 		if (!first) {
 			try out.appendSlice(self.allocator, ";\n");
+		}
+	}
+
+	/// A dump for an engine that has no SQL: every row as the command that would put
+	/// it back, in the engine's own language and asked of the engine itself. A file of
+	/// INSERT statements - which is what this wrote for every engine before - is not
+	/// something Redis or Kafka can read, so the dump was unusable exactly where it
+	/// was most needed.
+	///
+	/// What comes out goes back in: the lines are what the editor takes, so importing
+	/// the file as a script replays them.
+	fn dumpCommands(
+		self: *App,
+		out: *std.ArrayListUnmanaged(u8),
+		table: database.Table,
+		names: []const []const u8,
+	) !void {
+		var rows = (try self.conn.select(.{ .table = table })) orelse return;
+		defer rows.close();
+		var arena = std.heap.ArenaAllocator.init(self.allocator);
+		defer arena.deinit();
+		var written: usize = 0;
+		while (try rows.next()) {
+			_ = arena.reset(.retain_capacity);
+			const a = arena.allocator();
+			var cells: std.ArrayListUnmanaged(database.ask.Cell) = .empty;
+			for (0..rows.columnCount()) |i| {
+				const name = if (i < names.len) names[i] else rows.name(i);
+				const value: ?[]const u8 = switch (rows.value(i)) {
+					.null => null,
+					.int => |number| try std.fmt.allocPrint(a, "{d}", .{number}),
+					.float => |number| try std.fmt.allocPrint(a, "{d}", .{number}),
+					.text, .blob => |bytes| try a.dupe(u8, bytes),
+				};
+				try cells.append(a, .{ .column = try a.dupe(u8, name), .value = value });
+			}
+			const line = self.conn.wording(a, .{ .change = .{
+				.kind = .insert,
+				.table = table,
+				.cells = cells.items,
+			} }) catch continue;
+			try out.appendSlice(self.allocator, line);
+			try out.append(self.allocator, '\n');
+			written += 1;
+		}
+		if (written == 0) {
+			try out.appendSlice(self.allocator, "-- nothing in it\n");
 		}
 	}
 
@@ -2676,9 +2741,19 @@ pub const App = struct {
 			self.complain("{s} does not exist", .{table.name});
 			return;
 		}
+		// A file goes in one of two ways. An engine with SQL gets a script in one
+		// transaction, which is what makes a half-finished import undo itself and what
+		// puts every statement in the report. An engine without SQL gets one change
+		// per row through the same path the row form uses - it used to get the script
+		// too, and a script of INSERTs is not something Redis or Kafka can read: the
+		// import said "2 rows imported" and wrote nothing at all.
+		const scripted = self.conn.caps().speaks_sql;
 		var names: std.ArrayListUnmanaged([]const u8) = .empty;
 		var script: std.ArrayListUnmanaged(u8) = .empty;
-		try script.appendSlice(a, "BEGIN;\n");
+		if (scripted) {
+			try script.appendSlice(a, "BEGIN;\n");
+		}
+		var failed: usize = 0;
 
 		var lines = std.mem.splitAny(u8, body, "\n");
 		var pending: std.ArrayListUnmanaged(u8) = .empty;
@@ -2707,25 +2782,66 @@ pub const App = struct {
 					try names.append(a, column.name);
 				}
 			}
-			var values: std.ArrayListUnmanaged([]const u8) = .empty;
+			if (scripted) {
+				var values: std.ArrayListUnmanaged([]const u8) = .empty;
+				for (fields, 0..) |field, i| {
+					if (i >= names.items.len) {
+						break;
+					}
+					var literal: std.ArrayListUnmanaged(u8) = .empty;
+					if (field.len == 0) {
+						try literal.appendSlice(a, "NULL");
+					} else {
+						try database.quote(&literal, a, field);
+					}
+					try values.append(a, literal.items);
+				}
+				try self.conn.ddl().insertRow(&script, a, table, names.items[0..values.items.len], values.items);
+				rows += 1;
+				continue;
+			}
+			// The values as values: an empty field is NULL, everything else is what
+			// the file said, without a layer of quoting for a language this engine
+			// does not speak.
+			var cells: std.ArrayListUnmanaged(database.ask.Cell) = .empty;
 			for (fields, 0..) |field, i| {
 				if (i >= names.items.len) {
 					break;
 				}
-				var literal: std.ArrayListUnmanaged(u8) = .empty;
-				if (field.len == 0) {
-					try literal.appendSlice(a, "NULL");
-				} else {
-					try database.quote(&literal, a, field);
-				}
-				try values.append(a, literal.items);
+				try cells.append(a, .{
+					.column = names.items[i],
+					.value = if (field.len == 0) null else field,
+				});
 			}
-			try self.conn.ddl().insertRow(&script, a, table, names.items[0..values.items.len], values.items);
+			self.conn.apply(.{ .kind = .insert, .table = table, .cells = cells.items }) catch {
+				failed += 1;
+				continue;
+			};
 			rows += 1;
 		}
-		try script.appendSlice(a, "COMMIT;\n");
-		if (rows == 0) {
+		if (scripted) {
+			try script.appendSlice(a, "COMMIT;\n");
+		}
+		if (rows == 0 and failed == 0) {
 			self.complain("no rows found in the file", .{});
+			return;
+		}
+		if (!scripted) {
+			// Why the last row was refused, read before anything else asks the engine
+			// a question: the reload below would clear it.
+			const why = try a.dupe(u8, self.conn.message());
+			self.closeForm();
+			try self.loadObjects();
+			try self.reload();
+			if (failed != 0) {
+				self.complain("{d} row(s) imported into {s}, {d} refused{s}{s}", .{
+					rows, table.name, failed,
+					if (why.len != 0) ": " else "",
+					why,
+				});
+			} else {
+				self.say("{d} row(s) imported into {s}", .{ rows, table.name });
+			}
 			return;
 		}
 		const owned = try self.allocator.dupe(u8, script.items);

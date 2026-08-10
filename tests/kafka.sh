@@ -135,16 +135,35 @@ docker exec "$NAME" bash -c 'for i in $(seq -w 1 12); do echo "k$i:zaznam-$i"; d
 	  --property parse.key=true --property key.separator=:' >/dev/null 2>&1
 check "pages neither overlap nor skip" "kafka://127.0.0.1:9093" "paged: 12 records, 12 distinct" pages
 
-# One screen is drawn from one description of the cluster. dbcheck asks for
-# everything the interface asks for - the objects, a row count, the structure, the
-# rows, and every page - and the driver counts what that took. Without the cache the
-# same run was 86 requests; the ceiling here is loose enough not to be brittle and
-# tight enough to notice a driver that has gone back to asking per question.
-asked=$(zig build dbcheck -- "kafka://127.0.0.1:9093" pages 2>&1 | sed -n 's/.*requests = \([0-9]*\).*/\1/p' | tail -1)
-if [ -z "$asked" ] || [ "$asked" -gt 40 ]; then
+# One screen is drawn from one description of the cluster and two requests per
+# broker for the offsets. It was 124 on a cluster with a fifty-partition
+# __consumer_offsets in it, because the offsets were asked for one partition at a
+# time; the ceiling here is loose enough not to be brittle and tight enough to
+# notice a driver that has gone back to asking per question.
+asked=$(zig build dbcheck -- "kafka://127.0.0.1:9093" pages 2>&1 |
+	sed -n 's/^one screen took \([0-9]*\) requests$/\1/p' | tail -1)
+if [ -z "$asked" ] || [ "$asked" -gt 15 ]; then
 	fail "one screen took $asked requests, which is too many"
 fi
 echo "ok: one screen is $asked requests, not one per question"
+
+# A dump has to be something this engine can read back, which for Kafka means its
+# own commands and not INSERT statements: take one, throw the topic away, run the
+# file back in, and count what returned. This is the whole reason the dump was
+# rewritten, and it caught a lost record on the way - the first send to a topic that
+# had only just been created, before it had a leader.
+python3 tests/screen.py "kafka://127.0.0.1:9093" ':' 'dump /tmp/krtek-dump.txt' '{enter}' '{keep}' >/dev/null 2>&1
+grep -q "^CREATE pages 3 1" /tmp/krtek-dump.txt || fail "the dump does not say how to make the topic"
+lines=$(grep -c "^PRODUCE pages " /tmp/krtek-dump.txt || true)
+[ "$lines" = "12" ] || fail "the dump has $lines records of pages, not 12"
+kafka kafka-topics.sh --bootstrap-server localhost:9092 --delete --topic pages >/dev/null 2>&1
+sleep 3
+python3 tests/screen.py "kafka://127.0.0.1:9093" '{ctrl-k}' 'import' '{enter}' '{down}' '/tmp/krtek-dump.txt' '{ctrl-s}' '{keep}' >/dev/null 2>&1
+sleep 2
+back=$(kafka kafka-get-offsets.sh --bootstrap-server localhost:9092 --topic pages 2>/dev/null |
+	awk -F: '{s+=$3} END {print s+0}')
+[ "$back" = "12" ] || fail "replaying the dump brought back $back records, not 12"
+echo "ok: a dump of a topic puts the topic back, records and partitions and all"
 check "every partition is counted" "kafka://127.0.0.1:9093" "orders rows~9 exact=9"
 for codec in gzip snappy lz4 zstd; do
 	check "$codec unpacks" "kafka://127.0.0.1:9093" "c-$codec rows~3 exact=3"

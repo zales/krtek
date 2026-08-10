@@ -107,6 +107,12 @@ pub fn main(init: std.process.Init) !void {
 	for (try conn.split(arena.allocator(), batch), 0..) |statement, i| {
 		std.debug.print("  statement {d}: {s}\n", .{ i + 1, statement.sql });
 	}
+	// What everything above took: the objects, the columns, the indexes, the keys,
+	// the definition and a few rows - which is what drawing one screen asks for. The
+	// walk below is not part of that, because its cost is the number of pages and
+	// that grows with the data.
+	std.debug.print("one screen took {?d} requests\n", .{conn.requests()});
+
 	// Page by page to the end, collecting what addresses each row: a page must
 	// begin where the last one stopped, so every record has to appear exactly once.
 	// On Kafka this is arithmetic across partitions and it was wrong twice, which is

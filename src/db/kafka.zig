@@ -1306,25 +1306,156 @@ pub const Db = struct {
 	/// list asks for every topic and then the grid asks again for the one being
 	/// opened.
 	fn readOffsets(self: *Db, topic: *Topic) db.Error!void {
+		const one = [_]*Topic{topic};
+		return self.readOffsetsOf(&one);
+	}
+
+	/// The first and last offset of every partition of these topics.
+	///
+	/// One request per broker and per end, and not one per partition: ListOffsets
+	/// takes a list, and asking it one partition at a time is how drawing the object
+	/// list on this laptop cost 124 requests - a hundred of them for
+	/// __consumer_offsets, which has fifty partitions nobody was looking at. Two per
+	/// broker now, whatever the cluster's size.
+	fn readOffsetsOf(self: *Db, topics: []const *Topic) db.Error!void {
 		const now = wallMs();
-		if (self.offsets_at != 0 and now - self.offsets_at < META_MS and topic.offsets_read) {
+		var wanted: std.ArrayListUnmanaged(*Topic) = .empty;
+		defer wanted.deinit(self.allocator);
+		for (topics) |topic| {
+			const fresh = self.offsets_at != 0 and now - self.offsets_at < META_MS and topic.offsets_read;
+			if (!fresh and topic.partitions.len != 0) {
+				try wanted.append(self.allocator, topic);
+			}
+		}
+		if (wanted.items.len == 0) {
 			return;
 		}
-		for (topic.partitions) |*partition| {
-			partition.earliest = try self.oneOffset(topic.name, partition, -2);
-			partition.latest = try self.oneOffset(topic.name, partition, -1);
+
+		// Which brokers lead any of it.
+		var brokers: std.ArrayListUnmanaged(i32) = .empty;
+		defer brokers.deinit(self.allocator);
+		for (wanted.items) |topic| {
+			for (topic.partitions) |partition| {
+				if (std.mem.indexOfScalar(i32, brokers.items, partition.leader) == null) {
+					try brokers.append(self.allocator, partition.leader);
+				}
+			}
 		}
-		topic.offsets_read = true;
+
+		for (brokers.items) |node| {
+			// -2 is the earliest offset still there, -1 the next one to be written.
+			try self.askOffsets(node, wanted.items, -2);
+			try self.askOffsets(node, wanted.items, -1);
+		}
+		for (wanted.items) |topic| {
+			topic.offsets_read = true;
+		}
 		if (self.offsets_at == 0) {
 			self.offsets_at = now;
 		}
 	}
 
-	fn oneOffset(self: *Db, topic: []const u8, partition: *Partition, at_time: i64) db.Error!i64 {
-		return self.oneOffsetTrying(topic, partition, at_time, false);
+	/// One ListOffsets to one broker, for every partition it leads out of these
+	/// topics, at one end of the log.
+	fn askOffsets(self: *Db, node: i32, topics: []const *Topic, at_time: i64) db.Error!void {
+		var body: List = .empty;
+		defer body.deinit(self.allocator);
+		const write = Encoder{ .out = &body, .a = self.allocator };
+		try write.int32(-1); // replica id: a client, not a broker
+		try write.int8(1); // isolation level: read committed
+
+		// Only the topics that have a partition this broker leads.
+		var mine: std.ArrayListUnmanaged(*Topic) = .empty;
+		defer mine.deinit(self.allocator);
+		for (topics) |topic| {
+			for (topic.partitions) |partition| {
+				if (partition.leader == node) {
+					try mine.append(self.allocator, topic);
+					break;
+				}
+			}
+		}
+		if (mine.items.len == 0) {
+			return;
+		}
+		try write.array(mine.items.len);
+		for (mine.items) |topic| {
+			try write.string(topic.name);
+			var count: usize = 0;
+			for (topic.partitions) |partition| {
+				if (partition.leader == node) {
+					count += 1;
+				}
+			}
+			try write.array(count);
+			for (topic.partitions) |partition| {
+				if (partition.leader != node) {
+					continue;
+				}
+				try write.int32(partition.id);
+				try write.int32(-1); // current leader epoch
+				try write.int64(at_time);
+			}
+		}
+
+		const stream = try self.leader(node);
+		const reply = self.call(stream, .list_offsets, body.items) catch |err| {
+			if (err == error.OutOfMemory) {
+				return error.OutOfMemory;
+			}
+			if (err == error.Gone) {
+				try self.clusterMoved();
+				self.remember("the broker holding those offsets went away; try again");
+			}
+			return error.Driver;
+		};
+		var read = Decoder{ .bytes = reply };
+		self.readOffsetReply(&read, at_time) catch |err| {
+			if (err == error.MovedOn) {
+				pause(SETTLE_MS);
+				try self.clusterMoved();
+				return error.Driver;
+			}
+			if (self.last_error.items.len == 0) {
+				self.remember("kafka answered the offset request with something unexpected");
+			}
+			return error.Driver;
+		};
 	}
 
-	fn oneOffsetTrying(self: *Db, topic: []const u8, partition: *Partition, at_time: i64, retrying: bool) db.Error!i64 {
+	/// Put a ListOffsets reply where it belongs: each answer names its topic and
+	/// partition, so it is looked up rather than assumed.
+	fn readOffsetReply(self: *Db, read: *Decoder, at_time: i64) !void {
+		_ = try read.int32(); // throttle
+		var topics = try read.arrayLength();
+		while (topics > 0) : (topics -= 1) {
+			const name = try read.string();
+			var parts = try read.arrayLength();
+			while (parts > 0) : (parts -= 1) {
+				const id = try read.int32();
+				const code = try read.int16();
+				_ = try read.int64(); // timestamp
+				const offset = try read.int64();
+				_ = try read.int32(); // leader epoch
+				if (code != 0) {
+					self.complain("kafka refused the offset request: {s}", .{errorText(code)});
+					return if (movedOn(code)) error.MovedOn else error.Malformed;
+				}
+				const partition = self.partitionOf(name, id) orelse continue;
+				if (at_time == -2) {
+					partition.earliest = offset;
+				} else {
+					partition.latest = offset;
+				}
+			}
+		}
+	}
+
+	fn oneOffset(self: *Db, topic: []const u8, partition: *Partition, at_time: i64) db.Error!i64 {
+		return self.oneOffsetTrying(topic, partition, at_time, 0);
+	}
+
+	fn oneOffsetTrying(self: *Db, topic: []const u8, partition: *Partition, at_time: i64, attempt: usize) db.Error!i64 {
 		var body: List = .empty;
 		defer body.deinit(self.allocator);
 		const write = Encoder{ .out = &body, .a = self.allocator };
@@ -1339,16 +1470,17 @@ pub const Db = struct {
 
 		const stream = try self.leader(partition.leader);
 		const reply = self.call(stream, .list_offsets, body.items) catch |err| {
-			return self.afterLoss(err, retrying, topic, partition.id, at_time);
+			return self.afterLoss(err, attempt, topic, partition.id, at_time);
 		};
 		var read = Decoder{ .bytes = reply };
 		return self.readOneOffset(&read) catch |err| {
-			if (err == error.MovedOn and !retrying) {
+			if (err == error.MovedOn and attempt + 1 < ATTEMPTS) {
+				pause(SETTLE_MS);
 				try self.clusterMoved();
 				// The partition is a pointer into the metadata that was just replaced,
 				// so it is looked up again rather than reused.
 				if (self.partitionOf(topic, partition.id)) |fresh| {
-					return self.oneOffsetTrying(topic, fresh, at_time, true);
+					return self.oneOffsetTrying(topic, fresh, at_time, attempt + 1);
 				}
 				self.complain("partition {d} of {s} is gone", .{ partition.id, topic });
 				return error.Driver;
@@ -1362,14 +1494,14 @@ pub const Db = struct {
 
 	/// A lost connection while asking for offsets: find who leads it now and ask
 	/// once more, or give up with the reason.
-	fn afterLoss(self: *Db, err: CallError, retrying: bool, topic: []const u8, id: i32, at_time: i64) db.Error!i64 {
+	fn afterLoss(self: *Db, err: CallError, attempt: usize, topic: []const u8, id: i32, at_time: i64) db.Error!i64 {
 		if (err == error.OutOfMemory) {
 			return error.OutOfMemory;
 		}
-		if (err == error.Gone and !retrying) {
+		if (err == error.Gone and attempt + 1 < ATTEMPTS) {
 			try self.clusterMoved();
 			if (self.partitionOf(topic, id)) |fresh| {
-				return self.oneOffsetTrying(topic, fresh, at_time, true);
+				return self.oneOffsetTrying(topic, fresh, at_time, attempt + 1);
 			}
 			self.complain("partition {d} of {s} is gone", .{ id, topic });
 		}
@@ -1882,10 +2014,10 @@ pub const Db = struct {
 	/// One record into one topic. The batch is built by hand, CRC included, because
 	/// Produce takes exactly what a Fetch hands back.
 	fn produce(self: *Db, topic: *Topic, wanted: i32, key: ?[]const u8, value: []const u8) db.Error!void {
-		return self.produceTrying(topic, wanted, key, value, false);
+		return self.produceTrying(topic, wanted, key, value, 0);
 	}
 
-	fn produceTrying(self: *Db, topic: *Topic, wanted: i32, key: ?[]const u8, value: []const u8, retrying: bool) db.Error!void {
+	fn produceTrying(self: *Db, topic: *Topic, wanted: i32, key: ?[]const u8, value: []const u8, attempt: usize) db.Error!void {
 		if (topic.partitions.len == 0) {
 			self.complain("{s} has no partition with a leader", .{topic.name});
 			return error.Driver;
@@ -1930,23 +2062,28 @@ pub const Db = struct {
 		const reply = self.call(stream, .produce, body.items) catch |err| {
 			// A connection that died before the request went out means the record was
 			// not written, so sending it again writes it once.
-			if (err == error.Gone and !retrying) {
+			if (err == error.Gone and attempt + 1 < ATTEMPTS) {
 				try self.clusterMoved();
 				const fresh = self.topicOf(topic.name) orelse return error.Driver;
-				return self.produceTrying(fresh, wanted, key, value, true);
+				return self.produceTrying(fresh, wanted, key, value, attempt + 1);
 			}
 			return if (err == error.OutOfMemory) error.OutOfMemory else error.Driver;
 		};
 		var read = Decoder{ .bytes = reply };
 		self.readProduce(&read) catch |err| {
-			if (err == error.MovedOn and !retrying) {
+			if (err == error.MovedOn and attempt + 1 < ATTEMPTS) {
+				// A topic that has just been created has no leader for a moment, and
+				// the first record sent to it is the one that finds out. Waiting is
+				// what a client is supposed to do; asking again at once gets the same
+				// answer, and that is how replaying a dump lost its first record.
+				pause(SETTLE_MS);
 				try self.clusterMoved();
 				const fresh = self.topicOf(topic.name) orelse {
 					self.complain("{s} is gone", .{topic.name});
 					return error.Driver;
 				};
 				// The record has not been written, so sending it again writes it once.
-				return self.produceTrying(fresh, wanted, key, value, true);
+				return self.produceTrying(fresh, wanted, key, value, attempt + 1);
 			}
 			if (self.last_error.items.len == 0) {
 				self.remember("kafka did not accept the record");
@@ -2036,8 +2173,15 @@ pub const Db = struct {
 		self.begin();
 		try self.refresh();
 		var list: std.ArrayListUnmanaged(db.Object) = .empty;
+		// Every topic in one go: two requests per broker rather than two per
+		// partition.
+		var all: std.ArrayListUnmanaged(*Topic) = .empty;
+		defer all.deinit(self.allocator);
 		for (self.topics) |*topic| {
-			try self.readOffsets(topic);
+			try all.append(self.allocator, topic);
+		}
+		try self.readOffsetsOf(all.items);
+		for (self.topics) |*topic| {
 			var total: i64 = 0;
 			for (topic.partitions) |partition| {
 				total += partition.count();
@@ -2046,6 +2190,7 @@ pub const Db = struct {
 				.name = try arena.dupe(u8, topic.name),
 				.kind = .table,
 				.rows = total,
+				.internal = topic.internal,
 			});
 		}
 		std.mem.sort(db.Object, list.items, {}, byName);
@@ -2100,8 +2245,11 @@ pub const Db = struct {
 		return arena.alloc(db.ForeignKey, 0);
 	}
 
-	/// What DescribeConfigs says about the topic, which is as close as Kafka comes
-	/// to a CREATE statement.
+	/// What makes this topic again, and then what DescribeConfigs says about it. The
+	/// first line is a command - the same one the console takes, with the partition
+	/// count and replication this topic actually has - so a dump of it can be
+	/// replayed; the settings after it are comments, because they are a description
+	/// and not something to run.
 	pub fn definition(self: *Db, arena: std.mem.Allocator, table: db.Table) db.Error!?[]const u8 {
 		self.begin();
 		var body: List = .empty;
@@ -2114,10 +2262,24 @@ pub const Db = struct {
 		try write.boolean(false); // include synonyms
 		try write.boolean(false); // include documentation
 
-		const reply = self.ask(.describe_configs, body.items) catch return null;
-		var read = Decoder{ .bytes = reply };
 		var out: List = .empty;
-		self.readConfigs(&read, &out, arena, table.name) catch return null;
+		// The shape first, from the metadata, because that is the part that can be
+		// put back.
+		self.refresh() catch {};
+		if (self.topicOf(table.name)) |topic| {
+			var replication: usize = 1;
+			for (topic.partitions) |partition| {
+				replication = @max(replication, partition.replicas);
+			}
+			try out.print(arena, "CREATE {s} {d} {d}\n", .{
+				table.name,
+				@max(1, topic.partitions.len),
+				replication,
+			});
+		}
+		const reply = self.ask(.describe_configs, body.items) catch return out.items;
+		var read = Decoder{ .bytes = reply };
+		self.readConfigs(&read, &out, arena, table.name) catch return out.items;
 		return out.items;
 	}
 
@@ -2146,10 +2308,12 @@ pub const Db = struct {
 					_ = try read.string();
 					_ = try read.int8();
 				}
-				// Source 5 is the broker default; showing all of those would bury the
-				// handful that were actually set on this topic.
+				// All of them are comments: a setting is a description, and a line that
+				// is neither a command nor a comment makes a dump unreplayable. Source 5
+				// is the broker's default, and those are marked as such so the handful
+				// that were set on this topic stand out.
 				const inherited = source == 5 or source == 4;
-				try out.print(arena, "{s}{s} = {s}\n", .{ if (inherited) "-- " else "", key, value });
+				try out.print(arena, "-- {s}{s} = {s}\n", .{ if (inherited) "default: " else "", key, value });
 			}
 		}
 		_ = self;
@@ -2204,13 +2368,18 @@ pub const Db = struct {
 	}
 
 	/// One command per line, as the console takes them.
+	///
+	/// Lines only, and not semicolons: what a PRODUCE sends is the rest of the line
+	/// and may well contain one - `PRODUCE orders k a;b` is one record, not two
+	/// commands. A comment is not a command either, which is what makes a dump this
+	/// driver wrote replayable.
 	pub fn split(_: *Db, arena: std.mem.Allocator, sql: []const u8) db.Error![]db.Statement {
 		var list: std.ArrayListUnmanaged(db.Statement) = .empty;
-		var lines = std.mem.tokenizeAny(u8, sql, "\n;");
-		while (lines.next()) |line| {
-			const trimmed = std.mem.trim(u8, line, " \t\r");
-			if (trimmed.len != 0) {
-				try list.append(arena, .{ .sql = try arena.dupe(u8, trimmed) });
+		var lines = std.mem.splitScalar(u8, sql, '\n');
+		while (lines.next()) |raw| {
+			const line = std.mem.trim(u8, raw, " \t\r;");
+			if (line.len != 0 and !std.mem.startsWith(u8, line, "--") and !std.mem.startsWith(u8, line, "#")) {
+				try list.append(arena, .{ .sql = try arena.dupe(u8, line) });
 			}
 		}
 		return list.items;
@@ -3275,6 +3444,22 @@ fn readHeaders(arena: std.mem.Allocator, read: *Decoder) DecodeError![]const u8 
 	}
 	return out.items;
 }
+
+/// Wait, without a thread to wait on: a cluster that has just been told to make a
+/// topic needs a moment to elect a leader for it, and asking again at once only
+/// gets the same answer.
+fn pause(ms: i64) void {
+	const request = std.c.timespec{
+		.sec = @intCast(@divFloor(ms, 1000)),
+		.nsec = @intCast(@mod(ms, 1000) * 1_000_000),
+	};
+	var left: std.c.timespec = undefined;
+	_ = std.c.nanosleep(&request, &left);
+}
+
+/// How long to wait before asking a cluster that was moving, and how many times.
+const SETTLE_MS: i64 = 300;
+const ATTEMPTS: usize = 3;
 
 /// Milliseconds since the epoch. std.time.milliTimestamp is gone in this Zig, so
 /// the clock is read the way the rest of the program reads the monotonic one.

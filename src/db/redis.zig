@@ -448,14 +448,35 @@ pub const Db = struct {
 				switch (value.kind) {
 					.delete => try out.print(allocator, "DEL {s}", .{key}),
 					.insert, .update => {
+						// A value this driver shows for anything but a string is a
+						// flattening of it - the elements of a list, the fields of a hash -
+						// and SET would put that text where the structure was. Better to
+						// say so than to write a command that quietly destroys it.
+						const kind = flat(db.ask.valueOf(value.cells, TYPE));
+						if (kind != null and !std.mem.eql(u8, kind.?, "string")) {
+							try out.print(allocator, "-- {s} is a {s}; krtek shows its value as text and cannot put one back", .{ key, kind.? });
+							return out.toOwnedSlice(allocator);
+						}
 						if (flat(db.ask.valueOf(value.cells, VALUE))) |text| {
 							try out.print(allocator, "SET {s} {s}", .{ key, text });
 						}
 						if (flat(db.ask.valueOf(value.cells, TTL))) |ttl| {
+							// A newline, not a semicolon: a value may contain one of those,
+							// so the splitter cuts on lines alone - and two commands on one
+							// line reached Redis as a single command with five arguments,
+							// which is how a dump came back refusing every row of itself.
 							if (out.items.len != 0) {
-								try out.appendSlice(allocator, "; ");
+								try out.append(allocator, '\n');
 							}
-							try out.print(allocator, "EXPIRE {s} {s}", .{ key, ttl });
+							// A ttl of -1 in the grid means "no expiry", and EXPIRE with -1
+							// deletes the key - which is what this used to write for every
+							// row of a dump.
+							const seconds = std.fmt.parseInt(i64, ttl, 10) catch -1;
+							if (seconds < 0) {
+								try out.print(allocator, "PERSIST {s}", .{key});
+							} else {
+								try out.print(allocator, "EXPIRE {s} {d}", .{ key, seconds });
+							}
 						}
 						if (out.items.len == 0) {
 							try out.print(allocator, "SET {s} ''", .{key});
@@ -1041,6 +1062,7 @@ pub const Ddl = struct {
 
 pub const TABLE = "data";
 pub const KEY = "key";
+pub const TYPE = "type";
 pub const VALUE = "value";
 pub const TTL = "ttl";
 

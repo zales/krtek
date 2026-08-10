@@ -74,6 +74,10 @@ pub const Object = struct {
 	name: []const u8,
 	kind: Kind = .table,
 	rows: ?i64 = null,
+	/// The engine's own housekeeping rather than the user's data - Kafka's
+	/// __consumer_offsets. Still shown, because looking at it is sometimes the
+	/// point, but left out of a dump.
+	internal: bool = false,
 };
 
 pub const Column = struct {
@@ -247,6 +251,20 @@ pub const Db = union(enum) {
 	pub fn caps(self: Db) Caps {
 		switch (self) {
 			inline else => |driver| return driver.caps(),
+		}
+	}
+
+	/// How many requests this connection has made, where the driver counts them at
+	/// all. Null where it does not: an engine reached through a library does its own
+	/// talking and there is nothing here to count.
+	pub fn requests(self: Db) ?usize {
+		switch (self) {
+			inline else => |driver| {
+				if (@hasField(@TypeOf(driver.*), "requests")) {
+					return driver.requests;
+				}
+				return null;
+			},
 		}
 	}
 
