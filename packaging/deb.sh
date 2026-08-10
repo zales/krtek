@@ -26,6 +26,7 @@ install -D -m 0755 "$binary" "$root/usr/bin/krtek"
 install -D -m 0644 docs/krtek.1 "$root/usr/share/man/man1/krtek.1"
 gzip -9n "$root/usr/share/man/man1/krtek.1"
 install -D -m 0644 README.md "$root/usr/share/doc/krtek/README.md"
+install -D -m 0644 LICENSE "$root/usr/share/doc/krtek/LICENSE"
 
 # What is inside the binary, and what that means for whoever passes it on: the
 # MariaDB connector is LGPL, which asks that its object code can be replaced.
@@ -38,8 +39,24 @@ Source: https://github.com/zales/krtek
 
 Files: *
 Copyright: 2026 Ondrej Zalesky
-License: see-source
- The terms are in the source repository above.
+License: Expat
+ Permission is hereby granted, free of charge, to any person obtaining a copy
+ of this software and associated documentation files (the "Software"), to deal
+ in the Software without restriction, including without limitation the rights
+ to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ copies of the Software, and to permit persons to whom the Software is
+ furnished to do so, subject to the following conditions:
+ .
+ The above copyright notice and this permission notice shall be included in
+ all copies or substantial portions of the Software.
+ .
+ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+ FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
+ IN THE SOFTWARE.
 
 Files: vendor/sqlite3.c
 Copyright: SQLite authors

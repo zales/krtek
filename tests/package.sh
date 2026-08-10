@@ -7,7 +7,7 @@ target="$2"
 name="krtek-$version-$target"
 mkdir -p "$name"
 # The man page travels with the binary: the Homebrew formula installs it.
-cp zig-out/bin/krtek README.md docs/krtek.1 "$name/"
+cp zig-out/bin/krtek README.md LICENSE docs/krtek.1 "$name/"
 tar czf "$name.tar.gz" "$name"
 if command -v shasum >/dev/null 2>&1; then
 	shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256"

@@ -33,6 +33,7 @@ class Krtek < Formula
   desc "Database manager for the terminal: SQLite, PostgreSQL, MySQL/MariaDB, Redis"
   homepage "https://github.com/zales/krtek"
   version "$version"
+  license "MIT"
 
   # One static binary per platform: nothing is compiled and nothing is depended
   # on, because the client libraries are already inside it.
@@ -61,7 +62,7 @@ class Krtek < Formula
   def install
     bin.install "krtek"
     man1.install "krtek.1"
-    doc.install "README.md"
+    doc.install "README.md", "LICENSE"
   end
 
   test do

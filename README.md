@@ -398,4 +398,11 @@ with `psql` doing the same.
 
 ## Licence
 
-`vendor/sqlite3.c` is public domain.
+MIT - see [LICENSE](LICENSE).
+
+What is linked into the binary keeps its own: SQLite (`vendor/sqlite3.c`) is
+public domain, libpq is under the PostgreSQL licence, the MariaDB Connector/C
+under the LGPL 2.1 and OpenSSL under Apache 2.0. The LGPL asks that its object
+code can be replaced, and it can: `zig build -Dstatic -Dmariadb=<prefix>` from
+this source is the whole procedure. The `copyright` file in the `.deb` says all
+of this too.
