@@ -76,6 +76,7 @@ footer { margin-top: 3.5rem; padding-top: 1.5rem; border-top: 1px solid var(--li
 		<span class="engine">PostgreSQL</span>
 		<span class="engine">MySQL / MariaDB</span>
 		<span class="engine">Redis</span>
+		<span class="engine">Kafka</span>
 		<span class="engine">one static binary</span>
 	</div>
 	<img src="grid.svg" alt="krtek browsing a table">
@@ -111,7 +112,8 @@ everyone who already trusts it.</p>
 <pre><code>tar xzf krtek-*.tar.gz &amp;&amp; ./krtek-*/krtek</code></pre>
 
 <p><strong>It needs nothing installed.</strong> SQLite, libpq, the MariaDB
-connector and OpenSSL are linked into the binary, and Redis is spoken directly.
+connector and OpenSSL are linked into the binary, and Redis and Kafka are spoken
+directly.
 The Linux builds are static against musl and run on any distribution; the macOS
 builds leave only Apple's own libraries dynamic.</p>
 

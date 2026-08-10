@@ -17,6 +17,12 @@ krtek \- a database manager for the terminal
 .RI redis://host:port/index
 .br
 .B krtek
+.RI kafka://host:port
+.br
+.B krtek
+.RI kafka+ssl://user@host:port?mechanism=SCRAM-SHA-256
+.br
+.B krtek
 .RB \(dq host=...\ dbname=...\ user=... \(dq
 .br
 .B krtek
@@ -24,8 +30,17 @@ krtek \- a database manager for the terminal
 .SH DESCRIPTION
 .B krtek
 browses, edits, alters, dumps and imports a database on a text screen. It speaks
-SQLite, PostgreSQL, MySQL/MariaDB and Redis behind one interface, and needs
-nothing installed: the client libraries are linked into the binary.
+SQLite, PostgreSQL, MySQL/MariaDB, Redis and Kafka behind one interface, and needs
+nothing installed: the client libraries are linked into the binary, and Redis and
+Kafka are spoken directly.
+.PP
+A Kafka topic is a table of
+.IR partition ", " offset ", " timestamp ", " key ", " value " and " headers .
+Records cannot be changed - the log is append-only - but they can be written, and
+the editor is a Kafka console:
+.BR TOPICS ", " OFFSETS ", " DESCRIBE ", " CREATE ", " DROP ", " TRUNCATE ", " PRODUCE .
+TLS and SASL (PLAIN, SCRAM-SHA-256, SCRAM-SHA-512) are asked for in the target:
+.IR kafka+ssl://user@host:9093?mechanism=SCRAM-SHA-256 .
 .PP
 With no argument it opens the list of saved connections, where
 .B enter

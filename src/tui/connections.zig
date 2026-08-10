@@ -59,6 +59,11 @@ pub const Connection = struct {
 		{
 			return "Redis";
 		}
+		for ([_][]const u8{ "kafka://", "kafka+ssl://", "kafka+tls://", "kafkas://" }) |prefix| {
+			if (std.ascii.startsWithIgnoreCase(self.target, prefix)) {
+				return "Kafka";
+			}
+		}
 		if (std.ascii.startsWithIgnoreCase(self.target, "mysql://") or
 			std.ascii.startsWithIgnoreCase(self.target, "mariadb://"))
 		{
@@ -499,6 +504,8 @@ test "a password is added quoted, for one attempt" {
 
 test "the engine is told from the target" {
 	try std.testing.expectEqualStrings("Redis", (Connection{ .name = "a", .target = "redis://h/0" }).engine());
+	try std.testing.expectEqualStrings("Kafka", (Connection{ .name = "a", .target = "kafka://h:9092" }).engine());
+	try std.testing.expectEqualStrings("Kafka", (Connection{ .name = "a", .target = "kafka+ssl://h:9093" }).engine());
 	try std.testing.expectEqualStrings("MySQL", (Connection{ .name = "a", .target = "mysql://h/d" }).engine());
 	try std.testing.expectEqualStrings("MySQL", (Connection{ .name = "a", .target = "mariadb://h/d" }).engine());
 	try std.testing.expectEqualStrings("PostgreSQL", (Connection{ .name = "a", .target = "postgres://h/d" }).engine());

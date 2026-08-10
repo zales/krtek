@@ -17,6 +17,8 @@ const usage =
 	\\       krtek postgres://user@host:port/database
 	\\       krtek mysql://user@host:port/database
 	\\       krtek redis://host:port/index
+	\\       krtek kafka://host:port
+	\\       krtek kafka+ssl://user@host:port?mechanism=SCRAM-SHA-256
 	\\       krtek "host=... dbname=... user=..."
 	\\
 	\\With no argument it opens the list of saved connections.

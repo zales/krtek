@@ -39,6 +39,10 @@ pub fn build(b: *std.Build) void {
 	// The MariaDB connector speaks to MySQL as well, and its licence allows a
 	// non-GPL program to link it - Oracle's own client library does not.
 	const mariadb = b.option([]const u8, "mariadb", "prefix of the mariadb-connector-c installation");
+	// OpenSSL: the Kafka driver calls it directly for TLS. A static build already
+	// links it - both client libraries want it - so this prefix is only about
+	// finding the shared one for a build that is not static.
+	const openssl = b.option([]const u8, "openssl", "prefix of the OpenSSL installation");
 
 	const linking = Linking{ .static = static };
 
@@ -75,6 +79,7 @@ pub fn build(b: *std.Build) void {
 	module.addCSourceFile(.{ .file = b.path("vendor/sqlite3.c"), .flags = &sqlite_flags });
 	linkPostgres(b, module, target, libpq, linking);
 	linkMysql(b, module, target, mariadb, linking);
+	linkTls(b, module, target, openssl, linking);
 	linkKeychain(module, target);
 	if (static) {
 		linkClientLibraries(b, module);
@@ -110,6 +115,7 @@ pub fn build(b: *std.Build) void {
 	test_module.addCSourceFile(.{ .file = b.path("vendor/sqlite3.c"), .flags = &sqlite_flags });
 	linkPostgres(b, test_module, target, libpq, linking);
 	linkMysql(b, test_module, target, mariadb, linking);
+	linkTls(b, test_module, target, openssl, linking);
 	linkKeychain(test_module, target);
 	if (static) {
 		linkClientLibraries(b, test_module);
@@ -131,6 +137,7 @@ pub fn build(b: *std.Build) void {
 	db_test_module.addCSourceFile(.{ .file = b.path("vendor/sqlite3.c"), .flags = &sqlite_flags });
 	linkPostgres(b, db_test_module, target, libpq, linking);
 	linkMysql(b, db_test_module, target, mariadb, linking);
+	linkTls(b, db_test_module, target, openssl, linking);
 	if (static) {
 		linkClientLibraries(b, db_test_module);
 	}
@@ -148,6 +155,7 @@ pub fn build(b: *std.Build) void {
 	check_module.addCSourceFile(.{ .file = b.path("vendor/sqlite3.c"), .flags = &sqlite_flags });
 	linkPostgres(b, check_module, target, libpq, linking);
 	linkMysql(b, check_module, target, mariadb, linking);
+	linkTls(b, check_module, target, openssl, linking);
 	const check = b.addExecutable(.{ .name = "dbcheck", .root_module = check_module });
 	const run_check = b.addRunArtifact(check);
 	if (b.args) |args| {
@@ -370,14 +378,32 @@ fn linkMysql(b: *std.Build, module: *std.Build.Module, target: std.Build.Resolve
 	}
 }
 
+/// OpenSSL, which the Kafka driver calls for TLS. A static build gets it from the
+/// archives pkg-config named for libpq and the connector, so this only has to
+/// find the shared library - and on a Mac that means brew's keg-only prefix.
+fn linkTls(b: *std.Build, module: *std.Build.Module, target: std.Build.ResolvedTarget, prefix: ?[]const u8, options: Linking) void {
+	if (options.static) {
+		return;
+	}
+	const root = prefix orelse defaultPrefix(target, "openssl");
+	if (root) |where| {
+		module.addLibraryPath(.{ .cwd_relative = b.pathJoin(&.{ where, "lib" }) });
+	}
+	module.linkSystemLibrary("ssl", .{});
+	module.linkSystemLibrary("crypto", .{});
+}
+
 /// On macOS, where brew keeps a keg-only library on Apple silicon. Elsewhere
 /// null, which means "it is on the system paths".
 fn defaultPrefix(target: std.Build.ResolvedTarget, name: []const u8) ?[]const u8 {
 	if (target.result.os.tag != .macos) {
 		return null;
 	}
-	return if (std.mem.eql(u8, name, "libpq"))
-		"/opt/homebrew/opt/libpq"
-	else
-		"/opt/homebrew/opt/mariadb-connector-c";
+	if (std.mem.eql(u8, name, "libpq")) {
+		return "/opt/homebrew/opt/libpq";
+	}
+	if (std.mem.eql(u8, name, "openssl")) {
+		return "/opt/homebrew/opt/openssl@3";
+	}
+	return "/opt/homebrew/opt/mariadb-connector-c";
 }

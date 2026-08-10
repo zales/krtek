@@ -4,8 +4,8 @@
 
 A database manager for the terminal, written in Zig: what a graphical client
 does - browse, edit, alter, dump, import - on a text screen, and quicker, because
-everything is a key press. **SQLite, PostgreSQL, MySQL/MariaDB and Redis**, behind
-one interface.
+everything is a key press. **SQLite, PostgreSQL, MySQL/MariaDB, Redis and Kafka**,
+behind one interface.
 
 *Krtek* is Czech for a mole: a small thing that digs through what is underneath
 and comes back up with what it found.
@@ -51,8 +51,8 @@ architectures. The `.deb` installs the binary, the man page and the copyright, a
 **Depends on nothing at all**, so it goes on any Debian or Ubuntu of any age.
 
 **It needs nothing installed.** SQLite, libpq, the MariaDB connector and OpenSSL
-are linked into the binary and Redis is spoken directly. The Linux builds are
-static against musl and run on any distribution - checked on Debian with nothing
+are linked into the binary, and Redis and Kafka are spoken directly. The Linux
+builds are static against musl and run on any distribution - checked on Debian with nothing
 installed at all; the macOS builds leave only Apple's own libraries dynamic. That
 is `-Dstatic`.
 
@@ -65,6 +65,7 @@ zig build -Doptimize=ReleaseSafe
 ./zig-out/bin/krtek postgres://user@host:5432/database
 ./zig-out/bin/krtek mysql://user@host:3306/database
 ./zig-out/bin/krtek redis://host:6379/0
+./zig-out/bin/krtek kafka://host:9092
 ```
 
 A SQLite file is opened through SQLite's own VFS: edits go straight to disk and
@@ -170,6 +171,70 @@ anything this mapping does not cover belongs.
 
 The protocol is spoken directly: RESP is a handful of prefixes, so there is no
 client library, no dependency and no licence to think about.
+
+## Kafka
+
+A topic is a table whose columns are `partition`, `offset`, `timestamp`, `key`,
+`value` and `headers`, and the mapping earns its keep: an offset is a page number,
+so `1-50 of 12043` is exact and costs one `ListOffsets`, and `(partition, offset)`
+addresses a record precisely. Filtering on the partition or the offset is pushed
+into the fetch itself; a filter on the key or the value is applied as records
+arrive, because a log has no index to do it with. Sorting descending reads the tail
+of the log, which is the thing you usually want.
+
+What it will not do is pretend a record can be changed. The log is append-only, so
+an edit is refused and says why, and deleting one row is refused too - Kafka throws
+away a *prefix* of a partition, which is `TRUNCATE`, not a row. Inserting works:
+that is a `Produce`, and the partition is chosen with the same murmur2 hash Kafka's
+own clients use, so a key written from here lands where it would have landed from
+anywhere else.
+
+The structure view shows the partitions with their leader, replicas, in-sync
+replicas and offset range, and the definition is what `DescribeConfigs` says, with
+the values inherited from the broker commented out so the ones actually set on the
+topic stand out.
+
+The editor is a Kafka console:
+
+```
+TOPICS                          every topic, with its partitions and records
+BROKERS                         the cluster
+GROUPS                          the consumer groups
+OFFSETS orders                  the earliest and latest offset of each partition
+DESCRIBE orders                 the configuration
+CREATE orders 3 1               a topic, with partitions and replication factor
+DROP orders
+TRUNCATE orders                 throw away every record, keep the topic
+PRODUCE orders key some value
+```
+
+**No client library.** The protocol is spoken directly, and every API version it
+uses is the last one before that API became *flexible* - so there are no compact
+strings and no tagged fields anywhere, one encoding instead of two, and brokers
+from 2.1 to 4.x all answer it. Records are read from the leader of their partition,
+which metadata names, so a real cluster works and not only one broker on a laptop.
+
+Compressed batches are unpacked: gzip and zstd come out of Zig's standard library,
+and **snappy and lz4 are written out** in the driver, because a great many topics
+are one of those and a reader that cannot open them is not much of a reader. A
+codec it does not know says so rather than handing back rubbish.
+
+**TLS and SASL** are there for a cluster that is not on a private network:
+
+```sh
+krtek "kafka+ssl://alice@broker:9093"                              # asks for the password
+krtek "kafka+ssl://bob@broker:9093?mechanism=SCRAM-SHA-256"
+krtek "kafka://alice@broker:9092?password=secret"                  # SASL, no encryption
+krtek "kafka+ssl://alice@broker:9093?insecure=1"                   # a certificate of its own making
+```
+
+TLS goes through the OpenSSL that is already linked in, and the broker's
+certificate is verified against the machine's own trust store unless `insecure=1`
+says not to bother. SASL is `PLAIN`, `SCRAM-SHA-256` and `SCRAM-SHA-512`, and SCRAM
+is computed here rather than by a library - including the server's own signature,
+which is the half of SCRAM that proves the *broker* knew the password too. A user
+with no password makes krtek ask for one, and it can be kept wherever the other
+connections keep theirs, keychain included.
 
 ## Adding an engine
 
@@ -335,6 +400,8 @@ permanent.
 | `src/tui/draw.zig` | rendering |
 | `src/tui/input.zig` | the key map and the command palette |
 | `src/tui/connections.zig` | the saved connections and where each keeps its password |
+| `src/db/kafka.zig` | Kafka: the protocol, the compression codecs, TLS and SASL |
+| `src/db/ask.zig` | what the interface asks for, and the SQL it renders to |
 | `src/tui/keychain.zig` | the macOS keychain, through Security.framework |
 | `vendor/sqlite3.c` | the unmodified SQLite amalgamation, compiled by Zig's clang |
 | `packaging/` | the `.deb` and the Homebrew formula |
@@ -382,6 +449,17 @@ connections:
 
 ```sh
 zig build && ./tests/shots.sh
+```
+
+A server is needed for the drivers that talk to one, and
+[tests/kafka.sh](tests/kafka.sh) brings its own: it starts a Kafka in KRaft mode
+with four listeners - plain, SASL, SASL over TLS, and an internal one for Kafka's
+own tools - writes a topic in every compression codec *with those tools*, creates a
+PLAIN user and a SCRAM user, and then checks the driver against all of it, refusals
+included. The records it reads are ones the Java client wrote, which is the point.
+
+```sh
+zig build && ./tests/kafka.sh
 ```
 
 That is how everything described here was verified: against a real SQLite file

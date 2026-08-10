@@ -89,15 +89,20 @@ pub const Error = db.Error;
 
 // -------------------------------------------------------------- the transport
 
-/// A socket, and later a TLS session on top of it. Everything reads and writes
-/// through here so that adding encryption touches one struct.
+/// A socket, with a TLS session on top of it when the target asked for one.
+/// Everything reads and writes through here, so encryption is one branch rather
+/// than a second copy of the protocol.
 pub const Stream = struct {
 	fd: std.c.fd_t,
+	ssl: ?*anyopaque = null,
 
 	pub fn write(self: *Stream, bytes: []const u8) !void {
 		var sent: usize = 0;
 		while (sent < bytes.len) {
-			const wrote = std.c.send(self.fd, bytes[sent..].ptr, bytes.len - sent, 0);
+			const wrote = if (self.ssl) |session|
+				ssl.SSL_write(session, bytes[sent..].ptr, @intCast(bytes.len - sent))
+			else
+				@as(c_int, @intCast(std.c.send(self.fd, bytes[sent..].ptr, bytes.len - sent, 0)));
 			if (wrote <= 0) {
 				return error.Gone;
 			}
@@ -110,7 +115,10 @@ pub const Stream = struct {
 	pub fn readExactly(self: *Stream, into: []u8) !void {
 		var got: usize = 0;
 		while (got < into.len) {
-			const read = std.c.recv(self.fd, into[got..].ptr, into.len - got, 0);
+			const read = if (self.ssl) |session|
+				ssl.SSL_read(session, into[got..].ptr, @intCast(into.len - got))
+			else
+				@as(c_int, @intCast(std.c.recv(self.fd, into[got..].ptr, into.len - got, 0)));
 			if (read <= 0) {
 				return error.Gone;
 			}
@@ -119,10 +127,97 @@ pub const Stream = struct {
 	}
 
 	pub fn close(self: *Stream) void {
+		if (self.ssl) |session| {
+			_ = ssl.SSL_shutdown(session);
+			ssl.SSL_free(session);
+			self.ssl = null;
+		}
 		_ = std.c.close(self.fd);
 		self.fd = -1;
 	}
 };
+
+/// The little of OpenSSL this needs, declared rather than included: a client
+/// context, a session on a socket, and the two calls that move bytes. OpenSSL is
+/// already linked in - libpq and the MariaDB connector both want it - so this
+/// costs nothing but these declarations.
+pub const ssl = struct {
+	pub extern fn OPENSSL_init_ssl(opts: u64, settings: ?*anyopaque) c_int;
+	pub extern fn TLS_client_method() ?*anyopaque;
+	pub extern fn SSL_CTX_new(method: ?*anyopaque) ?*anyopaque;
+	pub extern fn SSL_CTX_free(ctx: ?*anyopaque) void;
+	pub extern fn SSL_CTX_set_default_verify_paths(ctx: ?*anyopaque) c_int;
+	pub extern fn SSL_CTX_set_verify(ctx: ?*anyopaque, mode: c_int, callback: ?*anyopaque) void;
+	pub extern fn SSL_new(ctx: ?*anyopaque) ?*anyopaque;
+	pub extern fn SSL_free(session: ?*anyopaque) void;
+	pub extern fn SSL_set_fd(session: ?*anyopaque, fd: c_int) c_int;
+	pub extern fn SSL_connect(session: ?*anyopaque) c_int;
+	pub extern fn SSL_read(session: ?*anyopaque, buffer: [*]u8, count: c_int) c_int;
+	pub extern fn SSL_write(session: ?*anyopaque, buffer: [*]const u8, count: c_int) c_int;
+	pub extern fn SSL_shutdown(session: ?*anyopaque) c_int;
+	pub extern fn SSL_ctrl(session: ?*anyopaque, cmd: c_int, larg: c_long, parg: ?*anyopaque) c_long;
+	pub extern fn SSL_set1_host(session: ?*anyopaque, host: [*:0]const u8) c_int;
+	pub extern fn SSL_get_verify_result(session: ?*const anyopaque) c_long;
+	pub extern fn ERR_get_error() c_ulong;
+	pub extern fn ERR_error_string_n(code: c_ulong, buffer: [*]u8, length: usize) void;
+
+	pub const VERIFY_PEER: c_int = 1;
+	pub const VERIFY_NONE: c_int = 0;
+	/// SSL_set_tlsext_host_name, which is a macro over SSL_ctrl.
+	pub const CTRL_SET_TLSEXT_HOSTNAME: c_int = 55;
+	pub const TLSEXT_NAMETYPE_host_name: c_long = 0;
+
+	/// What OpenSSL last complained about, into a buffer of the caller's.
+	pub fn lastError(buffer: []u8) []const u8 {
+		const code = ERR_get_error();
+		if (code == 0) {
+			return "";
+		}
+		ERR_error_string_n(code, buffer.ptr, buffer.len);
+		return std.mem.sliceTo(buffer, 0);
+	}
+};
+
+/// Wrap a connected socket in TLS. `host` is verified against the certificate
+/// unless the target said not to bother.
+fn startTls(allocator: std.mem.Allocator, stream: *Stream, host: []const u8, verify: bool, why: *List) !void {
+	_ = ssl.OPENSSL_init_ssl(0, null);
+	const ctx = ssl.SSL_CTX_new(ssl.TLS_client_method()) orelse return error.Tls;
+	// The context is freed as soon as the session is made: the session holds a
+	// reference of its own.
+	defer ssl.SSL_CTX_free(ctx);
+	if (verify) {
+		if (ssl.SSL_CTX_set_default_verify_paths(ctx) != 1) {
+			try why.appendSlice(allocator, "no trusted certificates on this machine to verify the broker against");
+			return error.Tls;
+		}
+		ssl.SSL_CTX_set_verify(ctx, ssl.VERIFY_PEER, null);
+	} else {
+		ssl.SSL_CTX_set_verify(ctx, ssl.VERIFY_NONE, null);
+	}
+	const session = ssl.SSL_new(ctx) orelse return error.Tls;
+	errdefer ssl.SSL_free(session);
+	if (ssl.SSL_set_fd(session, stream.fd) != 1) {
+		return error.Tls;
+	}
+	const zero_host = try allocator.dupeZ(u8, host);
+	defer allocator.free(zero_host);
+	// The name to ask for, and - when verifying - the name to insist on.
+	_ = ssl.SSL_ctrl(session, ssl.CTRL_SET_TLSEXT_HOSTNAME, ssl.TLSEXT_NAMETYPE_host_name, @ptrCast(@constCast(zero_host.ptr)));
+	if (verify) {
+		_ = ssl.SSL_set1_host(session, zero_host.ptr);
+	}
+	if (ssl.SSL_connect(session) != 1) {
+		var buffer: [256]u8 = undefined;
+		const text = ssl.lastError(&buffer);
+		try why.print(allocator, "the TLS handshake failed{s}{s}", .{
+			if (text.len != 0) ": " else "",
+			text,
+		});
+		return error.Tls;
+	}
+	stream.ssl = session;
+}
 
 fn connect(allocator: std.mem.Allocator, host: []const u8, port: u16) !Stream {
 	const zero = try allocator.dupeZ(u8, host);
@@ -446,10 +541,24 @@ pub const Db = struct {
 	cluster_id: List = .empty,
 	correlation: i32 = 0,
 	progress: ?db.Progress = null,
+	/// How to reach a broker: every connection to every one of them is made the
+	/// same way, so this is kept rather than the target it came from.
+	tls: bool = false,
+	verify: bool = true,
+	user: List = .empty,
+	password: List = .empty,
+	mechanism: Mechanism = .none,
 
 	pub fn open(allocator: std.mem.Allocator, target: []const u8, report: *List) !*Db {
 		const parts = try parse(allocator, target);
 		defer parts.deinit(allocator);
+
+		// A user with no password is worth asking about rather than failing at the
+		// handshake, and the interface knows what to do with the word "password".
+		if (parts.mechanism != .none and parts.password.len == 0) {
+			try report.print(allocator, "kafka wants a password for {s}", .{parts.user});
+			return error.Driver;
+		}
 
 		var stream = connect(allocator, parts.host, parts.port) catch {
 			try report.print(allocator, "cannot reach kafka at {s}:{d}", .{ parts.host, parts.port });
@@ -469,7 +578,30 @@ pub const Db = struct {
 		}
 		try self.host.appendSlice(allocator, parts.host);
 		self.port = parts.port;
+		self.tls = parts.tls;
+		self.verify = parts.verify;
+		try self.user.appendSlice(allocator, parts.user);
+		try self.password.appendSlice(allocator, parts.password);
+		self.mechanism = parts.mechanism;
 		self.relabel();
+
+		// Encryption first, then who is asking: everything after this, metadata
+		// included, goes through both.
+		if (self.tls) {
+			startTls(allocator, &self.stream, parts.host, parts.verify, report) catch {
+				if (report.items.len == 0) {
+					try report.print(allocator, "TLS to {s}:{d} could not be set up", .{ parts.host, parts.port });
+				}
+				return error.Driver;
+			};
+		}
+		self.authenticate(&self.stream) catch {
+			try report.appendSlice(allocator, if (self.last_error.items.len != 0)
+				self.last_error.items
+			else
+				"kafka refused the authentication");
+			return error.Driver;
+		};
 
 		// What the broker can do, which is also the check that this is Kafka at all.
 		self.readVersions() catch {
@@ -497,6 +629,8 @@ pub const Db = struct {
 		self.stream.close();
 		self.replies.deinit();
 		self.host.deinit(self.allocator);
+		self.user.deinit(self.allocator);
+		self.password.deinit(self.allocator);
 		self.label.deinit(self.allocator);
 		self.version_text.deinit(self.allocator);
 		self.last_error.deinit(self.allocator);
@@ -626,15 +760,200 @@ pub const Db = struct {
 			if (broker.node != node) {
 				continue;
 			}
-			const stream = connect(self.allocator, broker.host, broker.port) catch {
+			var stream = connect(self.allocator, broker.host, broker.port) catch {
 				self.complain("cannot reach the broker at {s}:{d}, which leads that partition", .{ broker.host, broker.port });
 				return error.Driver;
 			};
+			errdefer stream.close();
+			if (self.tls) {
+				var why: List = .empty;
+				defer why.deinit(self.allocator);
+				startTls(self.allocator, &stream, broker.host, self.verify, &why) catch {
+					self.complain("TLS to the broker at {s}:{d} failed: {s}", .{
+						broker.host, broker.port,
+						if (why.items.len != 0) why.items else "no reason given",
+					});
+					return error.Driver;
+				};
+			}
+			try self.authenticate(&stream);
 			try self.leaders.put(self.allocator, node, stream);
 			return self.leaders.getPtr(node).?;
 		}
 		self.complain("no broker {d} in the cluster, so its partitions cannot be read", .{node});
 		return error.Driver;
+	}
+
+	// --- who is asking ---
+
+	/// SaslHandshake names the mechanism, then SaslAuthenticate carries whatever
+	/// that mechanism has to say. Nothing at all when the target named no user:
+	/// a broker on a private network usually wants none.
+	fn authenticate(self: *Db, stream: *Stream) db.Error!void {
+		if (self.mechanism == .none) {
+			return;
+		}
+		var body: List = .empty;
+		defer body.deinit(self.allocator);
+		const write = Encoder{ .out = &body, .a = self.allocator };
+		try write.string(self.mechanism.name());
+		const reply = try self.call(stream, .sasl_handshake, body.items);
+		var read = Decoder{ .bytes = reply };
+		const code = read.int16() catch {
+			self.remember("kafka answered the handshake with something unexpected");
+			return error.Driver;
+		};
+		if (code != 0) {
+			// The broker lists what it does take, which is the one thing worth
+			// saying when a mechanism is refused.
+			var offered: List = .empty;
+			defer offered.deinit(self.allocator);
+			var count = read.arrayLength() catch 0;
+			while (count > 0) : (count -= 1) {
+				const name = read.string() catch break;
+				if (offered.items.len != 0) {
+					try offered.appendSlice(self.allocator, ", ");
+				}
+				try offered.appendSlice(self.allocator, name);
+			}
+			self.complain("kafka does not take {s}{s}{s}", .{
+				self.mechanism.name(),
+				if (offered.items.len != 0) " - it offers " else "",
+				offered.items,
+			});
+			return error.Driver;
+		}
+		switch (self.mechanism) {
+			.none => unreachable,
+			.plain => {
+				// The whole of PLAIN: an empty authorisation identity, the user, the
+				// password, separated by NULs.
+				var token: List = .empty;
+				defer token.deinit(self.allocator);
+				try token.append(self.allocator, 0);
+				try token.appendSlice(self.allocator, self.user.items);
+				try token.append(self.allocator, 0);
+				try token.appendSlice(self.allocator, self.password.items);
+				_ = try self.saslToken(stream, token.items);
+			},
+			.scram_sha_256 => try self.scram(stream, std.crypto.hash.sha2.Sha256, std.crypto.auth.hmac.sha2.HmacSha256),
+			.scram_sha_512 => try self.scram(stream, std.crypto.hash.sha2.Sha512, std.crypto.auth.hmac.sha2.HmacSha512),
+		}
+	}
+
+	/// One SaslAuthenticate exchange. The reply's bytes belong to `replies`.
+	fn saslToken(self: *Db, stream: *Stream, token: []const u8) db.Error![]const u8 {
+		var body: List = .empty;
+		defer body.deinit(self.allocator);
+		const write = Encoder{ .out = &body, .a = self.allocator };
+		try write.byteArray(token);
+		const reply = try self.call(stream, .sasl_authenticate, body.items);
+		var read = Decoder{ .bytes = reply };
+		const code = read.int16() catch {
+			self.remember("kafka answered the authentication with something unexpected");
+			return error.Driver;
+		};
+		const why = read.string() catch "";
+		const answer = read.nullableBytes() catch null;
+		if (code != 0) {
+			if (why.len != 0) {
+				self.complain("kafka refused the authentication: {s}", .{why});
+			} else {
+				self.complain("kafka refused the authentication: {s}", .{errorText(code)});
+			}
+			return error.Driver;
+		}
+		return answer orelse "";
+	}
+
+	/// SCRAM, in three messages: what the client is, what the server salts with,
+	/// and the proof that the client knows the password without sending it. The
+	/// server's own signature is checked too - that is the half of SCRAM that
+	/// proves the broker is not an impostor.
+	fn scram(self: *Db, stream: *Stream, comptime Hash: type, comptime Hmac: type) db.Error!void {
+		const arena = self.replies.allocator();
+		const base64 = std.base64.standard;
+
+		var raw_nonce: [24]u8 = undefined;
+		randomBytes(&raw_nonce) catch {
+			self.remember("no source of randomness on this machine for a SCRAM nonce");
+			return error.Driver;
+		};
+		var nonce_buffer: [base64.Encoder.calcSize(24)]u8 = undefined;
+		const nonce = base64.Encoder.encode(&nonce_buffer, &raw_nonce);
+
+		const user = try escapeName(arena, self.user.items);
+		const bare = try std.fmt.allocPrint(arena, "n={s},r={s}", .{ user, nonce });
+		const first = try std.fmt.allocPrint(arena, "n,,{s}", .{bare});
+		const server_first = try arena.dupe(u8, try self.saslToken(stream, first));
+
+		const salt_text = fieldOf(server_first, 's') orelse {
+			self.remember("the broker's SCRAM reply had no salt in it");
+			return error.Driver;
+		};
+		const combined = fieldOf(server_first, 'r') orelse {
+			self.remember("the broker's SCRAM reply had no nonce in it");
+			return error.Driver;
+		};
+		const iterations = std.fmt.parseInt(u32, fieldOf(server_first, 'i') orelse "4096", 10) catch 4096;
+		if (!std.mem.startsWith(u8, combined, nonce)) {
+			self.remember("the broker's SCRAM nonce does not start with the one it was sent");
+			return error.Driver;
+		}
+		const salt = try arena.alloc(u8, base64.Decoder.calcSizeForSlice(salt_text) catch {
+			self.remember("the broker's SCRAM salt is not base64");
+			return error.Driver;
+		});
+		base64.Decoder.decode(salt, salt_text) catch {
+			self.remember("the broker's SCRAM salt is not base64");
+			return error.Driver;
+		};
+
+		var salted: [Hmac.mac_length]u8 = undefined;
+		std.crypto.pwhash.pbkdf2(&salted, self.password.items, salt, iterations, Hmac) catch {
+			self.remember("the SCRAM key could not be derived");
+			return error.Driver;
+		};
+		var client_key: [Hmac.mac_length]u8 = undefined;
+		Hmac.create(&client_key, "Client Key", &salted);
+		var stored_key: [Hash.digest_length]u8 = undefined;
+		Hash.hash(&client_key, &stored_key, .{});
+
+		const without_proof = try std.fmt.allocPrint(arena, "c=biws,r={s}", .{combined});
+		const auth_message = try std.fmt.allocPrint(arena, "{s},{s},{s}", .{ bare, server_first, without_proof });
+
+		var client_signature: [Hmac.mac_length]u8 = undefined;
+		Hmac.create(&client_signature, auth_message, &stored_key);
+		var proof: [Hmac.mac_length]u8 = undefined;
+		for (client_key, client_signature, 0..) |key_byte, signature_byte, i| {
+			proof[i] = key_byte ^ signature_byte;
+		}
+		var proof_buffer: [base64.Encoder.calcSize(Hmac.mac_length)]u8 = undefined;
+		const final = try std.fmt.allocPrint(arena, "{s},p={s}", .{
+			without_proof,
+			base64.Encoder.encode(&proof_buffer, &proof),
+		});
+		const server_final = try self.saslToken(stream, final);
+
+		// And the other half: the broker proves it knew the password too.
+		var server_key: [Hmac.mac_length]u8 = undefined;
+		Hmac.create(&server_key, "Server Key", &salted);
+		var expected: [Hmac.mac_length]u8 = undefined;
+		Hmac.create(&expected, auth_message, &server_key);
+		var expected_buffer: [base64.Encoder.calcSize(Hmac.mac_length)]u8 = undefined;
+		const want = base64.Encoder.encode(&expected_buffer, &expected);
+		const got = fieldOf(server_final, 'v') orelse {
+			if (fieldOf(server_final, 'e')) |why| {
+				self.complain("kafka refused the SCRAM proof: {s}", .{why});
+			} else {
+				self.remember("the broker sent no signature of its own, so it cannot be trusted");
+			}
+			return error.Driver;
+		};
+		if (!std.mem.eql(u8, want, got)) {
+			self.remember("the broker's SCRAM signature is wrong - it does not know the password it should");
+			return error.Driver;
+		}
 	}
 
 	// --- what the cluster is ---
@@ -2015,37 +2334,165 @@ pub fn likeMatch(pattern: []const u8, text: []const u8) bool {
 // ------------------------------------------------------------------ the target
 
 pub fn owns(target: []const u8) bool {
-	return std.mem.startsWith(u8, target, "kafka://");
+	for ([_][]const u8{ "kafka://", "kafka+ssl://", "kafka+tls://", "kafkas://" }) |prefix| {
+		if (std.mem.startsWith(u8, target, prefix)) {
+			return true;
+		}
+	}
+	return false;
 }
+
+/// Which SASL mechanism, in the names the protocol uses.
+pub const Mechanism = enum {
+	none,
+	plain,
+	scram_sha_256,
+	scram_sha_512,
+
+	pub fn name(self: Mechanism) []const u8 {
+		return switch (self) {
+			.none => "",
+			.plain => "PLAIN",
+			.scram_sha_256 => "SCRAM-SHA-256",
+			.scram_sha_512 => "SCRAM-SHA-512",
+		};
+	}
+
+	pub fn of(text: []const u8) ?Mechanism {
+		if (std.ascii.eqlIgnoreCase(text, "PLAIN")) {
+			return .plain;
+		}
+		if (std.ascii.eqlIgnoreCase(text, "SCRAM-SHA-256")) {
+			return .scram_sha_256;
+		}
+		if (std.ascii.eqlIgnoreCase(text, "SCRAM-SHA-512")) {
+			return .scram_sha_512;
+		}
+		return null;
+	}
+};
 
 pub const Parts = struct {
 	host: []const u8,
 	port: u16 = 9092,
+	user: []const u8 = "",
+	password: []const u8 = "",
+	mechanism: Mechanism = .none,
+	tls: bool = false,
+	/// Whether the broker's certificate has to check out. Off is for a cluster
+	/// with a certificate of its own making, and has to be asked for.
+	verify: bool = true,
 
 	pub fn deinit(self: Parts, allocator: std.mem.Allocator) void {
 		allocator.free(self.host);
+		allocator.free(self.user);
+		allocator.free(self.password);
 	}
 };
 
-/// `kafka://host:port`, with the port defaulting to 9092.
+/// `kafka://user:password@host:port?tls=1&mechanism=SCRAM-SHA-256`, with
+/// `kafka+ssl://` as a shorter way of asking for TLS and the port defaulting to
+/// 9092. A mechanism is only used when there is a user; with a user and no
+/// mechanism it is PLAIN, which is what most brokers are set up for.
 pub fn parse(allocator: std.mem.Allocator, target: []const u8) !Parts {
 	var rest = target;
+	var tls = false;
+	for ([_][]const u8{ "kafka+ssl://", "kafka+tls://", "kafkas://" }) |prefix| {
+		if (std.mem.startsWith(u8, rest, prefix)) {
+			rest = rest[prefix.len..];
+			tls = true;
+		}
+	}
 	if (std.mem.startsWith(u8, rest, "kafka://")) {
 		rest = rest["kafka://".len..];
 	}
+
+	// The query first, so a password with an @ or a : in it cannot be mistaken for
+	// part of the address.
+	var user: []const u8 = "";
+	var password: []const u8 = "";
+	var mechanism: ?Mechanism = null;
+	var verify = true;
+	if (std.mem.indexOfScalar(u8, rest, '?')) |mark| {
+		var options = std.mem.tokenizeScalar(u8, rest[mark + 1 ..], '&');
+		rest = rest[0..mark];
+		while (options.next()) |option| {
+			const equals = std.mem.indexOfScalar(u8, option, '=') orelse continue;
+			const key = option[0..equals];
+			const value = option[equals + 1 ..];
+			if (std.mem.eql(u8, key, "password")) {
+				password = value;
+			} else if (std.mem.eql(u8, key, "user") or std.mem.eql(u8, key, "username")) {
+				user = value;
+			} else if (std.mem.eql(u8, key, "mechanism") or std.mem.eql(u8, key, "sasl")) {
+				mechanism = Mechanism.of(value);
+			} else if (std.mem.eql(u8, key, "tls") or std.mem.eql(u8, key, "ssl")) {
+				tls = !std.mem.eql(u8, value, "0");
+			} else if (std.mem.eql(u8, key, "insecure")) {
+				verify = std.mem.eql(u8, value, "0");
+			}
+		}
+	}
+	// A path is not part of the address: Kafka has no database to name.
 	if (std.mem.indexOfScalar(u8, rest, '/')) |slash| {
 		rest = rest[0..slash];
 	}
+	if (std.mem.lastIndexOfScalar(u8, rest, '@')) |at| {
+		const userinfo = rest[0..at];
+		rest = rest[at + 1 ..];
+		if (std.mem.indexOfScalar(u8, userinfo, ':')) |colon| {
+			user = userinfo[0..colon];
+			password = userinfo[colon + 1 ..];
+		} else {
+			user = userinfo;
+		}
+	}
+
 	var host = rest;
-	var port: u16 = 9092;
+	var port: u16 = if (tls) 9093 else 9092;
 	if (std.mem.lastIndexOfScalar(u8, rest, ':')) |colon| {
 		host = rest[0..colon];
-		port = std.fmt.parseInt(u16, rest[colon + 1 ..], 10) catch 9092;
+		port = std.fmt.parseInt(u16, rest[colon + 1 ..], 10) catch port;
 	}
 	if (host.len == 0) {
 		host = "127.0.0.1";
 	}
-	return .{ .host = try allocator.dupe(u8, host), .port = port };
+	return .{
+		.host = try allocator.dupe(u8, host),
+		.port = port,
+		.user = try unescape(allocator, user),
+		.password = try unescape(allocator, password),
+		.mechanism = if (user.len == 0) .none else (mechanism orelse .plain),
+		.tls = tls,
+		.verify = verify,
+	};
+}
+
+/// %20 and the like, as a URL carries them.
+fn unescape(allocator: std.mem.Allocator, text: []const u8) ![]const u8 {
+	var out: List = .empty;
+	errdefer out.deinit(allocator);
+	var at: usize = 0;
+	while (at < text.len) {
+		if (text[at] == '%' and at + 2 < text.len) {
+			const high = std.fmt.charToDigit(text[at + 1], 16) catch {
+				try out.append(allocator, text[at]);
+				at += 1;
+				continue;
+			};
+			const low = std.fmt.charToDigit(text[at + 2], 16) catch {
+				try out.append(allocator, text[at]);
+				at += 1;
+				continue;
+			};
+			try out.append(allocator, high * 16 + low);
+			at += 3;
+			continue;
+		}
+		try out.append(allocator, text[at]);
+		at += 1;
+	}
+	return out.toOwnedSlice(allocator);
 }
 
 // ----------------------------------------------------------------- compression
@@ -2371,6 +2818,50 @@ pub fn stamp(arena: std.mem.Allocator, millis: i64) ![]const u8 {
 		time.getSecondsIntoMinute(),
 		ms,
 	});
+}
+
+/// Bytes nobody can guess, for a SCRAM nonce. std.crypto.random is gone in this
+/// Zig and arc4random is not on musl, so this is the source both systems have.
+pub fn randomBytes(into: []u8) !void {
+	const fd = std.c.open("/dev/urandom", .{ .ACCMODE = .RDONLY });
+	if (fd < 0) {
+		return error.NoRandom;
+	}
+	defer _ = std.c.close(fd);
+	var got: usize = 0;
+	while (got < into.len) {
+		const read = std.c.read(fd, into[got..].ptr, into.len - got);
+		if (read <= 0) {
+			return error.NoRandom;
+		}
+		got += @intCast(read);
+	}
+}
+
+/// A SCRAM message is a comma-separated list of `k=value`, and this is one of
+/// them - the first with that letter, which is all SCRAM has.
+pub fn fieldOf(message: []const u8, key: u8) ?[]const u8 {
+	var parts = std.mem.tokenizeScalar(u8, message, ',');
+	while (parts.next()) |part| {
+		if (part.len >= 2 and part[0] == key and part[1] == '=') {
+			return part[2..];
+		}
+	}
+	return null;
+}
+
+/// A user name inside a SCRAM message, where a comma and an equals sign have to
+/// be spelled out or they would end the field.
+pub fn escapeName(arena: std.mem.Allocator, name: []const u8) ![]const u8 {
+	var out: List = .empty;
+	for (name) |char| {
+		switch (char) {
+			'=' => try out.appendSlice(arena, "=3D"),
+			',' => try out.appendSlice(arena, "=2C"),
+			else => try out.append(arena, char),
+		}
+	}
+	return out.items;
 }
 
 /// A cell of a change that was given a value: a change may set a column to NULL,
@@ -2767,4 +3258,118 @@ test "every API this driver speaks is one the broker still answers without flexi
 		const api: Api = @enumFromInt(field.value);
 		try testing.expect(versionOf(api) >= 0);
 	}
+}
+
+test "a target carries what it takes to reach the cluster" {
+	const a = testing.allocator;
+	{
+		// TLS by scheme, and a port that follows from it.
+		const parts = try parse(a, "kafka+ssl://broker.example");
+		defer parts.deinit(a);
+		try testing.expect(parts.tls);
+		try testing.expectEqual(@as(u16, 9093), parts.port);
+		try testing.expectEqual(Mechanism.none, parts.mechanism);
+	}
+	{
+		// A user with no mechanism named is PLAIN, which is what brokers are set up
+		// for; the password may be escaped, and an @ inside it is not the host.
+		const parts = try parse(a, "kafka://alice@broker:9095?password=p%40ss%20word");
+		defer parts.deinit(a);
+		try testing.expectEqualStrings("broker", parts.host);
+		try testing.expectEqual(@as(u16, 9095), parts.port);
+		try testing.expectEqualStrings("alice", parts.user);
+		try testing.expectEqualStrings("p@ss word", parts.password);
+		try testing.expectEqual(Mechanism.plain, parts.mechanism);
+		try testing.expect(!parts.tls);
+	}
+	{
+		const parts = try parse(a, "kafka://bob:hunter2@broker:9093?tls=1&mechanism=SCRAM-SHA-512&insecure=1");
+		defer parts.deinit(a);
+		try testing.expectEqualStrings("bob", parts.user);
+		try testing.expectEqualStrings("hunter2", parts.password);
+		try testing.expectEqual(Mechanism.scram_sha_512, parts.mechanism);
+		try testing.expect(parts.tls);
+		try testing.expect(!parts.verify); // asked for, not assumed
+	}
+	{
+		// No user at all: no authentication, and the certificate still verified.
+		const parts = try parse(a, "kafka://127.0.0.1:9093");
+		defer parts.deinit(a);
+		try testing.expectEqual(Mechanism.none, parts.mechanism);
+		try testing.expect(parts.verify);
+	}
+	try testing.expect(owns("kafka+ssl://x"));
+	try testing.expectEqualStrings("SCRAM-SHA-256", Mechanism.scram_sha_256.name());
+	try testing.expectEqual(Mechanism.plain, Mechanism.of("plain").?);
+	try testing.expect(Mechanism.of("GSSAPI") == null);
+}
+
+test "SCRAM's messages are read and written the way the standard spells them" {
+	var arena = std.heap.ArenaAllocator.init(testing.allocator);
+	defer arena.deinit();
+	const a = arena.allocator();
+
+	const server_first = "r=abcdefXYZ,s=QSXCR+Q6sek8bf92,i=4096";
+	try testing.expectEqualStrings("abcdefXYZ", fieldOf(server_first, 'r').?);
+	try testing.expectEqualStrings("QSXCR+Q6sek8bf92", fieldOf(server_first, 's').?);
+	try testing.expectEqualStrings("4096", fieldOf(server_first, 'i').?);
+	try testing.expect(fieldOf(server_first, 'v') == null);
+	try testing.expectEqualStrings("rmF9pqV8S7suAoZWja4dJRkFsKQ=", fieldOf("v=rmF9pqV8S7suAoZWja4dJRkFsKQ=", 'v').?);
+	try testing.expectEqualStrings("invalid-proof", fieldOf("e=invalid-proof", 'e').?);
+
+	// A comma or an equals sign in a user name would end the field, so they are
+	// spelled out.
+	try testing.expectEqualStrings("a=2Cb=3Dc", try escapeName(a, "a,b=c"));
+	try testing.expectEqualStrings("plain", try escapeName(a, "plain"));
+}
+
+test "the proof is the client key against its signature, as RFC 5802 has it" {
+	// The example from the RFC: user "user", password "pencil", and the salt and
+	// nonces it gives. If this matches, the derivation and the exclusive-or are
+	// right, which is the part a broker checks.
+	const Hmac = std.crypto.auth.hmac.HmacSha1;
+	const Hash = std.crypto.hash.Sha1;
+	const base64 = std.base64.standard;
+	// Twelve bytes, not sixteen: the length has to come from the base64 itself, and
+	// getting that wrong is exactly the bug this test caught when it was written.
+	const salt_text = "QSXCR+Q6sek8bf92";
+	var salt: [try base64.Decoder.calcSizeForSlice(salt_text)]u8 = undefined;
+	try base64.Decoder.decode(&salt, salt_text);
+
+	var salted: [Hmac.mac_length]u8 = undefined;
+	try std.crypto.pwhash.pbkdf2(&salted, "pencil", &salt, 4096, Hmac);
+	var client_key: [Hmac.mac_length]u8 = undefined;
+	Hmac.create(&client_key, "Client Key", &salted);
+	var stored_key: [Hash.digest_length]u8 = undefined;
+	Hash.hash(&client_key, &stored_key, .{});
+
+	const auth_message = "n=user,r=fyko+d2lbbFgONRv9qkxdawL," ++
+		"r=fyko+d2lbbFgONRv9qkxdawL3rfcNHYJY1ZVvWVs7j,s=QSXCR+Q6sek8bf92,i=4096," ++
+		"c=biws,r=fyko+d2lbbFgONRv9qkxdawL3rfcNHYJY1ZVvWVs7j";
+	var signature: [Hmac.mac_length]u8 = undefined;
+	Hmac.create(&signature, auth_message, &stored_key);
+	var proof: [Hmac.mac_length]u8 = undefined;
+	for (client_key, signature, 0..) |key_byte, signature_byte, i| {
+		proof[i] = key_byte ^ signature_byte;
+	}
+	var buffer: [base64.Encoder.calcSize(Hmac.mac_length)]u8 = undefined;
+	try testing.expectEqualStrings("v0X8v3Bz2T0CJGbJQyF0X+HI4Ts=", base64.Encoder.encode(&buffer, &proof));
+
+	// And the server's half, which this driver checks so that a broker cannot
+	// merely claim the password was right.
+	var server_key: [Hmac.mac_length]u8 = undefined;
+	Hmac.create(&server_key, "Server Key", &salted);
+	var server_signature: [Hmac.mac_length]u8 = undefined;
+	Hmac.create(&server_signature, auth_message, &server_key);
+	try testing.expectEqualStrings("rmF9pqV8S7suAoZWja4dJRkFsKQ=", base64.Encoder.encode(&buffer, &server_signature));
+}
+
+test "randomness is available, and different every time" {
+	var first: [24]u8 = undefined;
+	var second: [24]u8 = undefined;
+	try randomBytes(&first);
+	try randomBytes(&second);
+	try testing.expect(!std.mem.eql(u8, &first, &second));
+	// And not simply left as it was.
+	try testing.expect(!std.mem.allEqual(u8, &first, 0));
 }
