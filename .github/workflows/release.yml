@@ -37,15 +37,21 @@ jobs:
       - run: brew install pkgconf libpq mariadb-connector-c openssl@3
       - run: ./fetch-sqlite.sh
 
+      # -Dcpu=baseline, or Zig builds for the CPU of the runner: GitHub's arm64
+      # machines are Neoverse and emit SVE, which is an illegal instruction on
+      # Apple silicon, and the x86 ones are no better. A release has to run on
+      # everybody's processor, not on the one that compiled it.
       - name: build
         run: |
-          zig build -Doptimize=ReleaseFast -Dstatic -Dstrip \
+          zig build -Doptimize=ReleaseFast -Dstatic -Dstrip -Dcpu=baseline \
             -Dlibpq="$(brew --prefix libpq)" -Dmariadb="$(brew --prefix mariadb-connector-c)"
 
       - name: nothing but the system is linked
         run: |
           otool -L zig-out/bin/krtek | tee links.txt
-          ! grep -qE "libpq|mariadb|libssl|libcrypto|homebrew|/usr/local" links.txt
+          if grep -qE "libpq|mariadb|libssl|libcrypto|homebrew|/usr/local" links.txt; then
+            echo "::error::a client library is still a runtime dependency"; exit 1
+          fi
 
       - name: package
         run: ./tests/package.sh "${{ inputs.tag || github.ref_name }}" "macos-${{ matrix.arch }}"
@@ -82,7 +88,7 @@ jobs:
             mkdir -p /opt/zig && tar xJf /tmp/zig.tar.xz -C /opt/zig --strip-components=1
             export PATH=/opt/zig:$PATH ZIG_GLOBAL_CACHE_DIR=/tmp/zig-cache
             ./fetch-sqlite.sh
-            OPTIMIZE=ReleaseFast ./tests/linux-static.sh -Dstrip
+            OPTIMIZE=ReleaseFast ./tests/linux-static.sh -Dstrip -Dcpu=baseline
             ./tests/smoke.sh
           '
 
@@ -92,6 +98,21 @@ jobs:
         run: |
           file zig-out/bin/krtek | tee links.txt
           grep -q "statically linked" links.txt
+
+      # And a check that it worked, because -Dcpu=baseline is one word and losing
+      # it would not be noticed until somebody else's machine died on it. SVE is
+      # what GitHub's arm64 runners emit; AVX-512 is the x86 equivalent.
+      - name: no instructions somebody's CPU might not have
+        run: |
+          objdump -d zig-out/bin/krtek > dis.txt
+          # `! grep ...` would not fail the step unless it were the last line -
+          # errexit skips a command whose status is inverted - so ask outright.
+          if grep -qE "\b(ptrue|whilelo|cntb)\b" dis.txt; then
+            echo "::error::SVE instructions - built for the runner's CPU, not baseline"; exit 1
+          fi
+          if grep -qE "%zmm|\bvmovdqu64\b" dis.txt; then
+            echo "::error::AVX-512 instructions - built for the runner's CPU, not baseline"; exit 1
+          fi
 
       - name: package
         run: |
