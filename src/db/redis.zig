@@ -31,6 +31,21 @@ const List = std.ArrayListUnmanaged(u8);
 /// millions of them still answers.
 const PAGE = 1000;
 
+/// How long one read waits before asking whether to carry on, and how long it
+/// waits in total before calling the server gone. The first is what makes ctrl+c
+/// work while Redis is busy.
+const READ_TIMEOUT_MS: i64 = 400;
+const READ_PATIENCE_MS: i64 = 60 * 1000;
+
+/// Wait this long for something to arrive, then come back either way.
+fn setTimeout(socket: std.c.fd_t, ms: i64) void {
+	const timeout = std.c.timeval{
+		.sec = @intCast(@divFloor(ms, 1000)),
+		.usec = @intCast(@mod(ms, 1000) * 1000),
+	};
+	_ = std.c.setsockopt(socket, std.c.SOL.SOCKET, std.c.SO.RCVTIMEO, &timeout, @sizeOf(std.c.timeval));
+}
+
 pub const Db = struct {
 	allocator: std.mem.Allocator,
 	socket: std.c.fd_t,
@@ -68,6 +83,7 @@ pub const Db = struct {
 			.replies = std.heap.ArenaAllocator.init(allocator),
 		};
 		errdefer self.close();
+		setTimeout(socket, READ_TIMEOUT_MS);
 
 		if (parts.password.len != 0) {
 			const reply = self.command(&[_][]const u8{ "AUTH", parts.password }) catch {
@@ -205,14 +221,41 @@ pub const Db = struct {
 		}
 	}
 
+	/// More bytes from the socket. The socket has a short receive timeout, so a
+	/// reply that is slow to arrive gets to ask whether the user is still waiting -
+	/// without it, a server that stopped answering held the whole program and
+	/// ctrl+c could do nothing about it.
 	fn fill(self: *Db) db.Error!void {
 		var chunk: [16 * 1024]u8 = undefined;
-		const got = std.c.recv(self.socket, &chunk, chunk.len, 0);
-		if (got <= 0) {
-			self.remember("redis closed the connection");
-			return error.Driver;
+		var waiting: i64 = 0;
+		while (true) {
+			const got = std.c.recv(self.socket, &chunk, chunk.len, 0);
+			if (got > 0) {
+				try self.buffer.appendSlice(self.allocator, chunk[0..@intCast(got)]);
+				return;
+			}
+			if (got == 0) {
+				self.remember("redis closed the connection");
+				return error.Driver;
+			}
+			const code = std.c._errno().*;
+			const timed_out = code == @intFromEnum(std.c.E.AGAIN) or code == @intFromEnum(std.c.E.INTR);
+			if (!timed_out) {
+				self.remember("redis closed the connection");
+				return error.Driver;
+			}
+			if (self.progress) |progress| {
+				if (!progress.call()) {
+					self.remember("given up on");
+					return error.Driver;
+				}
+			}
+			waiting += READ_TIMEOUT_MS;
+			if (waiting >= READ_PATIENCE_MS) {
+				self.remember("redis stopped answering");
+				return error.Driver;
+			}
 		}
-		try self.buffer.appendSlice(self.allocator, chunk[0..@intCast(got)]);
 	}
 
 	const ParseError = error{ Incomplete, Malformed, OutOfMemory };
