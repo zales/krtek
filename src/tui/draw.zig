@@ -127,11 +127,16 @@ fn connections(app: *App, size: Size, rows: usize) void {
 			screen.style(.{ .bg = if (on) C.selected else null, .fg = if (item.keeps == .file) C.warn else C.ok });
 			pad(app, item.keeps.label(), 9, false);
 			screen.style(.{ .bg = if (on) C.selected else null, .fg = C.dim });
-			screen.style(.{ .bg = if (on) C.selected else null, .fg = C.dim });
 			// 4 for the marker, 22 name, 11 engine, 9 for where the password is.
-			_ = write(app, item.target, if (width > 48) width - 48 else 0);
+			const room = if (width > 48) width - 48 else 0;
+			const shown = write(app, item.target, room);
+			// Filled to the panel's edge rather than the screen's: the row of the one
+			// selected is a band of colour, and clearing to the end of the line would
+			// take it out through the frame.
 			screen.style(.{ .bg = if (on) C.selected else null });
-			screen.clearToEol();
+			if (room > shown) {
+				fill(app, ' ', room - shown);
+			}
 			line += 1;
 		}
 		line += 1;

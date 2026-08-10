@@ -43,12 +43,83 @@ NAMED = {
 }
 
 
+class Style:
+	"""What a cell looks like: colours as #rrggbb or None for the default."""
+
+	__slots__ = ("fg", "bg", "bold", "dim", "italic", "underline", "reverse")
+
+	def __init__(self, fg=None, bg=None, bold=False, dim=False, italic=False, underline=False, reverse=False):
+		self.fg, self.bg = fg, bg
+		self.bold, self.dim, self.italic, self.underline, self.reverse = bold, dim, italic, underline, reverse
+
+	def copy(self):
+		return Style(self.fg, self.bg, self.bold, self.dim, self.italic, self.underline, self.reverse)
+
+	def after(self, params):
+		"""This style with an SGR sequence applied. Truecolour arrives as
+		38:2:r:g:b, which is why the parameters are not split on ';' alone."""
+		out = self.copy()
+		fields = [f for f in params.split(";")]
+		i = 0
+		while i < len(fields):
+			field = fields[i]
+			parts = field.split(":")
+			code = parts[0]
+			if code in ("38", "48") and len(parts) >= 5 and parts[1] == "2":
+				colour = "#%02x%02x%02x" % tuple(int(p or 0) for p in parts[2:5])
+				if code == "38":
+					out.fg = colour
+				else:
+					out.bg = colour
+				i += 1
+				continue
+			# The same, spelled with semicolons: 38;2;r;g;b
+			if code in ("38", "48") and i + 4 < len(fields) and fields[i + 1] == "2":
+				colour = "#%02x%02x%02x" % tuple(int(fields[i + n] or 0) for n in (2, 3, 4))
+				if code == "38":
+					out.fg = colour
+				else:
+					out.bg = colour
+				i += 5
+				continue
+			if code in ("", "0"):
+				out = Style()
+			elif code == "1":
+				out.bold = True
+			elif code == "2":
+				out.dim = True
+			elif code == "3":
+				out.italic = True
+			elif code == "4":
+				out.underline = True
+			elif code == "7":
+				out.reverse = True
+			elif code == "22":
+				out.bold = out.dim = False
+			elif code == "23":
+				out.italic = False
+			elif code == "24":
+				out.underline = False
+			elif code == "27":
+				out.reverse = False
+			elif code == "39":
+				out.fg = None
+			elif code == "49":
+				out.bg = None
+			i += 1
+		return out
+
+
 class Screen:
 	"""Just enough of a terminal to reproduce what this app draws."""
 
 	def __init__(self, rows, cols):
 		self.rows, self.cols = rows, cols
 		self.grid = [[" "] * cols for _ in range(rows)]
+		# The colours and attributes of each cell, for tests/shot.py; the text
+		# rendering below ignores them.
+		self.styles = [[Style()] * cols for _ in range(rows)]
+		self.style = Style()
 		self.row = self.col = 0
 		self.rest = ""
 		self.clipboard = []   # whatever the app sent through OSC 52
@@ -96,6 +167,7 @@ class Screen:
 			elif char >= " ":
 				if self.row < self.rows and self.col < self.cols:
 					self.grid[self.row][self.col] = char
+					self.styles[self.row][self.col] = self.style
 				self.col += 1
 			i += 1
 
@@ -128,9 +200,13 @@ class Screen:
 			if self.row < self.rows:
 				for c in range(self.col, self.cols):
 					self.grid[self.row][c] = " "
+					self.styles[self.row][c] = self.style
 		elif final == "J":
 			self.grid = [[" "] * self.cols for _ in range(self.rows)]
-		# SGR ("m"), cursor visibility and the alternate screen change nothing here.
+			self.styles = [[Style()] * self.cols for _ in range(self.rows)]
+		elif final == "m":
+			self.style = self.style.after(params)
+		# Cursor visibility and the alternate screen change nothing here.
 
 	def text(self):
 		return "\n".join("".join(row).rstrip() for row in self.grid)

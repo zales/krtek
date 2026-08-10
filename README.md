@@ -9,6 +9,8 @@ A database manager for the terminal, written in Zig, with the feature set of
 *Krtek* is Czech for a mole: a small thing that digs through what is underneath
 and comes back up with what it found.
 
+![browsing a table](docs/grid.svg)
+
 Written for the terminals people actually use: under the kitty keyboard protocol
 (Ghostty, Kitty, WezTerm) a key press reports the *unshifted* key plus a
 modifier, so what a key produced is read from the text the terminal reports, not
@@ -85,6 +87,37 @@ machine is halted through its progress handler, PostgreSQL gets a cancel request
 on its own socket, MySQL a `KILL QUERY` down a second connection while the first
 waits through the connector's non-blocking calls. The connection stays usable, and
 a batch stops at the statement that was interrupted.
+
+## What it looks like
+
+The picture above is a table: the objects in the database down the left, the rows
+beside them, the cell under the cursor picked out and shown whole at the bottom.
+
+The SQL editor: keywords, strings, numbers and comments in colour, `tab` completing
+a table or column name, `ctrl+s` running it.
+
+![the SQL editor](docs/editor.svg)
+
+`ctrl+k` is the command palette. Type a few letters of what you want; the letters
+that matched are underlined, and the key that does it is on the right, so using it
+teaches the key map.
+
+![the command palette](docs/palette.svg)
+
+With no argument it opens the saved connections - here one of each engine, with
+`keychain` marking the one whose password macOS keeps.
+
+![the saved connections](docs/connections.svg)
+
+The structure of a table: columns, indexes, foreign keys and the `CREATE`
+statement the engine reports.
+
+![the structure of a table](docs/structure.svg)
+
+Those are not photographs of a terminal. The pty harness reproduces what the app
+drew, colours and all, and [tests/shot.py](tests/shot.py) writes that grid out as
+an SVG - so `./tests/shots.sh` regenerates every one of them, and they cannot
+quietly drift away from what the program does.
 
 ## Redis
 
@@ -275,6 +308,16 @@ terminal with the kitty keyboard protocol does - `shift+s` as `CSI 115:83;2;83u`
 rather than as the byte `S`, and `{shift}`, `{f13}` or `{kpdown}` as the private
 use codepoints that protocol gives to keys which are not text. A plain pty cannot
 express either difference, and both are where keyboard bugs live.
+
+The same harness records the colours, so the screenshots in this file are written
+out of it: [tests/shot.py](tests/shot.py) turns a captured screen into an SVG and
+[tests/shots.sh](tests/shots.sh) builds a small demo database and takes all of
+them, in a configuration of its own so no screenshot shows anybody's real
+connections:
+
+```sh
+zig build && ./tests/shots.sh
+```
 
 That is how everything described here was verified: against a real SQLite file
 with `sqlite3` reading the result back, and against a PostgreSQL 17 container
