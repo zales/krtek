@@ -217,3 +217,12 @@ jobs:
           git add Formula/krtek.rb
           git diff --cached --quiet || git commit -m "krtek $version"
           git push
+
+  # And the APT repository on GitHub Pages, from the .deb files the release just
+  # attached. Called, not triggered: see the comment at the top of apt.yml.
+  apt:
+    needs: release
+    uses: ./.github/workflows/apt.yml
+    secrets: inherit
+    permissions:
+      contents: write

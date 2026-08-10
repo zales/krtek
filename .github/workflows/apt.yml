@@ -3,13 +3,16 @@ name: apt
 # The APT repository on GitHub Pages: https://zales.github.io/krtek
 #
 # It is built from the .deb files attached to the releases rather than from a
-# build, so it can be regenerated at any time without releasing anything - by
-# hand from the Actions tab, or automatically when a release is published. Every
-# release is fetched, so the repository keeps the older versions too and
+# build, so it can be regenerated at any time without releasing anything - by hand
+# from the Actions tab, or as the last job of a release, which calls this workflow.
+# Every release is fetched, so the repository keeps the older versions too and
 # `apt install krtek=0.4.0-1` works.
+#
+# Called rather than triggered by `release: published`, because a release made with
+# the GITHUB_TOKEN raises no event that can start a workflow - it would simply
+# never run.
 on:
-  release:
-    types: [published]
+  workflow_call:
   workflow_dispatch:
 
 permissions:
