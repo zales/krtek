@@ -35,7 +35,7 @@ url() {
 cat <<EOF
 # krtek $version. Written by packaging/formula.sh - do not edit by hand.
 class Krtek < Formula
-  desc "Database manager for the terminal: SQLite, PostgreSQL, MySQL/MariaDB, Redis"
+  desc "Terminal database manager for SQLite, PostgreSQL, MySQL, Redis and Kafka"
   homepage "https://github.com/zales/krtek"
   version "$version"
   license "MIT"
