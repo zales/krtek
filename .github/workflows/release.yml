@@ -44,6 +44,7 @@ jobs:
       - name: build
         run: |
           zig build -Doptimize=ReleaseFast -Dstatic -Dstrip -Dcpu=baseline \
+            -Dversion="${{ inputs.tag || github.ref_name }}" \
             -Dlibpq="$(brew --prefix libpq)" -Dmariadb="$(brew --prefix mariadb-connector-c)"
 
       - name: nothing but the system is linked
@@ -52,6 +53,11 @@ jobs:
           if grep -qE "libpq|mariadb|libssl|libcrypto|homebrew|/usr/local" links.txt; then
             echo "::error::a client library is still a runtime dependency"; exit 1
           fi
+
+      - name: it says which version it is
+        run: |
+          ./zig-out/bin/krtek --version
+          test "$(./zig-out/bin/krtek --version)" = "krtek ${{ inputs.tag || github.ref_name }}"
 
       - name: package
         run: ./tests/package.sh "${{ inputs.tag || github.ref_name }}" "macos-${{ matrix.arch }}"
@@ -88,7 +94,7 @@ jobs:
             mkdir -p /opt/zig && tar xJf /tmp/zig.tar.xz -C /opt/zig --strip-components=1
             export PATH=/opt/zig:$PATH ZIG_GLOBAL_CACHE_DIR=/tmp/zig-cache
             ./fetch-sqlite.sh
-            OPTIMIZE=ReleaseFast ./tests/linux-static.sh -Dstrip -Dcpu=baseline
+            OPTIMIZE=ReleaseFast ./tests/linux-static.sh -Dstrip -Dcpu=baseline -Dversion=${{ inputs.tag || github.ref_name }}
             ./tests/smoke.sh
           '
 
@@ -174,22 +180,39 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           version="${{ inputs.tag || github.ref_name }}"
-          {
-            echo "A database manager for the terminal: SQLite, PostgreSQL, MySQL/MariaDB and Redis."
-            echo
-            echo "Every archive holds one binary that **needs nothing installed**. SQLite,"
-            echo "libpq, the MariaDB connector and OpenSSL are linked into it, and Redis is"
-            echo "spoken directly."
-            echo
-            echo "The Linux binaries are static against musl and run on any distribution."
-            echo "The macOS ones leave only Apple's own libraries dynamic."
-            echo
-            echo '```sh'
-            echo "brew install zales/krtek/krtek                 # macOS and Linux"
-            echo "sudo dpkg -i krtek_*_amd64.deb                 # Debian, Ubuntu"
-            echo "tar xzf krtek-*.tar.gz && ./krtek-*/krtek      # anywhere else"
-            echo '```'
-          } > notes.md
+          # A heredoc, because the notes are prose: quoting them through echo is how
+          # a backslash ends up in a release nobody can edit afterwards.
+          cat > notes.md <<'NOTES'
+          A database manager for the terminal: SQLite, PostgreSQL, MySQL/MariaDB,
+          Redis and Kafka, behind one interface.
+
+          Every archive holds one binary that **needs nothing installed**. SQLite,
+          libpq, the MariaDB connector and OpenSSL are linked into it; Redis and Kafka
+          are spoken directly, protocol and all.
+
+          The Linux binaries are static against musl and run on any distribution. The
+          macOS ones leave only Apple's own libraries dynamic. Both are built for a
+          baseline CPU, so they run on any processor of their architecture.
+
+          ```sh
+          brew install zales/krtek/krtek                # macOS and Linux
+          sudo apt install krtek                        # Debian, Ubuntu - see below
+          tar xzf krtek-*.tar.gz && ./krtek-*/krtek     # anywhere else
+          ```
+
+          The APT repository is signed, so apt checks it the way it checks Debian's own:
+
+          ```sh
+          sudo install -d /etc/apt/keyrings
+          sudo curl -fsSLo /etc/apt/keyrings/krtek.gpg \
+            https://zales.github.io/krtek/krtek-archive-keyring.gpg
+          echo "deb [signed-by=/etc/apt/keyrings/krtek.gpg] https://zales.github.io/krtek ./" \
+            | sudo tee /etc/apt/sources.list.d/krtek.list
+          sudo apt update && sudo apt install krtek
+          ```
+          NOTES
+          # The indentation above is the workflow's; strip it from the file.
+          sed -i 's/^          //' notes.md
           gh release create "$version" \
             --title "krtek $version" \
             --notes-file notes.md \

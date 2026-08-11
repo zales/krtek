@@ -82,6 +82,10 @@ pub fn main(init: std.process.Init) !void {
 	// A few rows, asked for the way the interface asks: through the structure, so
 	// this works on an engine that has no SQL at all. It used to write a SELECT,
 	// which on Redis and Kafka went to their console and failed.
+	// In a block of its own, so the cursor is closed before anything else is asked:
+	// PostgreSQL streams a result and refuses another query while one is open, and
+	// this used to hold it open for the rest of the program.
+	{
 	var rows = (try conn.select(.{ .table = books, .limit = 3 })).?;
 	defer rows.close();
 	var seen: usize = 0;
@@ -101,6 +105,7 @@ pub fn main(init: std.process.Init) !void {
 		std.debug.print("  row {s}\n", .{line.items});
 	}
 	std.debug.print("  streamed {d} rows, source of column 0 = {s}\n", .{ seen, rows.sourceTable(0) });
+	}
 
 	// a batch is split and each statement reported on its own
 	const batch = "SELECT 1; SELECT 'a;b' AS text; NOTASTATEMENT; SELECT 2";

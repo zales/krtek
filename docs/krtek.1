@@ -27,6 +27,9 @@ krtek \- a database manager for the terminal
 .br
 .B krtek
 .RB [ \-h | \-\-help ]
+.br
+.B krtek
+.RB [ \-v | \-\-version ]
 .SH DESCRIPTION
 .B krtek
 browses, edits, alters, dumps and imports a database on a text screen. It speaks
@@ -64,8 +67,15 @@ the key that runs it.
 .SH OPTIONS
 .TP
 .BR \-h ", " \-\-help
-Print the usage and exit. There are no other options: everything else is done
-inside the app.
+Print the usage and exit.
+.TP
+.BR \-v ", " \-\-version
+Print what this build calls itself and exit. A release says its tag; a build from
+a working tree says
+.IR "from source" ,
+because a version number from an unknown commit is worse than none.
+.PP
+There are no other options: everything else is done inside the app.
 .SH KEYS
 A few worth knowing before the first run.
 .TP

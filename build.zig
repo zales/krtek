@@ -43,6 +43,12 @@ pub fn build(b: *std.Build) void {
 	// links it - both client libraries want it - so this prefix is only about
 	// finding the shared one for a build that is not static.
 	const openssl = b.option([]const u8, "openssl", "prefix of the OpenSSL installation");
+	// What `krtek --version` says. A release stamps it with its tag; a build from a
+	// working tree says so, because "0.5.0" from an unknown commit is worse than
+	// nothing when somebody reports a bug against it.
+	const version = b.option([]const u8, "version", "the version this build calls itself") orelse "from source";
+	const stamp = b.addOptions();
+	stamp.addOption([]const u8, "version", version);
 
 	const linking = Linking{ .static = static };
 
@@ -74,6 +80,7 @@ pub fn build(b: *std.Build) void {
 	});
 	module.addImport("sqlite", bindings);
 	module.addImport("db", database);
+	module.addImport("build", stamp.createModule());
 	module.addImport("vaxis", vaxis.module("vaxis"));
 	module.addIncludePath(b.path("vendor"));
 	module.addCSourceFile(.{ .file = b.path("vendor/sqlite3.c"), .flags = &sqlite_flags });

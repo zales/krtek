@@ -780,6 +780,12 @@ pub const Db = struct {
 
 	/// The cluster has moved: every cached connection is dropped and metadata asked
 	/// for again, so the next attempt goes to whoever leads the partition now.
+	///
+	/// **Anything held from the old description dies here.** The topics, their
+	/// partitions and their names live in the arena this refills, so a caller that
+	/// means to look something up afterwards has to hold its name in memory of its
+	/// own first - `held` is for that. Getting this wrong loses a record and reports
+	/// a topic that is being created as gone, which is exactly what it did.
 	fn clusterMoved(self: *Db) db.Error!void {
 		var walk = self.leaders.valueIterator();
 		while (walk.next()) |stream| {
@@ -1313,11 +1319,12 @@ pub const Db = struct {
 		return self.readOneOffset(&read) catch |err| {
 			if (err == error.MovedOn and attempt + 1 < ATTEMPTS) {
 				pause(SETTLE_MS);
+				const name = try self.held(topic);
 				try self.clusterMoved();
 				// The partition is a pointer into the metadata that was just replaced,
-				// so it is looked up again rather than reused.
-				if (self.partitionOf(topic, partition.id)) |fresh| {
-					return self.oneOffsetTrying(topic, fresh, at_time, attempt + 1);
+				// so it is looked up again rather than reused - and so is its name.
+				if (self.partitionOf(name, partition.id)) |fresh| {
+					return self.oneOffsetTrying(name, fresh, at_time, attempt + 1);
 				}
 				self.complain("partition {d} of {s} is gone", .{ partition.id, topic });
 				return error.Driver;
@@ -1336,13 +1343,46 @@ pub const Db = struct {
 			return error.OutOfMemory;
 		}
 		if (err == error.Gone and attempt + 1 < ATTEMPTS) {
+			const name = try self.held(topic);
 			try self.clusterMoved();
-			if (self.partitionOf(topic, id)) |fresh| {
-				return self.oneOffsetTrying(topic, fresh, at_time, attempt + 1);
+			if (self.partitionOf(name, id)) |fresh| {
+				return self.oneOffsetTrying(name, fresh, at_time, attempt + 1);
 			}
 			self.complain("partition {d} of {s} is gone", .{ id, topic });
 		}
 		return error.Driver;
+	}
+
+	/// Wait for a topic to be ready to take a record, and hand it back when it is.
+	///
+	/// A create is not finished when the broker answers it: the topic appears in the
+	/// metadata before its partitions have leaders, and until then this driver sees a
+	/// topic with no partitions at all - or, for a moment, no topic. Both are worth
+	/// waiting through, and both used to be reported as failures: "is gone", of a
+	/// topic that was in the middle of being made.
+	fn settled(self: *Db, name_in: []const u8, attempt: usize) db.Error!?*Topic {
+		// Its own copy, because it refreshes the metadata more than once: see the note
+		// on clusterMoved for what that does to anything held from the old one.
+		const name = try self.held(name_in);
+		var left = ATTEMPTS - attempt;
+		while (left > 0) : (left -= 1) {
+			pause(SETTLE_MS);
+			self.forget();
+			self.refresh() catch continue;
+			if (self.topicOf(name)) |topic| {
+				if (topic.partitions.len != 0) {
+					return topic;
+				}
+			}
+		}
+		self.complain("kafka has not finished making {s}", .{name});
+		return null;
+	}
+
+	/// A copy of a name that outlives the next refresh of the metadata, in memory
+	/// that only the next statement clears.
+	fn held(self: *Db, name: []const u8) db.Error![]const u8 {
+		return self.replies.allocator().dupe(u8, name);
 	}
 
 	/// The partition of that id as the metadata now describes it.
@@ -1427,8 +1467,9 @@ pub const Db = struct {
 			const reply = self.call(stream, .fetch, body.items) catch |err| {
 				if (err == error.Gone and !moved) {
 					moved = true;
+					const name = try self.held(topic.name);
 					try self.clusterMoved();
-					const fresh = self.partitionOf(topic.name, partition.id) orelse return error.Driver;
+					const fresh = self.partitionOf(name, partition.id) orelse return error.Driver;
 					partition.leader = fresh.leader;
 					partition.latest = fresh.latest;
 					continue;
@@ -1446,9 +1487,10 @@ pub const Db = struct {
 				// gathered are kept and none is read twice.
 				if (err == error.MovedOn and !moved) {
 					moved = true;
+					const name = try self.held(topic.name);
 					try self.clusterMoved();
-					const fresh = self.partitionOf(topic.name, partition.id) orelse {
-						self.complain("partition {d} of {s} is gone", .{ partition.id, topic.name });
+					const fresh = self.partitionOf(name, partition.id) orelse {
+						self.complain("partition {d} of {s} is gone", .{ partition.id, name });
 						return error.Driver;
 					};
 					partition.leader = fresh.leader;
@@ -1856,6 +1898,14 @@ pub const Db = struct {
 
 	fn produceTrying(self: *Db, topic: *Topic, wanted: i32, key: ?[]const u8, value: []const u8, attempt: usize) db.Error!void {
 		if (topic.partitions.len == 0) {
+			// A topic exists before any of its partitions has a leader, and this driver
+			// keeps only the ones that do - so a topic that was just made looks like a
+			// topic with nowhere to write.
+			if (attempt + 1 < ATTEMPTS) {
+				if (try self.settled(topic.name, attempt)) |fresh| {
+					return self.produceTrying(fresh, wanted, key, value, attempt + 1);
+				}
+			}
 			self.complain("{s} has no partition with a leader", .{topic.name});
 			return error.Driver;
 		}
@@ -1900,27 +1950,27 @@ pub const Db = struct {
 			// A connection that died before the request went out means the record was
 			// not written, so sending it again writes it once.
 			if (err == error.Gone and attempt + 1 < ATTEMPTS) {
+				const name = try self.held(topic.name);
 				try self.clusterMoved();
-				const fresh = self.topicOf(topic.name) orelse return error.Driver;
-				return self.produceTrying(fresh, wanted, key, value, attempt + 1);
+				if (try self.settled(name, attempt)) |fresh| {
+					return self.produceTrying(fresh, wanted, key, value, attempt + 1);
+				}
+				return error.Driver;
 			}
 			return if (err == error.OutOfMemory) error.OutOfMemory else error.Driver;
 		};
 		var read = Decoder{ .bytes = reply };
 		self.readProduce(&read) catch |err| {
 			if (err == error.MovedOn and attempt + 1 < ATTEMPTS) {
-				// A topic that has just been created has no leader for a moment, and
-				// the first record sent to it is the one that finds out. Waiting is
-				// what a client is supposed to do; asking again at once gets the same
-				// answer, and that is how replaying a dump lost its first record.
-				pause(SETTLE_MS);
-				try self.clusterMoved();
-				const fresh = self.topicOf(topic.name) orelse {
-					self.complain("{s} is gone", .{topic.name});
-					return error.Driver;
-				};
-				// The record has not been written, so sending it again writes it once.
-				return self.produceTrying(fresh, wanted, key, value, attempt + 1);
+				// A topic that has just been created has no leader for a moment, and the
+				// first record sent to it is the one that finds out. Waiting is what a
+				// client is supposed to do; asking again at once gets the same answer,
+				// and that is how replaying a dump lost its first record every time.
+				if (try self.settled(topic.name, attempt)) |fresh| {
+					// The record has not been written, so sending it again writes it once.
+					return self.produceTrying(fresh, wanted, key, value, attempt + 1);
+				}
+				return error.Driver;
 			}
 			if (self.last_error.items.len == 0) {
 				self.remember("kafka did not accept the record");

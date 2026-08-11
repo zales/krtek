@@ -5,6 +5,7 @@
 //! size ceiling and nothing to save. PostgreSQL goes through libpq.
 
 const std = @import("std");
+const build = @import("build");
 const term = @import("term.zig");
 const app_mod = @import("app.zig");
 const draw = @import("draw.zig");
@@ -28,11 +29,19 @@ const usage =
 	\\own store - PGPASSWORD, ~/.pgpass, ~/.my.cnf - works as it always did.
 	\\Press ? inside the app for the key map.
 	\\
+	\\-v, --version   what this build calls itself
+	\\
 ;
 
 pub fn main(init: std.process.Init) !void {
 	const allocator = std.heap.c_allocator;
 	const args = try init.minimal.args.toSlice(init.arena.allocator());
+	if (args.len > 1 and (std.mem.eql(u8, args[1], "-v") or std.mem.eql(u8, args[1], "--version"))) {
+		var line: [64]u8 = undefined;
+		const text = std.fmt.bufPrint(&line, "krtek {s}\n", .{build.version}) catch "krtek\n";
+		std.Io.File.stdout().writeStreamingAll(init.io, text) catch {};
+		return;
+	}
 	if (args.len > 1 and (std.mem.eql(u8, args[1], "-h") or std.mem.eql(u8, args[1], "--help"))) {
 		// Asked-for output goes to stdout, so `krtek --help | grep` works and so
 		// does anything that reads it - the Homebrew formula's test, for one.

@@ -157,9 +157,22 @@ grep -q "^CREATE pages 3 1" /tmp/krtek-dump.txt || fail "the dump does not say h
 lines=$(grep -c "^PRODUCE pages " /tmp/krtek-dump.txt || true)
 [ "$lines" = "12" ] || fail "the dump has $lines records of pages, not 12"
 kafka kafka-topics.sh --bootstrap-server localhost:9092 --delete --topic pages >/dev/null 2>&1
-sleep 3
-python3 tests/screen.py "kafka://127.0.0.1:9093" '{ctrl-k}' 'import' '{enter}' '{down}' '/tmp/krtek-dump.txt' '{ctrl-s}' '{keep}' >/dev/null 2>&1
-sleep 2
+# Until it is really gone: a create that races a delete is refused, and then every
+# record after it has nowhere to go.
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+	kafka kafka-topics.sh --bootstrap-server localhost:9092 --list 2>/dev/null |
+		grep -qx pages || break
+	sleep 1
+done
+# Only this topic's part of the dump: replaying the whole file would put every other
+# topic's records back as well, on top of the ones already there, and the checks after
+# this one count them.
+grep -E '^(CREATE|PRODUCE) pages( |$)' /tmp/krtek-dump.txt > /tmp/krtek-pages.txt
+# The extra sleeps in the key list are the harness waiting: a replay onto a topic that
+# has only just been made takes as long as the cluster needs to elect leaders for it,
+# and counting before it finishes counts nothing.
+python3 tests/screen.py "kafka://127.0.0.1:9093" '{ctrl-k}' 'import' '{enter}' '{down}' \
+	'/tmp/krtek-pages.txt' '{ctrl-s}' '{sleep}{sleep}{sleep}{sleep}' '{keep}' >/dev/null 2>&1
 back=$(kafka kafka-get-offsets.sh --bootstrap-server localhost:9092 --topic pages 2>/dev/null |
 	awk -F: '{s+=$3} END {print s+0}')
 [ "$back" = "12" ] || fail "replaying the dump brought back $back records, not 12"
