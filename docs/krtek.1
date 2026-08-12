@@ -35,6 +35,9 @@ krtek \- a database manager for the terminal
 .RI rabbit://guest@host:15672/vhost
 .br
 .B krtek
+.RI sftp://user@host/srv/data
+.br
+.B krtek
 .RB \(dq host=...\ dbname=...\ user=... \(dq
 .br
 .B krtek
@@ -45,8 +48,8 @@ krtek \- a database manager for the terminal
 .SH DESCRIPTION
 .B krtek
 browses, edits, alters, dumps and imports a database on a text screen. It speaks
-SQLite, PostgreSQL, MySQL/MariaDB, Redis, Kafka, S3, Azure Blob and RabbitMQ
-behind one interface, and needs nothing installed: the client libraries are
+SQLite, PostgreSQL, MySQL/MariaDB, Redis, Kafka, S3, Azure Blob, RabbitMQ and
+SFTP behind one interface, and needs nothing installed: the client libraries are
 linked into the binary, and the rest are spoken directly.
 .PP
 A Kafka topic is a table of
@@ -93,6 +96,22 @@ keeps them off. The rest of the console is
 An
 .I amqp://
 url is taken as well; its port is not, because 5672 does not answer HTTP.
+.PP
+SFTP is a filesystem rather than a store of keys: a directory is a table and a
+file is a row, a directory is also what a schema is - so
+.B #
+walks the tree - and a rename is a real rename. The editor is a small shell:
+.BR LS ", " CD ", " GET ", " PUT ", " RM ", " MKDIR ", " MV ", " CHMOD " and " STAT .
+The transport is libssh2, so a transfer cannot be interrupted halfway. The host
+key is checked against
+.I ~/.ssh/known_hosts
+and an unknown host is refused with its fingerprint;
+.I ?insecure=1
+is the way to say otherwise. Keys come from the agent and
+.IR ~/.ssh/id_* ,
+or from
+.IR ?key= ,
+and a password is asked for when neither works.
 .PP
 With no argument it opens the list of saved connections, where
 .B enter

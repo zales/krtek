@@ -43,6 +43,11 @@ pub fn build(b: *std.Build) void {
 	// links it - both client libraries want it - so this prefix is only about
 	// finding the shared one for a build that is not static.
 	const openssl = b.option([]const u8, "openssl", "prefix of the OpenSSL installation");
+	// libssh2: the SFTP driver's transport. SSH is not a protocol to write by
+	// hand - a mistake in Kafka's framing is a wrong row, a mistake in a key
+	// exchange is a vulnerability - so this one is a library, and a small one that
+	// links against the OpenSSL already here.
+	const libssh2 = b.option([]const u8, "libssh2", "prefix of the libssh2 installation");
 	// What `krtek --version` says. A release stamps it with its tag; a build from a
 	// working tree says so, because "0.5.0" from an unknown commit is worse than
 	// nothing when somebody reports a bug against it.
@@ -87,6 +92,7 @@ pub fn build(b: *std.Build) void {
 	linkPostgres(b, module, target, libpq, linking);
 	linkMysql(b, module, target, mariadb, linking);
 	linkTls(b, module, target, openssl, linking);
+	linkSsh(b, module, target, libssh2, linking);
 	linkKeychain(module, target);
 	if (static) {
 		linkClientLibraries(b, module);
@@ -123,6 +129,7 @@ pub fn build(b: *std.Build) void {
 	linkPostgres(b, test_module, target, libpq, linking);
 	linkMysql(b, test_module, target, mariadb, linking);
 	linkTls(b, test_module, target, openssl, linking);
+	linkSsh(b, test_module, target, libssh2, linking);
 	linkKeychain(test_module, target);
 	if (static) {
 		linkClientLibraries(b, test_module);
@@ -145,6 +152,7 @@ pub fn build(b: *std.Build) void {
 	linkPostgres(b, db_test_module, target, libpq, linking);
 	linkMysql(b, db_test_module, target, mariadb, linking);
 	linkTls(b, db_test_module, target, openssl, linking);
+	linkSsh(b, db_test_module, target, libssh2, linking);
 	if (static) {
 		linkClientLibraries(b, db_test_module);
 	}
@@ -163,6 +171,7 @@ pub fn build(b: *std.Build) void {
 	linkPostgres(b, check_module, target, libpq, linking);
 	linkMysql(b, check_module, target, mariadb, linking);
 	linkTls(b, check_module, target, openssl, linking);
+	linkSsh(b, check_module, target, libssh2, linking);
 	const check = b.addExecutable(.{ .name = "dbcheck", .root_module = check_module });
 	const run_check = b.addRunArtifact(check);
 	if (b.args) |args| {
@@ -187,6 +196,7 @@ pub fn build(b: *std.Build) void {
 	linkPostgres(b, fuzz_module, target, libpq, linking);
 	linkMysql(b, fuzz_module, target, mariadb, linking);
 	linkTls(b, fuzz_module, target, openssl, linking);
+	linkSsh(b, fuzz_module, target, libssh2, linking);
 	if (static) {
 		linkClientLibraries(b, fuzz_module);
 	}
@@ -253,12 +263,12 @@ const Linking = struct {
 fn linkClientLibraries(b: *std.Build, module: *std.Build.Module) void {
 	var code: u8 = 0;
 	const out = b.runAllowFail(
-		&.{ "pkg-config", "--static", "--libs", "libpq", "libmariadb" },
+		&.{ "pkg-config", "--static", "--libs", "libpq", "libmariadb", "libssh2" },
 		&code,
 		.ignore,
 	) catch {
 		std.debug.panic(
-			"-Dstatic needs pkg-config with libpq.pc and libmariadb.pc; " ++
+			"-Dstatic needs pkg-config with libpq.pc, libmariadb.pc and libssh2.pc; " ++
 				"on a Mac set PKG_CONFIG_PATH to the keg-only prefixes",
 			.{},
 		);
@@ -428,6 +438,18 @@ fn linkTls(b: *std.Build, module: *std.Build.Module, target: std.Build.ResolvedT
 	module.linkSystemLibrary("crypto", .{});
 }
 
+fn linkSsh(b: *std.Build, module: *std.Build.Module, target: std.Build.ResolvedTarget, prefix: ?[]const u8, options: Linking) void {
+	if (options.static) {
+		return;
+	}
+	const root = prefix orelse defaultPrefix(target, "libssh2");
+	if (root) |where| {
+		module.addLibraryPath(.{ .cwd_relative = b.pathJoin(&.{ where, "lib" }) });
+		module.addIncludePath(.{ .cwd_relative = b.pathJoin(&.{ where, "include" }) });
+	}
+	module.linkSystemLibrary("ssh2", .{});
+}
+
 /// On macOS, where brew keeps a keg-only library on Apple silicon. Elsewhere
 /// null, which means "it is on the system paths".
 fn defaultPrefix(target: std.Build.ResolvedTarget, name: []const u8) ?[]const u8 {
@@ -439,6 +461,9 @@ fn defaultPrefix(target: std.Build.ResolvedTarget, name: []const u8) ?[]const u8
 	}
 	if (std.mem.eql(u8, name, "openssl")) {
 		return "/opt/homebrew/opt/openssl@3";
+	}
+	if (std.mem.eql(u8, name, "libssh2")) {
+		return "/opt/homebrew/opt/libssh2";
 	}
 	return "/opt/homebrew/opt/mariadb-connector-c";
 }

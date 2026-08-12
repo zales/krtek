@@ -78,6 +78,7 @@ pub const Engine = enum {
 	s3,
 	azure,
 	rabbit,
+	sftp,
 	/// Whatever this does not model: the target as it stands.
 	other,
 
@@ -91,6 +92,7 @@ pub const Engine = enum {
 			.s3 => "S3",
 			.azure => "Azure",
 			.rabbit => "RabbitMQ",
+			.sftp => "SFTP",
 			.other => "target",
 		};
 	}
@@ -108,7 +110,7 @@ pub const Engine = enum {
 
 /// In the order the form offers them, most used first.
 pub const ENGINES = [_][]const u8{
-	"SQLite", "PostgreSQL", "MySQL", "Redis", "Kafka", "S3", "Azure", "RabbitMQ", "target",
+	"SQLite", "PostgreSQL", "MySQL", "Redis", "Kafka", "S3", "Azure", "RabbitMQ", "SFTP", "target",
 };
 
 pub fn engineOf(target: []const u8) Engine {
@@ -143,6 +145,11 @@ pub fn engineOf(target: []const u8) Engine {
 			return .rabbit;
 		}
 	}
+	for ([_][]const u8{ "sftp://", "ssh://", "scp://" }) |prefix| {
+		if (std.ascii.startsWithIgnoreCase(target, prefix)) {
+			return .sftp;
+		}
+	}
 	if (std.ascii.startsWithIgnoreCase(target, "mysql://") or
 		std.ascii.startsWithIgnoreCase(target, "mariadb://"))
 	{
@@ -175,6 +182,9 @@ pub const Shape = struct {
 	region: []const u8 = "",
 	/// Kafka only.
 	mechanism: []const u8 = "",
+	/// SFTP's private key file, and whether the host key is checked at all.
+	key: []const u8 = "",
+	insecure: bool = false,
 	tls: bool = false,
 };
 
@@ -195,6 +205,7 @@ pub fn compose(arena: std.mem.Allocator, shape: Shape) ![]const u8 {
 		.s3 => if (shape.tls) "s3://" else "s3+http://",
 		.azure => if (shape.tls) "azure://" else "azure+http://",
 		.rabbit => if (shape.tls) "rabbits://" else "rabbit://",
+		.sftp => "sftp://",
 		else => "",
 	});
 	if (shape.user.len != 0) {
@@ -218,6 +229,16 @@ pub fn compose(arena: std.mem.Allocator, shape: Shape) ![]const u8 {
 	}
 	if (shape.engine == .kafka and shape.mechanism.len != 0) {
 		try out.print(arena, "?mechanism={s}", .{shape.mechanism});
+	}
+	if (shape.engine == .sftp) {
+		var first = true;
+		if (shape.key.len != 0) {
+			try out.print(arena, "?key={s}", .{shape.key});
+			first = false;
+		}
+		if (shape.insecure) {
+			try out.print(arena, "{s}insecure=1", .{if (first) "?" else "&"});
+		}
 	}
 	return out.items;
 }
@@ -243,15 +264,22 @@ pub fn decompose(arena: std.mem.Allocator, target: []const u8) ?Shape {
 				else => false,
 			};
 			if (url.query.len != 0) {
-				const equals = std.mem.indexOfScalar(u8, url.query, '=') orelse return null;
-				const key = url.query[0..equals];
-				const value = url.query[equals + 1 ..];
-				if (engine == .s3 and std.mem.eql(u8, key, "region")) {
-					shape.region = value;
-				} else if (engine == .kafka and std.mem.eql(u8, key, "mechanism")) {
-					shape.mechanism = value;
-				} else {
-					return null;
+				var options = std.mem.splitScalar(u8, url.query, '&');
+				while (options.next()) |option| {
+					const equals = std.mem.indexOfScalar(u8, option, '=') orelse return null;
+					const key = option[0..equals];
+					const value = option[equals + 1 ..];
+					if (engine == .s3 and std.mem.eql(u8, key, "region")) {
+						shape.region = value;
+					} else if (engine == .kafka and std.mem.eql(u8, key, "mechanism")) {
+						shape.mechanism = value;
+					} else if (engine == .sftp and std.mem.eql(u8, key, "key")) {
+						shape.key = value;
+					} else if (engine == .sftp and std.mem.eql(u8, key, "insecure")) {
+						shape.insecure = std.mem.eql(u8, value, "1");
+					} else {
+						return null;
+					}
 				}
 			}
 			// A bucket or a container with no server of its own arrives as the host.
@@ -811,6 +839,19 @@ test "a target comes apart into the fields a form asks for" {
 		try std.testing.expect(!shape.tls);
 	}
 	{
+		const shape = decompose(a, "sftp://foo@backup:2222/srv/data").?;
+		try std.testing.expectEqual(Engine.sftp, shape.engine);
+		try std.testing.expectEqualStrings("foo", shape.user);
+		try std.testing.expectEqualStrings("backup", shape.host);
+		try std.testing.expectEqualStrings("2222", shape.port);
+		try std.testing.expectEqualStrings("srv/data", shape.name);
+	}
+	{
+		const shape = decompose(a, "sftp://foo@backup?key=/tmp/id_ed25519&insecure=1").?;
+		try std.testing.expectEqualStrings("/tmp/id_ed25519", shape.key);
+		try std.testing.expect(shape.insecure);
+	}
+	{
 		const shape = decompose(a, "/tmp/books.db").?;
 		try std.testing.expectEqual(Engine.sqlite, shape.engine);
 		try std.testing.expectEqualStrings("/tmp/books.db", shape.path);
@@ -860,6 +901,12 @@ test "the parts make the target back" {
 		.host = "broker",
 		.name = "prod",
 		.tls = true,
+	}));
+	try std.testing.expectEqualStrings("sftp://foo@backup/srv/data", try compose(a, .{
+		.engine = .sftp,
+		.user = "foo",
+		.host = "backup",
+		.name = "srv/data",
 	}));
 	// SQLite is a path and nothing else, and `target` is whatever was typed.
 	try std.testing.expectEqualStrings("notes.db", try compose(a, .{ .engine = .sqlite, .path = "notes.db" }));

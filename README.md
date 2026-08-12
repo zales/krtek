@@ -5,7 +5,7 @@
 A database manager for the terminal, written in Zig: what a graphical client
 does - browse, edit, alter, dump, import - on a text screen, and quicker, because
 everything is a key press. **SQLite, PostgreSQL, MySQL/MariaDB, Redis, Kafka, S3,
-Azure Blob and RabbitMQ**, behind one interface.
+Azure Blob, RabbitMQ and SFTP**, behind one interface.
 
 *Krtek* is Czech for a mole: a small thing that digs through what is underneath
 and comes back up with what it found.
@@ -50,9 +50,9 @@ works. Every [release](https://github.com/zales/krtek/releases/latest) also has 
 architectures. The `.deb` installs the binary, the man page and the copyright, and
 **Depends on nothing at all**, so it goes on any Debian or Ubuntu of any age.
 
-**It needs nothing installed.** SQLite, libpq, the MariaDB connector and OpenSSL
-are linked into the binary, and Redis, Kafka, S3, Azure Blob and RabbitMQ are
-spoken directly. The Linux
+**It needs nothing installed.** SQLite, libpq, the MariaDB connector, libssh2 and
+OpenSSL are linked into the binary, and Redis, Kafka, S3, Azure Blob and RabbitMQ
+are spoken directly. The Linux
 builds are static against musl and run on any distribution - checked on Debian with nothing
 installed at all; the macOS builds leave only Apple's own libraries dynamic. That
 is `-Dstatic`.
@@ -71,6 +71,7 @@ zig build -Doptimize=ReleaseSafe
 ./zig-out/bin/krtek s3+http://key:secret@localhost:9000/bucket
 ./zig-out/bin/krtek azure://account:key@container
 ./zig-out/bin/krtek rabbit://guest@host:15672/vhost
+./zig-out/bin/krtek sftp://user@host/srv/data
 ```
 
 A SQLite file is opened through SQLite's own VFS: edits go straight to disk and
@@ -419,8 +420,56 @@ travel as `%2F` in every path the driver builds - the single most common way to
 get a 404 out of the management API, and the reason there is a test for a queue
 with a space in its name.
 
-## Adding an engine
-`src/db/db.zig` is the interface. It is a tagged union dispatched with `inline
+## SFTP
+
+The first engine here that is a **filesystem** rather than a store of keys, and
+it shows in three places. A directory is a real place, so it is what a schema is
+and `#` walks the tree. A rename is a real rename, not a copy and a delete. And a
+listing arrives whole - SFTP has no pagination - so the sorting, the counting and
+the paging are this program's and are exact, and `name LIKE '%trip%'` works,
+which is the one thing S3 and Azure have to refuse.
+
+A directory is a table and a file is a row, with `name`, `size`, `kind`,
+`modified`, `mode` and `owner` for columns. Editing the name renames; editing the
+mode chmods, in either `644` or `rw-r--r--`; adding a row makes an empty file, or
+a directory when `kind` says so. The editor is a small shell:
+
+```
+LS [path]           CD path        PWD
+GET path            PUT path text
+RM path             MKDIR path     MV from to
+CHMOD 644 path      STAT path
+```
+
+**The transport is libssh2, and that is a deliberate exception.** Everything else
+here is written out - Redis, Kafka, HTTP, two request signatures - and SSH is
+where that stops. A mistake in Kafka's framing is a wrong row on a screen; a
+mistake in a key exchange is a vulnerability, and a hand-rolled one would serve
+nobody. libssh2 is small, BSD licensed, and links against the OpenSSL already in
+the binary, so the single static file it all ships as is still a single static
+file.
+
+What that costs is written down rather than hidden: the session is blocking, so
+`ctrl+c` does not interrupt a transfer halfway. Nothing hangs forever instead -
+every call has a timeout on it.
+
+**The host key is checked** against `~/.ssh/known_hosts`, like any other ssh
+client. A host nobody has met is refused with its fingerprint rather than trusted
+quietly, and a key that has changed is refused loudly. `?insecure=1` is the way
+to say otherwise, and it has to be said.
+
+```sh
+krtek sftp://user@host/srv/data                    # the agent, then ~/.ssh/id_*, then a password
+krtek "sftp://user@host?key=~/.ssh/id_backup"
+krtek "sftp://user@host:2222/srv?insecure=1"       # a host that is not in known_hosts yet
+```
+
+Authentication goes the way ssh goes: the key named in the target, then the
+agent, then `~/.ssh/id_ed25519`, `id_ecdsa` and `id_rsa`, and a password last -
+asked for the way every other engine's is, and kept wherever that connection
+keeps its password.
+
+## Adding an engine`src/db/db.zig` is the interface. It is a tagged union dispatched with `inline
 else`, so a new engine is one union member and a struct with the same method
 names - anything missing is a compile error that names itself. No vtables.
 
@@ -596,6 +645,8 @@ permanent.
 | `src/db/azure/` | Shared Key, and the three ways to write a target |
 | `src/db/rabbit.zig` | RabbitMQ: the topology as tables, over the management API |
 | `src/db/rabbit/` | which endpoint each table is, where its columns live in the JSON, and the target |
+| `src/db/ssh.zig` | the little of libssh2 this needs, and the connecting and authenticating |
+| `src/db/sftp.zig` | SFTP: a directory as a table, with real renames |
 | `packaging/` | the `.deb` and the Homebrew formula |
 | `docs/index.html` | the landing page, which is also the APT repository |
 | `docs/krtek.1` | the man page, installed by both of them |
@@ -712,6 +763,15 @@ because browsing messages is what this driver refuses to do.
 zig build && ./tests/rabbit.sh
 ```
 
+[tests/sftp.sh](tests/sftp.sh) starts an ssh server, makes a key for it, and
+checks both ways in - a password and that key - because both are how people
+connect. It also checks the part a client is tempted to skip: an unknown host is
+refused with its fingerprint, and only `insecure=1` lets it through.
+
+```sh
+zig build && ./tests/sftp.sh
+```
+
 That is how everything described here was verified: against a real SQLite file
 with `sqlite3` reading the result back, and against a PostgreSQL 17 container
 with `psql` doing the same.
@@ -773,6 +833,12 @@ with `psql` doing the same.
   needs blocks, which `PUT` does not do. Snapshots, versions, leases, the change
   feed and anything Data Lake adds are not there: a listing shows what a listing
   gives.
+
+* **SFTP transfers cannot be given up on.** libssh2 is used in blocking mode, so
+  `ctrl+c` does not interrupt one halfway; every call has a timeout instead, so
+  nothing hangs forever. There is no recursive copy, no resume, no `scp`, and no
+  ssh beyond the SFTP subsystem - and no FTP or WebDAV, which are filesystems of
+  the same shape and would fit the same driver.
 
 ## Licence
 

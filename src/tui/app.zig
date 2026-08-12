@@ -658,6 +658,18 @@ pub const App = struct {
 				try form.note("the account goes in the path there. The account key is the password");
 				try form.note("below - the long base64 one from the portal, not the connection string.");
 			},
+			.sftp => {
+				try form.text("host", shape.host, 24);
+				try form.text("port", shape.port, 6);
+				form.sameLine();
+				try form.text("user", shape.user, 24);
+				try form.text("directory", shape.name, 32);
+				try form.text("key file", shape.key, 32);
+				try form.toggle("check the host key", !shape.insecure);
+				try form.note("the key file is a private key; empty tries the agent and ~/.ssh/id_*,");
+				try form.note("and the password below is used when neither works. The host key is");
+				try form.note("checked against ~/.ssh/known_hosts unless that is turned off here.");
+			},
 			.rabbit => {
 				try form.text("host", shape.host, 24);
 				try form.text("port", shape.port, 6);
@@ -726,6 +738,8 @@ pub const App = struct {
 			.{ .label = "access key", .into = &shape.user },
 			.{ .label = "region", .into = &shape.region },
 			.{ .label = "mechanism", .into = &shape.mechanism },
+			.{ .label = "key file", .into = &shape.key },
+			.{ .label = "directory", .into = &shape.name },
 		}) |pair| {
 			const value = form.valueNamed(pair.label);
 			if (value.len != 0) {
@@ -733,6 +747,9 @@ pub const App = struct {
 			}
 		}
 		shape.tls = if (form.fieldNamed("TLS")) |field| field.on else shape.engine == .s3;
+		// The one toggle that reads the other way round: it says to check, and the
+		// target says not to.
+		shape.insecure = if (form.fieldNamed("check the host key")) |field| !field.on else false;
 		return shape;
 	}
 

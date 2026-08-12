@@ -80,6 +80,7 @@ footer { margin-top: 3.5rem; padding-top: 1.5rem; border-top: 1px solid var(--li
 		<span class="engine">S3</span>
 		<span class="engine">Azure Blob</span>
 		<span class="engine">RabbitMQ</span>
+		<span class="engine">SFTP</span>
 		<span class="engine">one static binary</span>
 	</div>
 	<img src="grid.svg" alt="krtek browsing a table">
@@ -115,8 +116,8 @@ everyone who already trusts it.</p>
 <pre><code>tar xzf krtek-*.tar.gz &amp;&amp; ./krtek-*/krtek</code></pre>
 
 <p><strong>It needs nothing installed.</strong> SQLite, libpq, the MariaDB
-connector and OpenSSL are linked into the binary, and Redis, Kafka, S3, Azure
-Blob and RabbitMQ are spoken directly.
+connector, libssh2 and OpenSSL are linked into the binary, and Redis, Kafka, S3,
+Azure Blob and RabbitMQ are spoken directly.
 The Linux builds are static against musl and run on any distribution; the macOS
 builds leave only Apple's own libraries dynamic.</p>
 

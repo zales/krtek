@@ -107,8 +107,8 @@ Priority: optional
 Homepage: https://github.com/zales/krtek
 Description: database manager for the terminal
  krtek browses, edits, alters, dumps and imports a database on a text screen,
- with SQLite, PostgreSQL, MySQL/MariaDB, Redis, Kafka, S3, Azure Blob and
- RabbitMQ behind one interface.
+ with SQLite, PostgreSQL, MySQL/MariaDB, Redis, Kafka, S3, Azure Blob,
+ RabbitMQ and SFTP behind one interface.
  .
  It needs nothing installed: the client libraries are linked into the binary,
  which is static all the way down, and the rest are spoken directly.

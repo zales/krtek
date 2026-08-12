@@ -24,6 +24,7 @@ const usage =
 	\\       krtek s3+http://key:secret@localhost:9000/bucket
 	\\       krtek azure://account:key@container
 	\\       krtek rabbit://guest@host:15672/vhost
+	\\       krtek sftp://user@host/srv/data
 	\\       krtek "host=... dbname=... user=..."
 	\\
 	\\With no argument it opens the list of saved connections.

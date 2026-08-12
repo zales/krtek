@@ -34,7 +34,7 @@ jobs:
         with:
           version: 0.16.0
 
-      - run: brew install pkgconf libpq mariadb-connector-c openssl@3
+      - run: brew install pkgconf libpq mariadb-connector-c openssl@3 libssh2
       - run: ./fetch-sqlite.sh
 
       # -Dcpu=baseline, or Zig builds for the CPU of the runner: GitHub's arm64
@@ -89,7 +89,8 @@ jobs:
         run: |
           docker run --rm -v "$PWD:/src" -w /src alpine:3.22 sh -euc '
             apk add --no-cache build-base cmake pkgconf python3 curl tar xz \
-              postgresql-dev openssl-dev openssl-libs-static zlib-static >/dev/null
+              postgresql-dev openssl-dev openssl-libs-static zlib-static \
+              libssh2-dev libssh2-static >/dev/null
             curl -fsSL "https://ziglang.org/download/0.16.0/zig-$(uname -m)-linux-0.16.0.tar.xz" -o /tmp/zig.tar.xz
             mkdir -p /opt/zig && tar xJf /tmp/zig.tar.xz -C /opt/zig --strip-components=1
             export PATH=/opt/zig:$PATH ZIG_GLOBAL_CACHE_DIR=/tmp/zig-cache

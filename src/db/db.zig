@@ -19,9 +19,13 @@ pub const kafka = @import("kafka.zig");
 pub const s3 = @import("s3.zig");
 pub const azure = @import("azure.zig");
 pub const rabbit = @import("rabbit.zig");
+pub const sftp = @import("sftp.zig");
 
 /// A socket that may have TLS on it, and HTTP over it: what the drivers that
 /// speak their own protocol share.
+/// libssh2, and the SFTP driver over it: the one protocol here that is a
+/// library rather than written out.
+pub const ssh = @import("ssh.zig");
 pub const net = @import("net.zig");
 pub const http = @import("http.zig");
 pub const sigv4 = @import("s3/sigv4.zig");
@@ -42,7 +46,9 @@ comptime {
 	_ = s3;
 	_ = azure;
 	_ = rabbit;
+	_ = sftp;
 	_ = http;
+	_ = ssh;
 	_ = sigv4;
 }
 
@@ -168,6 +174,7 @@ pub const Rows = union(enum) {
 	s3: s3.Rows,
 	azure: azure.Rows,
 	rabbit: rabbit.Rows,
+	sftp: sftp.Rows,
 
 	pub fn next(self: *Rows) Error!bool {
 		switch (self.*) {
@@ -240,6 +247,7 @@ pub const Db = union(enum) {
 	s3: *s3.Db,
 	azure: *azure.Db,
 	rabbit: *rabbit.Db,
+	sftp: *sftp.Db,
 
 	/// Open whatever the target describes: a file path, or a URL like
 	/// postgres://user:password@host:port/database.
@@ -255,6 +263,9 @@ pub const Db = union(enum) {
 		}
 		if (rabbit.owns(target)) {
 			return .{ .rabbit = try rabbit.Db.open(allocator, target, report) };
+		}
+		if (sftp.owns(target)) {
+			return .{ .sftp = try sftp.Db.open(allocator, target, report) };
 		}
 		if (redis.owns(target)) {
 			return .{ .redis = try redis.Db.open(allocator, target, report) };
@@ -536,6 +547,7 @@ pub const Ddl = union(enum) {
 	s3: s3.Ddl,
 	azure: azure.Ddl,
 	rabbit: rabbit.Ddl,
+	sftp: sftp.Ddl,
 
 	pub fn createTable(self: Ddl, out: *List, a: std.mem.Allocator, table: Table, cols: []const Column, keys: []const ForeignKey) !void {
 		switch (self) {
