@@ -14,10 +14,13 @@ NAME=${NAME:-krtek-sftp-test}
 IMAGE=${IMAGE:-atmoz/sftp:alpine}
 PORT=${PORT:-2222}
 KEY=/tmp/krtek-sftp-test-key
+# The same key copied on its own, which is how a key usually arrives on a machine:
+# the public half stays where it was made.
+LONE=/tmp/krtek-sftp-test-lone
 # A home of its own, so the check below reads a known_hosts this script wrote
 # and not the one belonging to whoever is running it.
 HOME_DIR=/tmp/krtek-sftp-test-home
-trap 'docker rm -f "$NAME" >/dev/null 2>&1 || true; rm -rf "$KEY" "$KEY.pub" "$HOME_DIR"' EXIT
+trap 'docker rm -f "$NAME" >/dev/null 2>&1 || true; rm -rf "$KEY" "$KEY.pub" "$LONE" "$HOME_DIR"' EXIT
 
 BIN=zig-out/bin/krtek
 test -x "$BIN" || { echo "$BIN is not there - zig build first" >&2; exit 1; }
@@ -35,6 +38,7 @@ echo " up"
 
 rm -f "$KEY" "$KEY.pub"
 ssh-keygen -t ed25519 -f "$KEY" -N '' -q
+cp "$KEY" "$LONE"
 docker exec "$NAME" sh -c 'mkdir -p /home/foo/.ssh && chmod 700 /home/foo/.ssh'
 docker cp "$KEY.pub" "$NAME:/home/foo/.ssh/authorized_keys" >/dev/null
 docker exec "$NAME" sh -c '
@@ -69,6 +73,8 @@ ROOT="sftp://foo:heslo@127.0.0.1:$PORT/upload?insecure=1"
 check "a password gets in" "$ROOT" "connected: foo@127.0.0.1:/upload"
 check "and so does a key" \
 	"sftp://foo@127.0.0.1:$PORT/upload?insecure=1&key=$KEY" "connected: foo@127.0.0.1:/upload"
+check "even a key with no .pub next to it" \
+	"sftp://foo@127.0.0.1:$PORT/upload?insecure=1&key=$LONE" "connected: foo@127.0.0.1:/upload"
 check "the directory is the table" "$ROOT" "table /upload.upload"
 # A directory is what a schema is here, so the tree is walked with #.
 check "and the directories around it are the schemas" "$ROOT" "schema /upload/2015"

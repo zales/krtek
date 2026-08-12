@@ -517,12 +517,11 @@ fn byKey(session: *Session, arena: std.mem.Allocator, options: Options) bool {
 
 	if (options.key.len != 0) {
 		const private = arena.dupeZ(u8, options.key) catch return false;
-		const public = std.fmt.allocPrintSentinel(arena, "{s}.pub", .{options.key}, 0) catch return false;
 		return libssh2_userauth_publickey_fromfile_ex(
 			session,
 			zero_user.ptr,
 			@intCast(options.user.len),
-			public.ptr,
+			publicBeside(arena, options.key),
 			private.ptr,
 			passphrase,
 		) == 0;
@@ -531,12 +530,11 @@ fn byKey(session: *Session, arena: std.mem.Allocator, options: Options) bool {
 	const home = std.c.getenv("HOME") orelse return false;
 	for (DEFAULT_KEYS) |name| {
 		const private = std.fmt.allocPrintSentinel(arena, "{s}/.ssh/{s}", .{ std.mem.sliceTo(home, 0), name }, 0) catch continue;
-		const public = std.fmt.allocPrintSentinel(arena, "{s}.pub", .{private}, 0) catch continue;
 		if (libssh2_userauth_publickey_fromfile_ex(
 			session,
 			zero_user.ptr,
 			@intCast(options.user.len),
-			public.ptr,
+			publicBeside(arena, private),
 			private.ptr,
 			passphrase,
 		) == 0) {
@@ -544,6 +542,17 @@ fn byKey(session: *Session, arena: std.mem.Allocator, options: Options) bool {
 		}
 	}
 	return false;
+}
+
+/// The path of the public half, if it is on disk. A private key copied on its
+/// own is the usual case, and libssh2 can derive the public half from it - but
+/// only if it is handed nothing here. Handing it a path that does not exist is
+/// simply an error, so the file has to be looked for first.
+fn publicBeside(arena: std.mem.Allocator, private: []const u8) ?[*:0]const u8 {
+	const public = std.fmt.allocPrintSentinel(arena, "{s}.pub", .{private}, 0) catch return null;
+	const file = std.c.fopen(public.ptr, "rb") orelse return null;
+	_ = std.c.fclose(file);
+	return public.ptr;
 }
 
 // ----------------------------------------------------------------- the files
