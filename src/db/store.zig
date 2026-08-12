@@ -20,6 +20,7 @@
 //! same and a failed range can be asked for again.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const db = @import("db.zig");
 
 const List = db.List;
@@ -163,12 +164,11 @@ pub const Local = struct {
 				.name = arena.dupe(u8, name) catch return error.OutOfMemory,
 				.kind = if (found.type == std.c.DT.DIR) .dir else .file,
 			};
-			var facts: std.c.Stat = undefined;
 			const zero_full = zeroed(arena, full) catch return error.OutOfMemory;
-			if (std.c.fstatat(std.c.AT.FDCWD, zero_full, &facts, 0) == 0) {
-				entry.kind = if (facts.mode & std.c.S.IFMT == std.c.S.IFDIR) .dir else .file;
-				entry.size = @intCast(@max(facts.size, 0));
-				entry.modified = facts.mtime().sec;
+			if (look(zero_full)) |facts| {
+				entry.kind = facts.kind;
+				entry.size = facts.size;
+				entry.modified = facts.modified;
 			}
 			out.append(arena, entry) catch return error.OutOfMemory;
 		}
@@ -177,16 +177,9 @@ pub const Local = struct {
 
 	pub fn stat(self: *Local, arena: std.mem.Allocator, path: []const u8) Error!Entry {
 		const zero = zeroed(arena, path) catch return error.OutOfMemory;
-		var facts: std.c.Stat = undefined;
-		if (std.c.fstatat(std.c.AT.FDCWD, zero, &facts, 0) != 0) {
-			return self.blame("cannot look at {s}", .{path});
-		}
-		return .{
-			.name = basename(path),
-			.kind = if (facts.mode & std.c.S.IFMT == std.c.S.IFDIR) .dir else .file,
-			.size = @intCast(@max(facts.size, 0)),
-			.modified = facts.mtime().sec,
-		};
+		var facts = look(zero) orelse return self.blame("cannot look at {s}", .{path});
+		facts.name = basename(path);
+		return facts;
 	}
 
 	pub fn openRead(self: *Local, arena: std.mem.Allocator, path: []const u8) Error!Reading {
@@ -275,6 +268,45 @@ pub const Local = struct {
 		}
 	};
 };
+
+/// What the system knows about a path. The one place where the platforms part
+/// company: this Zig routes Linux to `statx` and leaves `fstatat` undefined
+/// there, so asking the same question takes two different calls. Null where the
+/// path cannot be looked at, which a listing survives - a dangling link or a
+/// directory being emptied underneath is still worth showing.
+fn look(path: [*:0]const u8) ?Entry {
+	if (builtin.os.tag == .linux) {
+		const linux = std.os.linux;
+		var facts: linux.Statx = undefined;
+		// The syscall rather than the libc wrapper: musl grew one late and a static
+		// build should not depend on which.
+		const rc = linux.statx(linux.AT.FDCWD, path, 0, .{
+			.TYPE = true,
+			.SIZE = true,
+			.MTIME = true,
+		}, &facts);
+		// A syscall says it failed by coming back negative; there is no errno here.
+		if (@as(isize, @bitCast(rc)) < 0) {
+			return null;
+		}
+		return .{
+			.name = "",
+			.kind = if (facts.mode & linux.S.IFMT == linux.S.IFDIR) .dir else .file,
+			.size = facts.size,
+			.modified = facts.mtime.sec,
+		};
+	}
+	var facts: std.c.Stat = undefined;
+	if (std.c.fstatat(std.c.AT.FDCWD, path, &facts, 0) != 0) {
+		return null;
+	}
+	return .{
+		.name = "",
+		.kind = if (facts.mode & std.c.S.IFMT == std.c.S.IFDIR) .dir else .file,
+		.size = @intCast(@max(facts.size, 0)),
+		.modified = facts.mtime().sec,
+	};
+}
 
 fn zeroed(arena: std.mem.Allocator, path: []const u8) ![:0]const u8 {
 	return arena.dupeZ(u8, path);

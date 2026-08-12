@@ -55,6 +55,12 @@ jobs:
       - name: it runs
         run: ./tests/smoke.sh
 
+      # The file layer talks to libc, and libc is where the platforms disagree.
+      # Cheap enough to run on the machine that builds first, so a break shows up
+      # here rather than in the Linux job twenty minutes later.
+      - name: the file layer compiles for every platform
+        run: ./tests/platforms.sh
+
       # Malformed bytes at the protocol parsers. A fixed seed, so this is a
       # regression check rather than a lottery: whatever it found once, it finds
       # again. `zig build fuzz -- 2000000 <seed>` is the long version, by hand.
