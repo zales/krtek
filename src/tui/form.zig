@@ -163,6 +163,25 @@ pub const Form = struct {
 		return if (self.field(index)) |f| f.value() else "";
 	}
 
+	/// A field by its label. A form whose fields depend on a choice made inside it
+	/// cannot count on their positions.
+	pub fn fieldNamed(self: *Form, label: []const u8) ?*Field {
+		for (self.fields.items) |*item| {
+			if (std.mem.eql(u8, item.label, label)) {
+				return item;
+			}
+		}
+		return null;
+	}
+
+	pub fn valueNamed(self: *Form, label: []const u8) []const u8 {
+		return if (self.fieldNamed(label)) |f| f.value() else "";
+	}
+
+	pub fn isOnNamed(self: *Form, label: []const u8) bool {
+		return if (self.fieldNamed(label)) |f| f.on else false;
+	}
+
 	pub fn isOn(self: *Form, index: usize) bool {
 		return if (self.field(index)) |f| f.on else false;
 	}

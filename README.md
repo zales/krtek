@@ -80,6 +80,20 @@ them: `enter` connects, `a` adds, `e` edits, `d` removes. The file is
 `~/.config/krtek/connections`, one `name<TAB>target` line per connection, readable
 and editable by hand.
 
+**Adding one asks which engine first**, and the fields under it are that engine's:
+a host and a database for PostgreSQL, a bucket and a region for S3, a vhost for
+RabbitMQ, a file for SQLite. Nobody has to remember that a MinIO bucket is
+`s3+http://key@host:9000/bucket` - the form writes the target out of what was
+typed.
+
+![adding a connection](docs/connection.svg)
+
+Editing takes a target apart again, and **only when putting it back together
+gives exactly the same string**. Anything this does not model - a libpq keyword
+string, an `amqp://` url, a query with `sslmode` in it - stays the single field it
+always was, under an engine called `target`, so editing a connection can never
+quietly rewrite it.
+
 **Where a password is kept is chosen per connection**, in the connection form:
 
 | | what happens | where it lives |

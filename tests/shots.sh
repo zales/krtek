@@ -76,5 +76,8 @@ SHOT_ROWS=16 take editor "$DB" 's' 'select title, year, price from books' '{ente
 SHOT_ROWS=18 take palette "$DB" '{ctrl-k}' 'exp'
 # An empty target is what opens the list of connections.
 SHOT_ROWS=17 take connections ''
+# The form asks which engine first, and the fields under it are that engine's.
+SHOT_ROWS=16 take connection '' 'a' 'photos' '{down}{right}{right}{right}{right}{right}' \
+	'{down}' 'photos' '{down}' 'eu-central-1'
 
 echo "screenshots in docs/"

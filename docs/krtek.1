@@ -91,6 +91,10 @@ adds,
 edits and
 .B d
 removes one.
+Adding one asks which engine first and then for that engine's own fields - a host
+and a database, a bucket and a region, a vhost, a file - and writes the target
+itself. Editing takes a target apart again only when putting it back together
+gives the same string; anything else stays the one field it was.
 .PP
 A SQLite file is opened through SQLite's own VFS: edits go straight to disk, the
 database is never held in memory, and there is nothing to save.

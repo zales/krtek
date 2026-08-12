@@ -18,7 +18,7 @@ pub fn handle(app: *App, key: Key, size: term.Size) !void {
 	}
 	if (app.form != null) {
 		switch (app.form.?.handle(key)) {
-			.none => {},
+			.none => try app.afterFormKey(),
 			.cancel => app.closeForm(),
 			.submit => try app.submitForm(),
 			.add_row => try app.addFormRow(),

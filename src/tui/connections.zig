@@ -54,41 +54,247 @@ pub const Connection = struct {
 
 	/// What kind of thing this points at, for the listing.
 	pub fn engine(self: Connection) []const u8 {
-		if (std.ascii.startsWithIgnoreCase(self.target, "redis://") or
-			std.ascii.startsWithIgnoreCase(self.target, "rediss://"))
-		{
-			return "Redis";
-		}
-		for ([_][]const u8{ "kafka://", "kafka+ssl://", "kafka+tls://", "kafkas://" }) |prefix| {
-			if (std.ascii.startsWithIgnoreCase(self.target, prefix)) {
-				return "Kafka";
-			}
-		}
-		for ([_][]const u8{ "s3://", "s3+http://", "s3+https://", "s3s://" }) |prefix| {
-			if (std.ascii.startsWithIgnoreCase(self.target, prefix)) {
-				return "S3";
-			}
-		}
-		for ([_][]const u8{ "rabbit://", "rabbitmq://", "rabbit+tls://", "rabbits://", "rabbitmq+tls://", "amqp://", "amqps://" }) |prefix| {
-			if (std.ascii.startsWithIgnoreCase(self.target, prefix)) {
-				return "RabbitMQ";
-			}
-		}
-		if (std.ascii.startsWithIgnoreCase(self.target, "mysql://") or
-			std.ascii.startsWithIgnoreCase(self.target, "mariadb://"))
-		{
-			return "MySQL";
-		}
-		if (std.ascii.startsWithIgnoreCase(self.target, "postgres://") or
-			std.ascii.startsWithIgnoreCase(self.target, "postgresql://") or
-			std.mem.indexOf(u8, self.target, "dbname=") != null or
-			std.mem.indexOf(u8, self.target, "host=") != null)
-		{
-			return "PostgreSQL";
-		}
-		return "SQLite";
+		return engineOf(self.target).label();
 	}
 };
+
+// ------------------------------------------------ what a target is made of
+//
+// Nobody should have to remember a URL to add a connection. The form asks which
+// engine first and then for the parts that engine has - a host, a database, a
+// bucket - and puts the target together itself.
+//
+// The rule that makes that safe: a target is only taken apart when putting it
+// back together gives *exactly* what came in. Anything else - a query nobody
+// modelled, a libpq keyword string, an `amqp://` url - is left as the one field
+// it always was, so editing a connection can never quietly rewrite it.
+
+pub const Engine = enum {
+	sqlite,
+	postgres,
+	mysql,
+	redis,
+	kafka,
+	s3,
+	rabbit,
+	/// Whatever this does not model: the target as it stands.
+	other,
+
+	pub fn label(self: Engine) []const u8 {
+		return switch (self) {
+			.sqlite => "SQLite",
+			.postgres => "PostgreSQL",
+			.mysql => "MySQL",
+			.redis => "Redis",
+			.kafka => "Kafka",
+			.s3 => "S3",
+			.rabbit => "RabbitMQ",
+			.other => "target",
+		};
+	}
+
+	pub fn of(name: []const u8) Engine {
+		inline for (@typeInfo(Engine).@"enum".fields) |item| {
+			const value: Engine = @enumFromInt(item.value);
+			if (std.ascii.eqlIgnoreCase(value.label(), name)) {
+				return value;
+			}
+		}
+		return .other;
+	}
+};
+
+/// In the order the form offers them, most used first.
+pub const ENGINES = [_][]const u8{
+	"SQLite", "PostgreSQL", "MySQL", "Redis", "Kafka", "S3", "RabbitMQ", "target",
+};
+
+pub fn engineOf(target: []const u8) Engine {
+	if (std.ascii.startsWithIgnoreCase(target, "redis://") or
+		std.ascii.startsWithIgnoreCase(target, "rediss://"))
+	{
+		return .redis;
+	}
+	for ([_][]const u8{ "kafka://", "kafka+ssl://", "kafka+tls://", "kafkas://" }) |prefix| {
+		if (std.ascii.startsWithIgnoreCase(target, prefix)) {
+			return .kafka;
+		}
+	}
+	for ([_][]const u8{ "s3://", "s3+http://", "s3+https://", "s3s://" }) |prefix| {
+		if (std.ascii.startsWithIgnoreCase(target, prefix)) {
+			return .s3;
+		}
+	}
+	for ([_][]const u8{ "rabbit://", "rabbitmq://", "rabbit+tls://", "rabbits://", "rabbitmq+tls://", "amqp://", "amqps://" }) |prefix| {
+		if (std.ascii.startsWithIgnoreCase(target, prefix)) {
+			return .rabbit;
+		}
+	}
+	if (std.ascii.startsWithIgnoreCase(target, "mysql://") or
+		std.ascii.startsWithIgnoreCase(target, "mariadb://"))
+	{
+		return .mysql;
+	}
+	if (std.ascii.startsWithIgnoreCase(target, "postgres://") or
+		std.ascii.startsWithIgnoreCase(target, "postgresql://") or
+		std.mem.indexOf(u8, target, "dbname=") != null or
+		std.mem.indexOf(u8, target, "host=") != null)
+	{
+		return .postgres;
+	}
+	return .sqlite;
+}
+
+/// The parts of a target, as the form asks for them. One field per idea rather
+/// than one per engine: what follows the host is a database on PostgreSQL, an
+/// index on Redis, a vhost on RabbitMQ and a bucket on S3, and the form only has
+/// to call it the right thing.
+pub const Shape = struct {
+	engine: Engine = .sqlite,
+	/// A user, or S3's access key.
+	user: []const u8 = "",
+	host: []const u8 = "",
+	port: []const u8 = "",
+	name: []const u8 = "",
+	/// A file path for SQLite, and the whole target for `other`.
+	path: []const u8 = "",
+	/// S3 only.
+	region: []const u8 = "",
+	/// Kafka only.
+	mechanism: []const u8 = "",
+	tls: bool = false,
+};
+
+/// The target these parts make.
+pub fn compose(arena: std.mem.Allocator, shape: Shape) ![]const u8 {
+	switch (shape.engine) {
+		.sqlite, .other => return shape.path,
+		else => {},
+	}
+	var out: std.ArrayListUnmanaged(u8) = .empty;
+	try out.appendSlice(arena, switch (shape.engine) {
+		.postgres => "postgres://",
+		.mysql => "mysql://",
+		.redis => "redis://",
+		.kafka => if (shape.tls) "kafka+ssl://" else "kafka://",
+		// S3 is TLS unless somebody says otherwise, which is the other way round
+		// from the rest: a bucket on the open internet is the usual case.
+		.s3 => if (shape.tls) "s3://" else "s3+http://",
+		.rabbit => if (shape.tls) "rabbits://" else "rabbit://",
+		else => "",
+	});
+	if (shape.user.len != 0) {
+		try out.print(arena, "{s}@", .{shape.user});
+	}
+	// On S3 the host is the server, and without one the bucket takes its place:
+	// `s3://photos` is a bucket on Amazon.
+	const host = if (shape.engine == .s3 and shape.host.len == 0) shape.name else shape.host;
+	try out.appendSlice(arena, host);
+	if (shape.port.len != 0) {
+		try out.print(arena, ":{s}", .{shape.port});
+	}
+	if (shape.name.len != 0 and host.ptr != shape.name.ptr) {
+		try out.print(arena, "/{s}", .{shape.name});
+	}
+	if (shape.engine == .s3 and shape.region.len != 0) {
+		try out.print(arena, "?region={s}", .{shape.region});
+	}
+	if (shape.engine == .kafka and shape.mechanism.len != 0) {
+		try out.print(arena, "?mechanism={s}", .{shape.mechanism});
+	}
+	return out.items;
+}
+
+/// The parts of this target, or null when taking it apart and putting it back
+/// together would not give the same string. The caller then leaves it alone.
+pub fn decompose(arena: std.mem.Allocator, target: []const u8) ?Shape {
+	const engine = engineOf(target);
+	var shape = Shape{ .engine = engine };
+	switch (engine) {
+		.sqlite => shape.path = target,
+		.other => return null,
+		else => {
+			const url = split(target);
+			shape.user = url.user;
+			shape.host = url.host;
+			shape.port = url.port;
+			shape.name = url.path;
+			shape.tls = switch (engine) {
+				.kafka, .rabbit => !std.mem.eql(u8, url.scheme, "kafka") and !std.mem.eql(u8, url.scheme, "rabbit"),
+				.s3 => !std.mem.eql(u8, url.scheme, "s3+http"),
+				else => false,
+			};
+			if (url.query.len != 0) {
+				const equals = std.mem.indexOfScalar(u8, url.query, '=') orelse return null;
+				const key = url.query[0..equals];
+				const value = url.query[equals + 1 ..];
+				if (engine == .s3 and std.mem.eql(u8, key, "region")) {
+					shape.region = value;
+				} else if (engine == .kafka and std.mem.eql(u8, key, "mechanism")) {
+					shape.mechanism = value;
+				} else {
+					return null;
+				}
+			}
+			// A bucket with no server of its own arrives as the host.
+			if (engine == .s3 and shape.name.len == 0) {
+				shape.name = shape.host;
+				shape.host = "";
+			}
+		},
+	}
+	const again = compose(arena, shape) catch return null;
+	return if (std.mem.eql(u8, again, target)) shape else null;
+}
+
+const Url = struct {
+	scheme: []const u8 = "",
+	user: []const u8 = "",
+	host: []const u8 = "",
+	port: []const u8 = "",
+	path: []const u8 = "",
+	query: []const u8 = "",
+};
+
+fn split(target: []const u8) Url {
+	var out = Url{};
+	var rest = target;
+	if (std.mem.indexOf(u8, rest, "://")) |at| {
+		out.scheme = rest[0..at];
+		rest = rest[at + 3 ..];
+	}
+	if (std.mem.indexOfScalar(u8, rest, '?')) |at| {
+		out.query = rest[at + 1 ..];
+		rest = rest[0..at];
+	}
+	var authority = rest;
+	if (std.mem.indexOfScalar(u8, rest, '/')) |at| {
+		authority = rest[0..at];
+		out.path = rest[at + 1 ..];
+	}
+	if (std.mem.lastIndexOfScalar(u8, authority, '@')) |at| {
+		out.user = authority[0..at];
+		authority = authority[at + 1 ..];
+	}
+	out.host = authority;
+	if (std.mem.lastIndexOfScalar(u8, authority, ':')) |at| {
+		const digits = authority[at + 1 ..];
+		if (digits.len != 0 and onlyDigits(digits)) {
+			out.host = authority[0..at];
+			out.port = digits;
+		}
+	}
+	return out;
+}
+
+fn onlyDigits(text: []const u8) bool {
+	for (text) |byte| {
+		if (!std.ascii.isDigit(byte)) {
+			return false;
+		}
+	}
+	return true;
+}
 
 pub const List = struct {
 	allocator: std.mem.Allocator,
@@ -525,6 +731,106 @@ test "the engine is told from the target" {
 	try std.testing.expectEqualStrings("PostgreSQL", (Connection{ .name = "a", .target = "postgres://h/d" }).engine());
 	try std.testing.expectEqualStrings("PostgreSQL", (Connection{ .name = "a", .target = "host=h dbname=d" }).engine());
 	try std.testing.expectEqualStrings("SQLite", (Connection{ .name = "a", .target = "notes.db" }).engine());
+}
+
+test "a target comes apart into the fields a form asks for" {
+	var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+	defer arena.deinit();
+	const a = arena.allocator();
+
+	{
+		const shape = decompose(a, "postgres://postgres@127.0.0.1:5432/shop").?;
+		try std.testing.expectEqual(Engine.postgres, shape.engine);
+		try std.testing.expectEqualStrings("postgres", shape.user);
+		try std.testing.expectEqualStrings("127.0.0.1", shape.host);
+		try std.testing.expectEqualStrings("5432", shape.port);
+		try std.testing.expectEqualStrings("shop", shape.name);
+	}
+	{
+		// A bucket on Amazon has no host of its own: the name stands where one
+		// would be, and has to come back out as the bucket.
+		const shape = decompose(a, "s3://photos?region=eu-central-1").?;
+		try std.testing.expectEqual(Engine.s3, shape.engine);
+		try std.testing.expectEqualStrings("photos", shape.name);
+		try std.testing.expectEqualStrings("", shape.host);
+		try std.testing.expectEqualStrings("eu-central-1", shape.region);
+		try std.testing.expect(shape.tls);
+	}
+	{
+		const shape = decompose(a, "s3+http://minioadmin@localhost:9000/photos").?;
+		try std.testing.expectEqualStrings("minioadmin", shape.user);
+		try std.testing.expectEqualStrings("localhost", shape.host);
+		try std.testing.expectEqualStrings("9000", shape.port);
+		try std.testing.expectEqualStrings("photos", shape.name);
+		try std.testing.expect(!shape.tls);
+	}
+	{
+		const shape = decompose(a, "kafka+ssl://alice@broker.example:9093?mechanism=SCRAM-SHA-256").?;
+		try std.testing.expectEqual(Engine.kafka, shape.engine);
+		try std.testing.expectEqualStrings("alice", shape.user);
+		try std.testing.expectEqualStrings("SCRAM-SHA-256", shape.mechanism);
+		try std.testing.expect(shape.tls);
+	}
+	{
+		const shape = decompose(a, "rabbit://guest@127.0.0.1:15672/%2F").?;
+		try std.testing.expectEqual(Engine.rabbit, shape.engine);
+		try std.testing.expectEqualStrings("%2F", shape.name);
+	}
+	{
+		const shape = decompose(a, "/tmp/books.db").?;
+		try std.testing.expectEqual(Engine.sqlite, shape.engine);
+		try std.testing.expectEqualStrings("/tmp/books.db", shape.path);
+	}
+}
+
+test "what it cannot put back together again, it does not take apart" {
+	var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+	defer arena.deinit();
+	const a = arena.allocator();
+
+	// A query nobody modelled, a keyword string, and a scheme with a spelling of
+	// its own: every one of them stays the single field it was, because a form
+	// that rewrote them would be worse than a form that does not offer them.
+	try std.testing.expect(decompose(a, "postgres://u@h/d?sslmode=require") == null);
+	try std.testing.expect(decompose(a, "host=h dbname=d user=u") == null);
+	try std.testing.expect(decompose(a, "amqp://guest@h:5672/%2F") == null);
+	try std.testing.expect(decompose(a, "postgresql://u@h/d") == null);
+	try std.testing.expect(decompose(a, "mariadb://h/d") == null);
+}
+
+test "the parts make the target back" {
+	var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+	defer arena.deinit();
+	const a = arena.allocator();
+
+	try std.testing.expectEqualStrings("mysql://root@127.0.0.1:3306/orders", try compose(a, .{
+		.engine = .mysql,
+		.user = "root",
+		.host = "127.0.0.1",
+		.port = "3306",
+		.name = "orders",
+	}));
+	// Nothing but a host is a target too: the engine's own defaults do the rest.
+	try std.testing.expectEqualStrings("redis://cache", try compose(a, .{ .engine = .redis, .host = "cache" }));
+	try std.testing.expectEqualStrings("s3://photos", try compose(a, .{ .engine = .s3, .name = "photos", .tls = true }));
+	try std.testing.expectEqualStrings("rabbits://admin@broker/prod", try compose(a, .{
+		.engine = .rabbit,
+		.user = "admin",
+		.host = "broker",
+		.name = "prod",
+		.tls = true,
+	}));
+	// SQLite is a path and nothing else, and `target` is whatever was typed.
+	try std.testing.expectEqualStrings("notes.db", try compose(a, .{ .engine = .sqlite, .path = "notes.db" }));
+	try std.testing.expectEqualStrings("host=h dbname=d", try compose(a, .{ .engine = .other, .path = "host=h dbname=d" }));
+}
+
+test "every engine the form offers is one it knows" {
+	for (ENGINES) |name| {
+		const engine = Engine.of(name);
+		try std.testing.expectEqualStrings(name, engine.label());
+	}
+	try std.testing.expectEqual(Engine.other, Engine.of("nonsense"));
 }
 
 test "a password is kept only when the connection asks for one" {

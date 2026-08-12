@@ -98,6 +98,9 @@ pub const Spot = struct { row: usize, col: usize };
 
 /// Where a connection can keep its password, in the order the form offers them.
 const PLACES = [_][]const u8{ "ask", "file", "keychain" };
+/// What the Kafka form offers. The empty one is no SASL at all, which is what a
+/// broker on a private network wants.
+const MECHANISMS = [_][]const u8{ "", "PLAIN", "SCRAM-SHA-256", "SCRAM-SHA-512" };
 
 /// The command palette: what is typed, and which match is under the cursor.
 /// Its entries live in `input.zig`, next to the keys they stand for.
@@ -130,6 +133,9 @@ pub const App = struct {
 	allocator: std.mem.Allocator,
 	arena: std.heap.ArenaAllocator, // the loaded page of rows
 	reports_arena: std.heap.ArenaAllocator,
+	/// What the connection form is holding: it is built again whenever the engine
+	/// changes, so what was typed has to outlive the form it was typed into.
+	form_arena: std.heap.ArenaAllocator,
 	screen: *Term,
 	conn: database.Db,
 	/// False while the connection list is on screen and nothing is open.
@@ -201,6 +207,9 @@ pub const App = struct {
 	/// Which saved connection the open form is editing, so changing both its name
 	/// and its target replaces that entry instead of adding a second one.
 	editing_saved: ?usize = null,
+	/// Which engine the open connection form was built for: when the choice at the
+	/// top of it changes, the fields under it are somebody else's.
+	built_engine: conns.Engine = .sqlite,
 	palette: ?Palette = null,
 	/// The SQL editor, when it is open. This is where statements are written;
 	/// the one-line prompt only takes the short `:` commands now.
@@ -236,6 +245,7 @@ pub const App = struct {
 			.allocator = allocator,
 			.arena = std.heap.ArenaAllocator.init(allocator),
 			.reports_arena = std.heap.ArenaAllocator.init(allocator),
+			.form_arena = std.heap.ArenaAllocator.init(allocator),
 			.screen = try Term.init(allocator, io, env),
 			.conn = undefined,
 			.connected = false,
@@ -545,27 +555,110 @@ pub const App = struct {
 	/// The form for adding or editing a connection.
 	pub fn openConnectionForm(self: *App, edit: bool) !void {
 		self.editing_saved = null;
-		const form = try self.newForm(.connection, if (edit) "edit connection" else "add connection",
-			"a file path, or postgres://user@host:port/database - ctrl+s saves and connects");
+		_ = self.form_arena.reset(.retain_capacity);
 		var name: []const u8 = "";
 		var target: []const u8 = "";
-		if (edit and self.saved_at < self.saved.items.items.len) {
-			name = self.saved.items.items[self.saved_at].name;
-			target = self.saved.items.items[self.saved_at].target;
-			self.editing_saved = self.saved_at;
-		} else if (edit) {
-			self.complain("there is nothing to edit yet - press a to add one", .{});
-			return;
-		}
 		var secret: []const u8 = "";
 		var keeps: conns.Keeps = .ask;
-		if (edit and self.saved_at < self.saved.items.items.len) {
+		if (edit) {
+			if (self.saved_at >= self.saved.items.items.len) {
+				self.complain("there is nothing to edit yet - press a to add one", .{});
+				return;
+			}
 			const entry = self.saved.items.items[self.saved_at];
+			name = entry.name;
+			target = entry.target;
 			keeps = entry.keeps;
 			secret = entry.secret;
+			self.editing_saved = self.saved_at;
 		}
+		// A target that cannot be taken apart and put back together identically is
+		// left as the one field it always was.
+		const shape = conns.decompose(self.formArena(), target) orelse conns.Shape{
+			.engine = if (target.len == 0) .sqlite else .other,
+			.path = target,
+		};
+		try self.showConnectionForm(shape, name, keeps, secret);
+	}
+
+	/// An arena that outlives the form: the connection form is built again every
+	/// time the engine changes, and what was typed has to survive that.
+	fn formArena(self: *App) std.mem.Allocator {
+		return self.form_arena.allocator();
+	}
+
+	fn showConnectionForm(self: *App, shape: conns.Shape, name: []const u8, keeps: conns.Keeps, secret: []const u8) !void {
+		const form = try self.newForm(
+			.connection,
+			if (self.editing_saved != null) "edit connection" else "add connection",
+			"pick the engine, fill in what it needs - ctrl+s saves and connects",
+		);
+		self.built_engine = shape.engine;
 		try form.text("name", name, 24);
-		try form.text("target", target, 52);
+		try form.choice("engine", &conns.ENGINES, Form.indexOf(&conns.ENGINES, shape.engine.label()));
+
+		switch (shape.engine) {
+			.sqlite => {
+				try form.text("file", shape.path, 52);
+				try form.note("a path to a database file; it is made if it is not there");
+			},
+			.other => {
+				try form.text("target", shape.path, 52);
+				try form.note("anything the engines take, as it stands - a libpq keyword string,");
+				try form.note("a scheme with a spelling of its own, a query this form does not know");
+			},
+			.postgres, .mysql => {
+				try form.text("host", shape.host, 24);
+				try form.text("port", shape.port, 6);
+				form.sameLine();
+				try form.text("database", shape.name, 24);
+				try form.text("user", shape.user, 24);
+				try form.note("leave the port empty for the usual one, and the user for your own name");
+			},
+			.redis => {
+				try form.text("host", shape.host, 24);
+				try form.text("port", shape.port, 6);
+				form.sameLine();
+				try form.text("database", shape.name, 6);
+				try form.note("the database is Redis's numbered one: 0 unless you know otherwise");
+			},
+			.kafka => {
+				try form.text("host", shape.host, 24);
+				try form.text("port", shape.port, 6);
+				form.sameLine();
+				try form.text("user", shape.user, 24);
+				try form.choice("mechanism", &MECHANISMS, Form.indexOf(&MECHANISMS, shape.mechanism));
+				form.sameLine();
+				try form.toggle("TLS", shape.tls);
+				try form.note("a user with no mechanism named is PLAIN, which is what brokers are set up for");
+			},
+			.s3 => {
+				try form.text("bucket", shape.name, 24);
+				try form.text("region", shape.region, 16);
+				form.sameLine();
+				try form.text("endpoint", shape.host, 24);
+				try form.text("port", shape.port, 6);
+				form.sameLine();
+				try form.text("access key", shape.user, 24);
+				try form.toggle("TLS", shape.tls);
+				form.sameLine();
+				try form.note("no endpoint means Amazon; one means MinIO, Ceph, R2 - and the bucket");
+				try form.note("goes in the path there. The secret key is the password below, and an");
+				try form.note("empty access key means ~/.aws and AWS_ACCESS_KEY_ID are looked at.");
+			},
+			.rabbit => {
+				try form.text("host", shape.host, 24);
+				try form.text("port", shape.port, 6);
+				form.sameLine();
+				try form.text("vhost", shape.name, 24);
+				try form.text("user", shape.user, 24);
+				try form.toggle("TLS", shape.tls);
+				form.sameLine();
+				try form.note("the port is the management one, 15672, and not the broker's 5672;");
+				try form.note("the default vhost is written %2F");
+			},
+		}
+
 		// Only offer what this machine has: the keychain is macOS's.
 		const places = if (keychain.available) &PLACES else PLACES[0..2];
 		try form.choice("keep the password", places, Form.indexOf(places, @tagName(keeps)));
@@ -576,6 +669,59 @@ pub const App = struct {
 			try form.note("keychain: in the macOS keychain, which asks you before handing it over");
 		}
 		try form.note("ask: nothing is kept - as with ~/.pgpass, ~/.my.cnf or PGPASSWORD");
+	}
+
+	/// The connection form is the one whose fields depend on an answer inside it,
+	/// so changing the engine builds the rest of it again - keeping whatever was
+	/// typed that the new engine also asks for.
+	pub fn afterFormKey(self: *App) !void {
+		const form = &(self.form orelse return);
+		if (form.purpose != .connection) {
+			return;
+		}
+		const picked = conns.Engine.of(form.valueNamed("engine"));
+		if (picked == self.built_engine) {
+			return;
+		}
+		var shape = self.shapeOf(form);
+		shape.engine = picked;
+		// Encryption is the new engine's default, not whatever the last one had:
+		// off on a broker inside a network, on for a bucket on the internet.
+		shape.tls = picked == .s3;
+		const name = try self.formArena().dupe(u8, form.valueNamed("name"));
+		const secret = try self.formArena().dupe(u8, form.valueNamed("password"));
+		const keeps = std.meta.stringToEnum(conns.Keeps, form.valueNamed("keep the password")) orelse .ask;
+		try self.showConnectionForm(shape, name, keeps, secret);
+		// Back on the engine, so it can be cycled again without walking up to it.
+		self.form.?.cursor = 1;
+	}
+
+	/// What the fields of the connection form say, whichever engine they are for.
+	fn shapeOf(self: *App, form: *Form.Form) conns.Shape {
+		const arena = self.formArena();
+		var shape = conns.Shape{ .engine = conns.Engine.of(form.valueNamed("engine")) };
+		const Pairs = struct { label: []const u8, into: *[]const u8 };
+		for ([_]Pairs{
+			.{ .label = "file", .into = &shape.path },
+			.{ .label = "target", .into = &shape.path },
+			.{ .label = "host", .into = &shape.host },
+			.{ .label = "endpoint", .into = &shape.host },
+			.{ .label = "port", .into = &shape.port },
+			.{ .label = "database", .into = &shape.name },
+			.{ .label = "bucket", .into = &shape.name },
+			.{ .label = "vhost", .into = &shape.name },
+			.{ .label = "user", .into = &shape.user },
+			.{ .label = "access key", .into = &shape.user },
+			.{ .label = "region", .into = &shape.region },
+			.{ .label = "mechanism", .into = &shape.mechanism },
+		}) |pair| {
+			const value = form.valueNamed(pair.label);
+			if (value.len != 0) {
+				pair.into.* = arena.dupe(u8, value) catch value;
+			}
+		}
+		shape.tls = if (form.fieldNamed("TLS")) |field| field.on else shape.engine == .s3;
+		return shape;
 	}
 
 	pub fn deinitConnection(self: *App) void {
@@ -628,6 +774,7 @@ pub const App = struct {
 		self.allocator.free(self.owned_path);
 		self.arena.deinit();
 		self.reports_arena.deinit();
+		self.form_arena.deinit();
 	}
 
 	/// The table on screen, with the schema it lives in.
@@ -2389,18 +2536,19 @@ pub const App = struct {
 				return;
 			},
 			.connection => {
-				const name = try self.allocator.dupe(u8, form.valueOf(0));
+				const name = try self.allocator.dupe(u8, form.valueNamed("name"));
 				defer self.allocator.free(name);
-				const target = try self.allocator.dupe(u8, form.valueOf(1));
-				defer self.allocator.free(target);
-				const keeps = std.meta.stringToEnum(conns.Keeps, form.valueOf(2)) orelse .ask;
-				const typed = try self.allocator.dupe(u8, form.valueOf(3));
+				// The fields are that engine's; the target is what they come to.
+				const shape = self.shapeOf(form);
+				const target = conns.compose(self.formArena(), shape) catch "";
+				const keeps = std.meta.stringToEnum(conns.Keeps, form.valueNamed("keep the password")) orelse .ask;
+				const typed = try self.allocator.dupe(u8, form.valueNamed("password"));
 				defer self.allocator.free(typed);
 				const editing = self.editing_saved;
 				self.editing_saved = null;
 				self.closeForm();
 				if (target.len == 0) {
-					self.complain("a connection needs a target", .{});
+					self.complain("a connection needs something to point at", .{});
 					return;
 				}
 				if (editing) |at| {
