@@ -23,6 +23,15 @@ krtek \- a database manager for the terminal
 .RI kafka+ssl://user@host:port?mechanism=SCRAM-SHA-256
 .br
 .B krtek
+.RI s3://bucket
+.br
+.B krtek
+.RI s3+http://key:secret@localhost:9000/bucket
+.br
+.B krtek
+.RI rabbit://guest@host:15672/vhost
+.br
+.B krtek
 .RB \(dq host=...\ dbname=...\ user=... \(dq
 .br
 .B krtek
@@ -33,9 +42,9 @@ krtek \- a database manager for the terminal
 .SH DESCRIPTION
 .B krtek
 browses, edits, alters, dumps and imports a database on a text screen. It speaks
-SQLite, PostgreSQL, MySQL/MariaDB, Redis and Kafka behind one interface, and needs
-nothing installed: the client libraries are linked into the binary, and Redis and
-Kafka are spoken directly.
+SQLite, PostgreSQL, MySQL/MariaDB, Redis, Kafka, S3 and RabbitMQ behind one
+interface, and needs nothing installed: the client libraries are linked into the
+binary, and Redis, Kafka, S3 and RabbitMQ are spoken directly.
 .PP
 A Kafka topic is a table of
 .IR partition ", " offset ", " timestamp ", " key ", " value " and " headers .
@@ -44,6 +53,34 @@ the editor is a Kafka console:
 .BR TOPICS ", " OFFSETS ", " DESCRIBE ", " CREATE ", " DROP ", " TRUNCATE ", " PRODUCE .
 TLS and SASL (PLAIN, SCRAM-SHA-256, SCRAM-SHA-512) are asked for in the target:
 .IR kafka+ssl://user@host:9093?mechanism=SCRAM-SHA-256 .
+.PP
+An S3 bucket is a table of
+.IR key ", " size ", " modified ", " etag " and " storage ,
+listed a page at a time by continuation token and filtered by key prefix. The
+editor is an S3 console:
+.BR BUCKETS ", " LS ", " GET ", " HEAD ", " PUT ", " DEL ", " URL .
+Credentials come from the target, from
+.BR AWS_ACCESS_KEY_ID " and friends, or from " ~/.aws/credentials ,
+in that order. A target that names a key and no secret is asked for the secret,
+which is kept wherever that connection keeps its password. Anything that speaks
+S3 works:
+.IR s3+http://key:secret@localhost:9000/bucket .
+.PP
+RabbitMQ is reached through its management API, and what is a table is the
+topology:
+.IR queues ", " exchanges ", " bindings ", " consumers ", " connections ", " channels " and " nodes ,
+with a vhost for a schema.
+.B Reading a queue is destructive
+- AMQP has no peek - so the interface never touches messages; the console does,
+and says which of the two it did:
+.B PEEK
+puts them back, which changes their order and marks them redelivered, and
+.B DRAIN
+keeps them off. The rest of the console is
+.BR PUBLISH ", " PURGE ", " DECLARE ", " BIND ", " DELETE " and " CLOSE .
+An
+.I amqp://
+url is taken as well; its port is not, because 5672 does not answer HTTP.
 .PP
 With no argument it opens the list of saved connections, where
 .B enter
@@ -128,6 +165,13 @@ The saved connections, one
 .RI \(dq name<TAB>target \(dq
 line each, readable and editable by hand. A password kept in the file is on that
 line and the file is mode 0600.
+.TP
+.IR ~/.aws/credentials ", " ~/.aws/config
+Read for an S3 target that carries no key of its own, for the profile named with
+.IR ?profile= ,
+or
+.BR default .
+Neither file is written.
 .SH ENVIRONMENT
 .TP
 .B KRTEK_THEME
@@ -143,6 +187,11 @@ configuration directory lives, if not
 .TP
 .BR PGPASSWORD ", " PGSSLMODE ", ..."
 Read by libpq, as usual.
+.TP
+.BR AWS_ACCESS_KEY_ID ", " AWS_SECRET_ACCESS_KEY ", " AWS_SESSION_TOKEN ", " AWS_REGION
+Read for an S3 target that carries no key of its own, before
+.I ~/.aws
+is looked at.
 .SH EXIT STATUS
 .TP
 .B 0
@@ -155,6 +204,7 @@ The connection could not be made. The reason is on standard error.
 .BR sqlite3 (1),
 .BR psql (1),
 .BR mysql (1),
-.BR redis-cli (1)
+.BR redis-cli (1),
+.BR aws (1)
 .SH BUGS
 https://github.com/zales/krtek/issues

@@ -4,8 +4,8 @@
 
 A database manager for the terminal, written in Zig: what a graphical client
 does - browse, edit, alter, dump, import - on a text screen, and quicker, because
-everything is a key press. **SQLite, PostgreSQL, MySQL/MariaDB, Redis and Kafka**,
-behind one interface.
+everything is a key press. **SQLite, PostgreSQL, MySQL/MariaDB, Redis, Kafka, S3
+and RabbitMQ**, behind one interface.
 
 *Krtek* is Czech for a mole: a small thing that digs through what is underneath
 and comes back up with what it found.
@@ -51,7 +51,8 @@ architectures. The `.deb` installs the binary, the man page and the copyright, a
 **Depends on nothing at all**, so it goes on any Debian or Ubuntu of any age.
 
 **It needs nothing installed.** SQLite, libpq, the MariaDB connector and OpenSSL
-are linked into the binary, and Redis and Kafka are spoken directly. The Linux
+are linked into the binary, and Redis, Kafka, S3 and RabbitMQ are spoken
+directly. The Linux
 builds are static against musl and run on any distribution - checked on Debian with nothing
 installed at all; the macOS builds leave only Apple's own libraries dynamic. That
 is `-Dstatic`.
@@ -66,6 +67,9 @@ zig build -Doptimize=ReleaseSafe
 ./zig-out/bin/krtek mysql://user@host:3306/database
 ./zig-out/bin/krtek redis://host:6379/0
 ./zig-out/bin/krtek kafka://host:9092
+./zig-out/bin/krtek s3://bucket
+./zig-out/bin/krtek s3+http://key:secret@localhost:9000/bucket
+./zig-out/bin/krtek rabbit://guest@host:15672/vhost
 ```
 
 A SQLite file is opened through SQLite's own VFS: edits go straight to disk and
@@ -236,8 +240,132 @@ which is the half of SCRAM that proves the *broker* knew the password too. A use
 with no password makes krtek ask for one, and it can be kept wherever the other
 connections keep theirs, keychain included.
 
-## Adding an engine
+## S3
 
+A bucket is a table and an object is a row, with `key`, `size`, `modified`,
+`etag` and `storage` for columns. The mapping is closer than Kafka's: keys come
+back sorted, a key addresses a row exactly, and filtering with `W` on
+`key LIKE 'a/b%'` becomes the `prefix` of the listing - which is the only filter
+S3 has, so anything else is refused with the reason rather than answered by
+downloading the bucket and pretending. Renaming a key is a copy and then a
+delete, in that order, because S3 has no rename and a failure has to leave the
+original where it was.
+
+**Paging is by continuation token, which only goes forwards.** S3 has no OFFSET:
+page five is reached by asking for the four before it and keeping the token each
+one ends with. Those tokens are kept, so paging forward costs one request a page
+and going back costs nothing. Counting is a walk, so it is done for a bucket
+small enough to walk and reported as unknown for one that is not - an unknown
+number of rows beats a wrong one.
+
+The body of an object is not in the grid: a listing that fetched every object to
+draw a screen would download the bucket. **The editor is an S3 console** instead,
+and `GET` brings one object back as a value - so an image is shown as an image and
+anything else as hex, by the same code that does it for a BLOB.
+
+```
+BUCKETS                         every bucket this key can see
+LS [bucket] [prefix]            one page of keys
+GET key                         the object itself, shown as a value
+HEAD key                        what the server says about it
+PUT key "some text"
+DEL key
+URL key 3600                    a signed link anybody can open, for an hour
+```
+
+**It is not only Amazon.** MinIO, Ceph, Garage and R2 speak the same protocol and
+differ in how a bucket is addressed; a target that names a host gets path-style
+addressing, Amazon gets the bucket in the hostname, and `?path=1` settles it by
+hand. A bucket in another region answers with the region it is in, and that is
+followed once rather than shown as a 301 nobody can read.
+
+```sh
+krtek s3://photos                                            # AWS, keys from the environment or ~/.aws
+krtek "s3://photos?region=eu-central-1&profile=work"
+krtek "s3+http://minioadmin:minioadmin@localhost:9000/photos"  # MinIO
+krtek "s3://key:secret@ceph.example:8443/data?insecure=1"      # a certificate of its own making
+```
+
+**Credentials are looked for where the AWS tools look**, in the order they look:
+the target, then `AWS_ACCESS_KEY_ID` and friends, then `~/.aws/credentials` and
+`~/.aws/config` for the profile in use. So a machine already set up for the `aws`
+command needs nothing said here, and a key that would otherwise sit in the
+connections file in the clear stays where it was. The info view says which of the
+four answered.
+
+A target that names an access key and no secret - `s3://AKIA…@photos` - is asked
+for the secret the way every other engine is asked for a password, and it can be
+kept wherever the other connections keep theirs, keychain included. A target that
+names a key is never quietly completed from the environment: somebody who wrote a
+key down means that key.
+
+**No SDK, and the signature is written out.** SigV4 is a hash of a canonical form
+of the request signed with a key derived from the secret, the date, the region and
+the service - about a hundred lines, and almost every bug in it is a
+canonicalisation bug rather than a cryptographic one. So the canonical request and
+the string to sign are functions of their own, checked against Amazon's own worked
+examples byte for byte, including a presigned URL: see
+[src/db/s3/sigv4.zig](src/db/s3/sigv4.zig).
+
+## RabbitMQ
+
+**Reading a queue is destructive, so this driver does not read queues.** AMQP has
+no peek: `basic.get` takes the message off, and putting it back with
+`nack requeue=true` changes the order and marks it redelivered. A queue is not a
+table - it is a line of people waiting, and looking at somebody in a queue means
+pulling them out of it. A client that browsed messages the way it browses rows
+would quietly reorder a production queue every time the screen was drawn, and no
+amount of care in the client can fix that, because the protocol has no other
+move.
+
+So what is a table here is the **topology**, which can be read as often as
+anybody likes: `queues`, `exchanges`, `bindings`, `consumers`, `connections`,
+`channels` and `nodes`, each of them a list endpoint of the management API on
+port 15672. A vhost is a schema, so `#` moves between them. Those endpoints page,
+count and sort on the server, which is why `1-50 of 812` is exact and costs one
+request, and why sorting by the number of messages is the broker's work rather
+than this program's - filtering is the broker's too, so `W` on the name becomes
+its own `name=` filter.
+
+Messages are still reachable, in the editor, which is a **RabbitMQ console** -
+and what each of the two ways does is on the screen rather than in a footnote:
+
+```
+QUEUES [name]                    the queues, filtered by what a name contains
+EXCHANGES, BINDINGS, CONSUMERS   the rest of the topology
+CONNECTIONS, CHANNELS, NODES     what the broker is doing
+VHOSTS, OVERVIEW, DEFINITIONS    the broker itself, and the whole vhost as it exports it
+PEEK orders 10                   messages, put back afterwards - the order changes and
+                                 they come back marked redelivered
+DRAIN orders 10                  messages, kept off the queue for good
+PUBLISH events order.new "hello" send one; - as the exchange is the default one
+PURGE orders                     throw away everything in it
+DECLARE QUEUE orders quorum      and DECLARE EXCHANGE events topic
+BIND events orders order.#       and UNBIND events orders order.%23
+DELETE QUEUE orders              and CLOSE, which hangs up on a client
+```
+
+Nothing in that list happens while browsing. Declaring, binding and deleting also
+work from the grid - `i` on `queues` declares one, `d` removes it - and an *edit*
+is refused, because a queue is declared and not altered. A dump of a vhost is
+those commands, so what comes out goes back in: that is the topology, not the
+messages, which is the only honest thing a dump of a broker can be.
+
+```sh
+krtek rabbit://guest@localhost:15672/               # asks for the password
+krtek "rabbit://admin:secret@broker:15672/production"
+krtek rabbits://admin@broker/production             # HTTPS, port 15671
+krtek amqp://guest@broker:5672/%2F                  # the url you have to hand
+```
+
+That last one is taken and its port is not: 5672 speaks AMQP, and connecting to
+it with HTTP would hang rather than say anything useful, so the management port
+is used instead and the info view says so. The default vhost is `/`, which has to
+travel as `%2F` in every path the driver builds - the single most common way to
+get a 404 out of the management API, and the reason there is a test for a queue
+with a space in its name.
+
+## Adding an engine
 `src/db/db.zig` is the interface. It is a tagged union dispatched with `inline
 else`, so a new engine is one union member and a struct with the same method
 names - anything missing is a compile error that names itself. No vtables.
@@ -405,6 +533,12 @@ permanent.
 | `src/tui/keychain.zig` | the macOS keychain, through Security.framework |
 | `vendor/sqlite3.c` | the unmodified SQLite amalgamation, compiled by Zig's clang |
 | `src/db/kafka/` | the Kafka protocol, the codecs, the target and SCRAM - the parts with no connection in them |
+| `src/db/net.zig` | a socket with TLS on it, shared by the drivers that speak their own protocol |
+| `src/db/http.zig` | HTTP/1.1 over that socket: keep-alive, chunked, and a ceiling |
+| `src/db/s3.zig` | S3: buckets as tables, listing by continuation token |
+| `src/db/s3/` | the signature, the XML and the target - again, no connection in any of them |
+| `src/db/rabbit.zig` | RabbitMQ: the topology as tables, over the management API |
+| `src/db/rabbit/` | which endpoint each table is, where its columns live in the JSON, and the target |
 | `packaging/` | the `.deb` and the Homebrew formula |
 | `docs/index.html` | the landing page, which is also the APT repository |
 | `docs/krtek.1` | the man page, installed by both of them |
@@ -442,9 +576,10 @@ rather than as the byte `S`, and `{shift}`, `{f13}` or `{kpdown}` as the private
 use codepoints that protocol gives to keys which are not text. A plain pty cannot
 express either difference, and both are where keyboard bugs live.
 
-**The parsers that read from a socket are fuzzed**, because three of them - the
-snappy and lz4 unpackers and the walker over record batches - are written out in
-this repository by hand, and they read lengths off the wire and then believe them:
+**The parsers that read from a socket are fuzzed**, because several of them - the
+snappy and lz4 unpackers, the walker over record batches, the HTTP reader and the
+listing S3 answers with - are written out in this repository by hand, and they
+read lengths off the wire and then believe them:
 
 ```sh
 zig build fuzz                      # a few seconds, from a fixed seed
@@ -482,6 +617,30 @@ included. The records it reads are ones the Java client wrote, which is the poin
 
 ```sh
 zig build && ./tests/kafka.sh
+```
+
+[tests/s3.sh](tests/s3.sh) does the same for S3, against MinIO rather than
+Amazon on purpose: MinIO wants path-style addressing and a region it was never
+told about, which is where a driver written only against AWS falls over. The
+signature is the same either way - if MinIO accepts it Amazon does, and the unit
+tests already check it against Amazon's own worked examples. Thirteen objects
+over four-object pages, so the continuation tokens have to cover everything
+exactly once, and every failure - wrong secret, missing bucket, no credentials at
+all - has to say what is wrong rather than a number.
+
+```sh
+zig build && ./tests/s3.sh
+```
+
+[tests/rabbit.sh](tests/rabbit.sh) brings up a broker with its management plugin,
+declares a topology with a queue whose name has a space in it - which is where an
+unescaped vhost or name shows up as a 404 - and checks the listings, the counts
+and every way in that can fail: a wrong password, a vhost that is not there, and
+the AMQP port, which is the mistake everybody makes once. It browses no messages,
+because browsing messages is what this driver refuses to do.
+
+```sh
+zig build && ./tests/rabbit.sh
 ```
 
 That is how everything described here was verified: against a real SQLite file
@@ -525,6 +684,20 @@ with `psql` doing the same.
 * **PostgreSQL specifics not covered:** `COPY`, `EXPLAIN ANALYZE`, sequences as
   objects of their own, materialized view refresh, and switching database
   without reconnecting (`:open` takes a whole target).
+* **S3 has no upload and no delete of many at once.** `PUT key text` writes what
+  is typed, which is meant for a small object; there is no multipart upload, so a
+  large one belongs in a tool that streams, and an object larger than 64 MB is
+  refused rather than held in memory. Making and dropping a bucket is not there
+  either: both are decisions about where data lives and what it costs, and a key
+  press is the wrong way to make them. Nor is there versioning, tagging, or an
+  ACL - a listing shows what a listing gives.
+
+* **RabbitMQ's messages are not rows.** Reading a queue takes messages off it, so
+  the grid never touches them: `PEEK` and `DRAIN` in the console do, and say which
+  of the two happened. There is no AMQP in this program at all - no consuming, no
+  acking somebody else's delivery, no shovel or federation management - and a
+  broker without the management plugin cannot be opened, because that plugin is
+  the whole protocol here.
 
 ## Licence
 

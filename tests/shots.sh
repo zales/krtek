@@ -53,6 +53,8 @@ mkdir -p "$CONFIG/krtek"
 	printf 'orders\tmysql://root@127.0.0.1:3306/orders\tkeychain\n'
 	printf 'cache\tredis://127.0.0.1:6379/0\n'
 	printf 'events\tkafka+ssl://alice@broker.example:9093\n'
+	printf 'photos\ts3://photos?region=eu-central-1\n'
+	printf 'broker\trabbit://guest@127.0.0.1:15672/%%2F\n'
 } > "$CONFIG/krtek/connections"
 export XDG_CONFIG_HOME="$CONFIG"
 trap 'rm -rf "$CONFIG"' EXIT
