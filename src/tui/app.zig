@@ -110,7 +110,7 @@ pub const Palette = struct {
 	at: usize = 0,
 };
 
-pub const PromptKind = enum { command, filter, edit, confirm, password, new_dir, rename_file, remove_files, go_to };
+pub const PromptKind = enum { command, filter, edit, confirm, password, new_dir, rename_file, remove_files, go_to, remove_rows };
 
 pub const Prompt = struct {
 	kind: PromptKind,
@@ -328,6 +328,13 @@ pub const App = struct {
 			try self.rememberConnection(target);
 		}
 		self.say("{s} - {s}", .{ self.conn.describe(), self.conn.version() });
+		// A place that holds files opens on the files. The grid can show a
+		// directory as a table and that is worth having, but it is not what
+		// anybody connecting to a NAS came for, and nothing on that screen said
+		// the two panes were a key away.
+		if (self.conn.files() != null) {
+			self.openFiles() catch {};
+		}
 	}
 
 	// --- the SQL editor ---
@@ -1086,7 +1093,6 @@ pub const App = struct {
 	}
 
 	pub fn deleteRows(self: *App) !void {
-		const table = self.currentTable() orelse return;
 		if (self.rows.items.len != 0 and !self.editable) {
 			self.complain("these rows cannot be addressed, so they are read-only", .{});
 			return;
@@ -1095,6 +1101,22 @@ pub const App = struct {
 			self.complain("there is no row here", .{});
 			return;
 		}
+		// Where a row is a file, deleting one is deleting a file, and there is no
+		// transaction to take it back. A database row goes as it always has.
+		if (self.conn.files() != null) {
+			const count = if (self.marked.items.len != 0) self.marked.items.len else @as(usize, 1);
+			if (self.prompt) |*old| {
+				old.buffer.deinit(self.allocator);
+			}
+			self.prompt = .{ .kind = .remove_rows, .label = " type y to delete: " };
+			self.say("delete {d} file{s}?", .{ count, if (count == 1) "" else "s" });
+			return;
+		}
+		try self.deleteRowsNow();
+	}
+
+	pub fn deleteRowsNow(self: *App) !void {
+		const table = self.currentTable() orelse return;
 		var targets: std.ArrayListUnmanaged(usize) = .empty;
 		defer targets.deinit(self.allocator);
 		if (self.marked.items.len != 0) {

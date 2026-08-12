@@ -1260,6 +1260,8 @@ fn footerHints(app: *App) []const u8 {
 		.files => " tab other pane   enter opens   c copy   space mark   n mkdir   r rename   x remove   q back",
 		.grid => if (app.focus == .sidebar)
 			" enter opens   / filter   c create table   E export   ctrl+k commands   q quit"
+		else if (app.files != null)
+			" f the two panes   i insert   e edit   x delete   o sort   v whole value   space mark"
 		else
 			" i insert   e edit   x delete   o sort   v whole value   space mark   ctrl+k commands",
 	};

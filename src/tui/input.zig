@@ -891,6 +891,13 @@ fn typing(app: *App, key: Key) !void {
 						app.say("left alone", .{});
 					}
 				},
+				.remove_rows => {
+					if (line.len != 0 and (line[0] == 'y' or line[0] == 'Y')) {
+						try app.deleteRowsNow();
+					} else {
+						app.say("left alone", .{});
+					}
+				},
 			}
 		},
 		.backspace => {
