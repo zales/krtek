@@ -33,11 +33,15 @@ pub const sigv4 = @import("s3/sigv4.zig");
 /// What the interface asks for, as a structure: see the file for why.
 pub const ask = @import("ask.zig");
 
+/// Places that hold files, and copying between them.
+pub const store = @import("store.zig");
+
 // Every driver brings its own tests. A plain import is not enough to run them -
 // analysis is lazy, so a file nothing reaches into contributes no tests - which
 // is why they are named here.
 comptime {
 	_ = ask;
+	_ = store;
 	_ = sqlite;
 	_ = postgres;
 	_ = mysql;
@@ -296,6 +300,18 @@ pub const Db = union(enum) {
 		switch (self) {
 			inline else => |driver| return driver.caps(),
 		}
+	}
+
+	/// This connection seen as somewhere files live, where it is one at all. A
+	/// database is not: a table is not a directory and pretending otherwise
+	/// would put a file manager in front of things that hold rows.
+	pub fn files(self: Db) ?store.Store {
+		return switch (self) {
+			.sftp => |driver| driver.files(),
+			.s3 => |driver| driver.files(),
+			.azure => |driver| driver.files(),
+			else => null,
+		};
 	}
 
 	/// How many requests this connection has made, where the driver counts them at

@@ -71,6 +71,14 @@ const COUNT_PAGES: usize = 20;
 const GET_LIMIT: usize = 32 << 20;
 /// How long a link made with `URL` lasts.
 const LINK_SECONDS: u32 = 3600;
+/// How much of an object one range asks for while it is being copied. Large
+/// enough that a gigabyte is a few dozen requests rather than thousands, small
+/// enough that giving up on a copy does not waste much.
+const RANGE: usize = 8 << 20;
+/// How large an object this will send. One request carries the whole thing and
+/// has to be signed over it, so this is a real ceiling until multipart uploads
+/// are written - and it says so rather than failing halfway.
+const UPLOAD_LIMIT: usize = 256 << 20;
 
 pub const Db = struct {
 	allocator: std.mem.Allocator,
@@ -420,6 +428,9 @@ pub const Db = struct {
 
 	const Listing = struct {
 		entries: []const Entry = &.{},
+		/// The prefixes one level down, which is what a bucket has instead of
+		/// directories. Only filled in when the listing asked for a delimiter.
+		folders: []const []const u8 = &.{},
 		/// What to ask for to get the next page, or null when this was the last.
 		next: ?[]const u8 = null,
 	};
@@ -432,6 +443,21 @@ pub const Db = struct {
 		token: []const u8,
 		limit: usize,
 	) db.Error!Listing {
+		return self.listPage(arena, bucket, prefix, token, limit, false);
+	}
+
+	/// `folded` asks S3 to stop at each slash and report what is below as a
+	/// prefix. A grid wants every key, because a bucket is one flat table there;
+	/// the file manager wants one level, because that is what a directory is.
+	fn listPage(
+		self: *Db,
+		arena: std.mem.Allocator,
+		bucket: []const u8,
+		prefix: []const u8,
+		token: []const u8,
+		limit: usize,
+		folded: bool,
+	) db.Error!Listing {
 		var params: std.ArrayListUnmanaged(sigv4.Param) = .empty;
 		try params.append(arena, .{ .name = "list-type", .value = "2" });
 		// Keys may hold anything, including bytes XML cannot carry; asked for
@@ -443,6 +469,9 @@ pub const Db = struct {
 		});
 		if (prefix.len != 0) {
 			try params.append(arena, .{ .name = "prefix", .value = prefix });
+		}
+		if (folded) {
+			try params.append(arena, .{ .name = "delimiter", .value = "/" });
 		}
 		if (token.len != 0) {
 			try params.append(arena, .{ .name = "continuation-token", .value = token });
@@ -1072,6 +1101,319 @@ pub const Db = struct {
 		return rows;
 	}
 
+	// ------------------------------------------------- as a place holding files
+
+	/// The same connection seen as somewhere files can be copied to and from.
+	pub fn files(self: *Db) db.store.Store {
+		return .{ .s3 = .{ .owner = self } };
+	}
+
+	/// A bucket has no directories, only keys with slashes in them - so a
+	/// listing that stops at each slash is what makes it look like one, and the
+	/// prefixes it reports back are the folders. A path here is
+	/// `/bucket/some/prefix/`, and `/` is the list of buckets.
+	pub const Files = struct {
+		owner: *Db,
+
+		pub fn label(self: Files) []const u8 {
+			return self.owner.parts.endpoint;
+		}
+
+		pub fn message(self: Files) []const u8 {
+			return self.owner.last_error.items;
+		}
+
+		pub fn start(self: Files, arena: std.mem.Allocator) db.store.Error![]const u8 {
+			if (self.owner.parts.bucket.len == 0) {
+				return "/";
+			}
+			return std.fmt.allocPrint(arena, "/{s}", .{self.owner.parts.bucket}) catch error.OutOfMemory;
+		}
+
+		/// A path split into the bucket and the key under it.
+		const Split = struct {
+			bucket: []const u8 = "",
+			key: []const u8 = "",
+		};
+
+		fn partsOf(path: []const u8) Split {
+			const trimmed = std.mem.trimStart(u8, path, "/");
+			const slash = std.mem.indexOfScalar(u8, trimmed, '/') orelse return .{ .bucket = trimmed };
+			return .{ .bucket = trimmed[0..slash], .key = trimmed[slash + 1 ..] };
+		}
+
+		/// A key that names a folder ends in a slash, and the empty one does not:
+		/// asking for `prefix//` finds nothing.
+		fn asFolder(arena: std.mem.Allocator, key: []const u8) db.store.Error![]const u8 {
+			if (key.len == 0 or std.mem.endsWith(u8, key, "/")) {
+				return key;
+			}
+			return std.fmt.allocPrint(arena, "{s}/", .{key}) catch error.OutOfMemory;
+		}
+
+		fn blame(self: Files, response: http.Response) db.store.Error {
+			_ = self.owner.fail(response) catch {};
+			return error.Store;
+		}
+
+		pub fn list(self: Files, arena: std.mem.Allocator, path: []const u8) db.store.Error![]db.store.Entry {
+			var out: std.ArrayListUnmanaged(db.store.Entry) = .empty;
+			const where = partsOf(path);
+			if (where.bucket.len == 0) {
+				const found = self.owner.buckets(arena) catch return error.Store;
+				for (found) |one| {
+					out.append(arena, .{ .name = one.name, .kind = .dir }) catch return error.OutOfMemory;
+				}
+				return out.items;
+			}
+
+			const prefix = try asFolder(arena, where.key);
+			var token: []const u8 = "";
+			// Every page, because a directory listing that stopped at a thousand
+			// would be a listing that quietly leaves files out of a copy.
+			while (true) {
+				const page = self.owner.listPage(arena, where.bucket, prefix, token, 1000, true) catch return error.Store;
+				for (page.folders) |one| {
+					const name = std.mem.trimEnd(u8, one[prefix.len..], "/");
+					if (name.len != 0) {
+						out.append(arena, .{ .name = name, .kind = .dir }) catch return error.OutOfMemory;
+					}
+				}
+				for (page.entries) |entry| {
+					const name = entry.key[@min(prefix.len, entry.key.len)..];
+					// The empty object that stands for the folder itself is the folder,
+					// not a file in it.
+					if (name.len == 0) {
+						continue;
+					}
+					out.append(arena, .{
+						.name = name,
+						.kind = .file,
+						.size = @intCast(@max(entry.size, 0)),
+						.modified = whenever(entry.modified),
+					}) catch return error.OutOfMemory;
+				}
+				token = page.next orelse break;
+			}
+			return out.items;
+		}
+
+		pub fn stat(self: Files, arena: std.mem.Allocator, path: []const u8) db.store.Error!db.store.Entry {
+			const where = partsOf(path);
+			if (where.bucket.len == 0 or where.key.len == 0) {
+				return .{ .name = db.store.basename(path), .kind = .dir };
+			}
+			const response = self.owner.call(arena, .{
+				.method = "HEAD",
+				.bucket = where.bucket,
+				.key = where.key,
+			}) catch return error.Store;
+			if (response.ok()) {
+				return .{
+					.name = db.store.basename(path),
+					.kind = .file,
+					.size = std.fmt.parseInt(u64, response.get("content-length") orelse "0", 10) catch 0,
+				};
+			}
+			// Not an object, so it is a folder if anything is under it. A prefix
+			// with nothing under it does not exist at all, which is S3 all over.
+			const prefix = try asFolder(arena, where.key);
+			const page = self.owner.listPage(arena, where.bucket, prefix, "", 1, true) catch return error.Store;
+			if (page.entries.len != 0 or page.folders.len != 0) {
+				return .{ .name = db.store.basename(path), .kind = .dir };
+			}
+			self.owner.complain("{s} is not there", .{path});
+			return error.Store;
+		}
+
+		pub fn openRead(self: Files, arena: std.mem.Allocator, path: []const u8) db.store.Error!Ranged {
+			const where = partsOf(path);
+			const what = try self.stat(arena, path);
+			return .{
+				.owner = self.owner,
+				.bucket = self.owner.allocator.dupe(u8, where.bucket) catch return error.OutOfMemory,
+				.key = self.owner.allocator.dupe(u8, where.key) catch return error.OutOfMemory,
+				.size = what.size,
+			};
+		}
+
+		pub fn openWrite(self: Files, _: std.mem.Allocator, path: []const u8, size: u64) db.store.Error!Upload {
+			if (size > UPLOAD_LIMIT) {
+				self.owner.complain(
+					"{s} is {d} MB, and an object goes up in one request here - the ceiling is {d} MB",
+					.{ path, size >> 20, UPLOAD_LIMIT >> 20 },
+				);
+				return error.Store;
+			}
+			const where = partsOf(path);
+			return .{
+				.owner = self.owner,
+				.bucket = self.owner.allocator.dupe(u8, where.bucket) catch return error.OutOfMemory,
+				.key = self.owner.allocator.dupe(u8, where.key) catch return error.OutOfMemory,
+			};
+		}
+
+		/// A folder is an empty object whose name ends in a slash: the convention
+		/// every S3 browser follows, because S3 itself has no such thing.
+		pub fn makeDir(self: Files, arena: std.mem.Allocator, path: []const u8) db.store.Error!void {
+			const where = partsOf(path);
+			if (where.key.len == 0) {
+				return;
+			}
+			const response = self.owner.call(arena, .{
+				.method = "PUT",
+				.bucket = where.bucket,
+				.key = try asFolder(arena, where.key),
+			}) catch return error.Store;
+			if (!response.ok()) {
+				return self.blame(response);
+			}
+			self.owner.pages.forget();
+		}
+
+		pub fn remove(self: Files, arena: std.mem.Allocator, path: []const u8, kind: db.store.Kind) db.store.Error!void {
+			const where = partsOf(path);
+			const key = if (kind == .dir) try asFolder(arena, where.key) else where.key;
+			const response = self.owner.call(arena, .{
+				.method = "DELETE",
+				.bucket = where.bucket,
+				.key = key,
+			}) catch return error.Store;
+			// A folder marker that was never there is not a failure: the folder
+			// existed because of what was under it, and that is gone by now.
+			if (!response.ok() and !(kind == .dir and response.status == 404)) {
+				return self.blame(response);
+			}
+			self.owner.pages.forget();
+		}
+
+		/// S3 has no rename, so this is a copy and a delete - and says so if it
+		/// gets halfway.
+		pub fn rename(self: Files, arena: std.mem.Allocator, from: []const u8, to: []const u8) db.store.Error!void {
+			const source = partsOf(from);
+			const target = partsOf(to);
+			const origin = std.fmt.allocPrint(arena, "/{s}/{s}", .{ source.bucket, source.key }) catch return error.OutOfMemory;
+			const response = self.owner.call(arena, .{
+				.method = "PUT",
+				.bucket = target.bucket,
+				.key = target.key,
+				.headers = &.{.{ .name = "x-amz-copy-source", .value = origin }},
+			}) catch return error.Store;
+			if (!response.ok()) {
+				return self.blame(response);
+			}
+			try self.remove(arena, from, .file);
+		}
+	};
+
+	/// An object read in pieces. S3 will not stream a body out of this program's
+	/// HTTP client without rewriting it, but it will answer a range - so a large
+	/// object arrives a slice at a time and never sits in memory whole.
+	pub const Ranged = struct {
+		owner: *Db,
+		bucket: []const u8,
+		key: []const u8,
+		size: u64 = 0,
+		at: u64 = 0,
+		held: []const u8 = &.{},
+		taken: usize = 0,
+		scratch: ?std.heap.ArenaAllocator = null,
+
+		pub fn read(self: *Ranged, into: []u8) db.store.Error!usize {
+			if (self.taken == self.held.len) {
+				if (self.at >= self.size) {
+					return 0;
+				}
+				try self.fetch();
+			}
+			const count = @min(into.len, self.held.len - self.taken);
+			@memcpy(into[0..count], self.held[self.taken .. self.taken + count]);
+			self.taken += count;
+			return count;
+		}
+
+		fn fetch(self: *Ranged) db.store.Error!void {
+			if (self.scratch) |*old| {
+				old.deinit();
+			}
+			self.scratch = std.heap.ArenaAllocator.init(self.owner.allocator);
+			const arena = self.scratch.?.allocator();
+
+			const last = @min(self.at + RANGE, self.size) - 1;
+			const range = std.fmt.allocPrint(arena, "bytes={d}-{d}", .{ self.at, last }) catch return error.OutOfMemory;
+			const response = self.owner.call(arena, .{
+				.bucket = self.bucket,
+				.key = self.key,
+				.headers = &.{.{ .name = "range", .value = range }},
+				.limit = RANGE + (1 << 20),
+			}) catch return error.Store;
+			if (!response.ok()) {
+				_ = self.owner.fail(response) catch {};
+				return error.Store;
+			}
+			self.held = response.body;
+			self.taken = 0;
+			self.at += response.body.len;
+			// A server that ignores the range hands back the whole object, and
+			// asking again from where it left off would fetch it all over again.
+			if (response.body.len == 0) {
+				self.at = self.size;
+			}
+		}
+
+		pub fn close(self: *Ranged) void {
+			if (self.scratch) |*old| {
+				old.deinit();
+			}
+			self.scratch = null;
+			self.owner.allocator.free(self.bucket);
+			self.owner.allocator.free(self.key);
+		}
+	};
+
+	/// An object written in one go. What arrives is held until the end because a
+	/// request has to say how long it is and be signed over what it holds.
+	pub const Upload = struct {
+		owner: *Db,
+		bucket: []const u8,
+		key: []const u8,
+		held: List = .empty,
+
+		pub fn write(self: *Upload, bytes: []const u8) db.store.Error!void {
+			self.held.appendSlice(self.owner.allocator, bytes) catch return error.OutOfMemory;
+			if (self.held.items.len > UPLOAD_LIMIT) {
+				return error.Store;
+			}
+		}
+
+		pub fn finish(self: *Upload) db.store.Error!void {
+			defer self.release();
+			var scratch = std.heap.ArenaAllocator.init(self.owner.allocator);
+			defer scratch.deinit();
+			const response = self.owner.call(scratch.allocator(), .{
+				.method = "PUT",
+				.bucket = self.bucket,
+				.key = self.key,
+				.body = self.held.items,
+			}) catch return error.Store;
+			if (!response.ok()) {
+				_ = self.owner.fail(response) catch {};
+				return error.Store;
+			}
+			self.owner.pages.forget();
+		}
+
+		pub fn abandon(self: *Upload) void {
+			self.release();
+		}
+
+		fn release(self: *Upload) void {
+			self.held.deinit(self.owner.allocator);
+			self.owner.allocator.free(self.bucket);
+			self.owner.allocator.free(self.key);
+		}
+	};
+
 	fn help(self: *Db) db.Error!Rows {
 		var rows = self.newNamed(&.{ "command", "what it does" }, &.{ false, false });
 		const LINES = [_][2][]const u8{
@@ -1179,12 +1521,14 @@ const Pages = struct {
 /// space in it stopped being a guess.
 pub fn parseListing(arena: std.mem.Allocator, body: []const u8) !Db.Listing {
 	var entries: std.ArrayListUnmanaged(Db.Entry) = .empty;
+	var folders: std.ArrayListUnmanaged([]const u8) = .empty;
 	var next: ?[]const u8 = null;
 	var truncated = false;
 
 	var reader = xml.Reader{ .text = body };
 	var current: []const u8 = "";
 	var inside = false;
+	var folding = false;
 	var entry = Db.Entry{};
 	while (reader.next()) |event| {
 		switch (event) {
@@ -1193,17 +1537,25 @@ pub fn parseListing(arena: std.mem.Allocator, body: []const u8) !Db.Listing {
 				if (std.mem.eql(u8, name, "Contents")) {
 					entry = .{};
 					inside = true;
+				} else if (std.mem.eql(u8, name, "CommonPrefixes")) {
+					folding = true;
 				}
 			},
 			.close => |name| {
 				if (std.mem.eql(u8, name, "Contents")) {
 					try entries.append(arena, entry);
 					inside = false;
+				} else if (std.mem.eql(u8, name, "CommonPrefixes")) {
+					folding = false;
 				}
 				current = "";
 			},
 			.text => |text| {
-				if (inside) {
+				if (folding) {
+					if (std.mem.eql(u8, current, "Prefix")) {
+						try folders.append(arena, try unescapeKey(arena, text));
+					}
+				} else if (inside) {
 					if (std.mem.eql(u8, current, "Key")) {
 						entry.key = try unescapeKey(arena, text);
 					} else if (std.mem.eql(u8, current, "Size")) {
@@ -1225,10 +1577,38 @@ pub fn parseListing(arena: std.mem.Allocator, body: []const u8) !Db.Listing {
 	}
 	return .{
 		.entries = entries.items,
+		.folders = folders.items,
 		// A token without a truncated listing is not a next page: it is the last
 		// answer repeating itself, and following it would loop forever.
 		.next = if (truncated) next else null,
 	};
+}
+
+/// A time as S3 writes one - `2015-08-30T12:36:00.000Z` - in seconds. Zero for
+/// anything that does not look like one, because a listing with an odd date in
+/// it is still a listing and refusing to show it would help nobody.
+fn whenever(text: []const u8) i64 {
+	if (text.len < 19 or text[4] != '-' or text[10] != 'T') {
+		return 0;
+	}
+	const year = std.fmt.parseInt(i64, text[0..4], 10) catch return 0;
+	const month = std.fmt.parseInt(i64, text[5..7], 10) catch return 0;
+	const day = std.fmt.parseInt(i64, text[8..10], 10) catch return 0;
+	const hour = std.fmt.parseInt(i64, text[11..13], 10) catch return 0;
+	const minute = std.fmt.parseInt(i64, text[14..16], 10) catch return 0;
+	const second = std.fmt.parseInt(i64, text[17..19], 10) catch return 0;
+	return days(year, month, day) * 86400 + hour * 3600 + minute * 60 + second;
+}
+
+/// Days from 1970 to that date. The civil calendar arithmetic that every C
+/// library hides inside timegm, which is not portable enough to call.
+fn days(year: i64, month: i64, day: i64) i64 {
+	const shifted = year - @intFromBool(month <= 2);
+	const era = @divFloor(shifted, 400);
+	const of_era = shifted - era * 400;
+	const of_year = @divTrunc(153 * (month + (if (month > 2) @as(i64, -3) else 9)) + 2, 5) + day - 1;
+	const day_of_era = of_era * 365 + @divTrunc(of_era, 4) - @divTrunc(of_era, 100) + of_year;
+	return era * 146097 + day_of_era - 719468;
 }
 
 /// A key as `encoding-type=url` sends it. That encoding is the one a form uses,
@@ -1545,6 +1925,51 @@ test "a listing is read the way S3 sends one" {
 	try testing.expectEqual(@as(i64, 0), listing.entries[1].size);
 	try testing.expectEqualStrings("GLACIER", listing.entries[1].storage);
 	try testing.expectEqualStrings("1ueGcxLPRx1Tr", listing.next.?);
+}
+
+test "a folded listing has the folders as well as the keys" {
+	var scratch = std.heap.ArenaAllocator.init(testing.allocator);
+	defer scratch.deinit();
+	const arena = scratch.allocator();
+
+	// What `delimiter=/` gets back: what is in this directory, and what is below
+	// it as prefixes. Without the second there are no folders in a bucket at all.
+	const listing = try parseListing(arena,
+		\\<ListBucketResult>
+		\\  <Name>photos</Name>
+		\\  <Prefix>2015%2F</Prefix>
+		\\  <Delimiter>%2F</Delimiter>
+		\\  <IsTruncated>false</IsTruncated>
+		\\  <Contents>
+		\\    <Key>2015%2Fnote.txt</Key>
+		\\    <LastModified>2015-08-30T12:36:00.000Z</LastModified>
+		\\    <Size>12</Size>
+		\\  </Contents>
+		\\  <CommonPrefixes><Prefix>2015%2Faugust%2F</Prefix></CommonPrefixes>
+		\\  <CommonPrefixes><Prefix>2015%2Fseptember%2F</Prefix></CommonPrefixes>
+		\\</ListBucketResult>
+	);
+	try testing.expectEqual(@as(usize, 1), listing.entries.len);
+	try testing.expectEqualStrings("2015/note.txt", listing.entries[0].key);
+	try testing.expectEqual(@as(usize, 2), listing.folders.len);
+	try testing.expectEqualStrings("2015/august/", listing.folders[0]);
+	try testing.expectEqualStrings("2015/september/", listing.folders[1]);
+	// The Prefix of the listing itself is not one of the folders: it is where the
+	// listing was taken from, and counting it would put a directory inside itself.
+	for (listing.folders) |one| {
+		try testing.expect(!std.mem.eql(u8, one, "2015/"));
+	}
+}
+
+test "the time on an object becomes a number" {
+	// The moment AWS uses in its own worked examples.
+	try testing.expectEqual(@as(i64, 1440938160), whenever("2015-08-30T12:36:00.000Z"));
+	try testing.expectEqual(@as(i64, 0), whenever("1970-01-01T00:00:00.000Z"));
+	// A leap day, because the arithmetic is where this would go wrong.
+	try testing.expectEqual(@as(i64, 1709208000), whenever("2024-02-29T12:00:00.000Z"));
+	// And anything that is not a time at all is nothing rather than a wrong date.
+	try testing.expectEqual(@as(i64, 0), whenever(""));
+	try testing.expectEqual(@as(i64, 0), whenever("yesterday"));
 }
 
 test "the last page has no next, whatever token it carries" {

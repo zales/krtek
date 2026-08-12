@@ -621,6 +621,63 @@ pub fn readFile(self: *Connection, arena: std.mem.Allocator, path: []const u8, l
 }
 
 pub fn writeFile(self: *Connection, path: []const u8, bytes: []const u8) Error!void {
+	var file = try openWrite(self, path);
+	errdefer file.close();
+	try file.write(bytes);
+	file.close();
+}
+
+/// An open file, read or written a block at a time. `readFile` is the whole of
+/// a file in memory, which is right for showing one and wrong for moving one:
+/// a copy has to work whatever the file weighs.
+pub const File = struct {
+	conn: *Connection,
+	handle: *Handle,
+
+	pub fn read(self: *File, into: []u8) Error!usize {
+		const got = libssh2_sftp_read(self.handle, into.ptr, into.len);
+		if (got < 0) {
+			try explain(self.conn, "cannot read", "the file");
+			return error.Sftp;
+		}
+		return @intCast(got);
+	}
+
+	pub fn write(self: *File, bytes: []const u8) Error!void {
+		var sent: usize = 0;
+		while (sent < bytes.len) {
+			const wrote = libssh2_sftp_write(self.handle, bytes[sent..].ptr, bytes.len - sent);
+			if (wrote < 0) {
+				try explain(self.conn, "cannot write", "the file");
+				return error.Sftp;
+			}
+			sent += @intCast(wrote);
+		}
+	}
+
+	pub fn close(self: *File) void {
+		_ = libssh2_sftp_close_handle(self.handle);
+	}
+
+	/// Closing is the last chance the far end has to say that the bytes did not
+	/// land - a full disk shows up here and nowhere earlier - so a copy asks.
+	pub fn done(self: *File) Error!void {
+		if (libssh2_sftp_close_handle(self.handle) != 0) {
+			try explain(self.conn, "cannot finish writing", "the file");
+			return error.Sftp;
+		}
+	}
+};
+
+pub fn openRead(self: *Connection, path: []const u8) Error!File {
+	const handle = libssh2_sftp_open_ex(self.sftp, path.ptr, @intCast(path.len), FXF_READ, 0, OPENFILE) orelse {
+		try explain(self, "cannot open", path);
+		return error.Sftp;
+	};
+	return .{ .conn = self, .handle = handle };
+}
+
+pub fn openWrite(self: *Connection, path: []const u8) Error!File {
 	const handle = libssh2_sftp_open_ex(
 		self.sftp,
 		path.ptr,
@@ -632,16 +689,7 @@ pub fn writeFile(self: *Connection, path: []const u8, bytes: []const u8) Error!v
 		try explain(self, "cannot write", path);
 		return error.Sftp;
 	};
-	defer _ = libssh2_sftp_close_handle(handle);
-	var sent: usize = 0;
-	while (sent < bytes.len) {
-		const wrote = libssh2_sftp_write(handle, bytes[sent..].ptr, bytes.len - sent);
-		if (wrote < 0) {
-			try explain(self, "cannot write", path);
-			return error.Sftp;
-		}
-		sent += @intCast(wrote);
-	}
+	return .{ .conn = self, .handle = handle };
 }
 
 pub fn stat(self: *Connection, path: []const u8) Error!Attributes {

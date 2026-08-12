@@ -58,6 +58,12 @@ const PAGE: usize = 200;
 const COUNT_PAGES: usize = 20;
 /// How much of a blob the console will bring back in one go.
 const GET_LIMIT: usize = 32 << 20;
+/// How much of a blob one range asks for while it is being copied.
+const RANGE: usize = 8 << 20;
+/// How large a blob this will send. One request carries the whole thing, so
+/// this is a real ceiling until block uploads are written - and it says so
+/// rather than failing halfway.
+const UPLOAD_LIMIT: usize = 256 << 20;
 
 pub const Db = struct {
 	allocator: std.mem.Allocator,
@@ -364,6 +370,9 @@ pub const Db = struct {
 
 	const Listing = struct {
 		entries: []const Entry = &.{},
+		/// The prefixes one level down, which is what a container has instead of
+		/// directories. Only filled in when the listing asked for a delimiter.
+		folders: []const []const u8 = &.{},
 		/// What to ask for to get the next page, or null when this was the last.
 		next: ?[]const u8 = null,
 	};
@@ -375,6 +384,21 @@ pub const Db = struct {
 		prefix: []const u8,
 		marker: []const u8,
 		limit: usize,
+	) db.Error!Listing {
+		return self.listPage(arena, container, prefix, marker, limit, false);
+	}
+
+	/// `folded` asks Azure to stop at each slash and report what is below as a
+	/// prefix. The grid wants every blob, because a container is one flat table
+	/// there; the file manager wants one level, which is what a directory is.
+	fn listPage(
+		self: *Db,
+		arena: std.mem.Allocator,
+		container: []const u8,
+		prefix: []const u8,
+		marker: []const u8,
+		limit: usize,
+		folded: bool,
 	) db.Error!Listing {
 		var params: std.ArrayListUnmanaged(sign.Param) = .empty;
 		try params.append(arena, .{ .name = "restype", .value = "container" });
@@ -388,6 +412,9 @@ pub const Db = struct {
 		}
 		if (marker.len != 0) {
 			try params.append(arena, .{ .name = "marker", .value = marker });
+		}
+		if (folded) {
+			try params.append(arena, .{ .name = "delimiter", .value = "%2F" });
 		}
 		const response = try self.call(arena, .{ .container = container, .query = params.items });
 		if (!response.ok()) {
@@ -949,6 +976,302 @@ pub const Db = struct {
 		return error.Driver;
 	}
 
+	// ------------------------------------------------- as a place holding files
+
+	/// The same connection seen as somewhere files can be copied to and from.
+	pub fn files(self: *Db) db.store.Store {
+		return .{ .azure = .{ .owner = self } };
+	}
+
+	/// A container has no directories, only blob names with slashes in them, so
+	/// a listing that stops at each slash is what makes it look like one. A path
+	/// here is `/container/some/prefix/`, and `/` is the list of containers.
+	pub const Files = struct {
+		owner: *Db,
+
+		pub fn label(self: Files) []const u8 {
+			return self.owner.parts.account;
+		}
+
+		pub fn message(self: Files) []const u8 {
+			return self.owner.last_error.items;
+		}
+
+		pub fn start(self: Files, arena: std.mem.Allocator) db.store.Error![]const u8 {
+			if (self.owner.parts.container.len == 0) {
+				return "/";
+			}
+			return std.fmt.allocPrint(arena, "/{s}", .{self.owner.parts.container}) catch error.OutOfMemory;
+		}
+
+		const Split = struct {
+			container: []const u8 = "",
+			blob: []const u8 = "",
+		};
+
+		fn partsOf(path: []const u8) Split {
+			const trimmed = std.mem.trimStart(u8, path, "/");
+			const slash = std.mem.indexOfScalar(u8, trimmed, '/') orelse return .{ .container = trimmed };
+			return .{ .container = trimmed[0..slash], .blob = trimmed[slash + 1 ..] };
+		}
+
+		fn asFolder(arena: std.mem.Allocator, name: []const u8) db.store.Error![]const u8 {
+			if (name.len == 0 or std.mem.endsWith(u8, name, "/")) {
+				return name;
+			}
+			return std.fmt.allocPrint(arena, "{s}/", .{name}) catch error.OutOfMemory;
+		}
+
+		fn blame(self: Files, response: http.Response) db.store.Error {
+			_ = self.owner.fail(response) catch {};
+			return error.Store;
+		}
+
+		pub fn list(self: Files, arena: std.mem.Allocator, path: []const u8) db.store.Error![]db.store.Entry {
+			var out: std.ArrayListUnmanaged(db.store.Entry) = .empty;
+			const where = partsOf(path);
+			if (where.container.len == 0) {
+				const found = self.owner.containers(arena) catch return error.Store;
+				for (found) |one| {
+					out.append(arena, .{ .name = one.name, .kind = .dir }) catch return error.OutOfMemory;
+				}
+				return out.items;
+			}
+
+			const prefix = try asFolder(arena, where.blob);
+			var marker: []const u8 = "";
+			while (true) {
+				const page = self.owner.listPage(arena, where.container, prefix, marker, 1000, true) catch return error.Store;
+				for (page.folders) |one| {
+					const name = std.mem.trimEnd(u8, one[@min(prefix.len, one.len)..], "/");
+					if (name.len != 0) {
+						out.append(arena, .{ .name = name, .kind = .dir }) catch return error.OutOfMemory;
+					}
+				}
+				for (page.entries) |entry| {
+					const name = entry.name[@min(prefix.len, entry.name.len)..];
+					if (name.len == 0) {
+						continue;
+					}
+					out.append(arena, .{
+						.name = name,
+						.kind = .file,
+						.size = @intCast(@max(entry.size, 0)),
+					}) catch return error.OutOfMemory;
+				}
+				marker = page.next orelse break;
+			}
+			return out.items;
+		}
+
+		pub fn stat(self: Files, arena: std.mem.Allocator, path: []const u8) db.store.Error!db.store.Entry {
+			const where = partsOf(path);
+			if (where.container.len == 0 or where.blob.len == 0) {
+				return .{ .name = db.store.basename(path), .kind = .dir };
+			}
+			const response = self.owner.call(arena, .{
+				.method = "HEAD",
+				.container = where.container,
+				.blob = where.blob,
+			}) catch return error.Store;
+			if (response.ok()) {
+				return .{
+					.name = db.store.basename(path),
+					.kind = .file,
+					.size = std.fmt.parseInt(u64, response.get("content-length") orelse "0", 10) catch 0,
+				};
+			}
+			const prefix = try asFolder(arena, where.blob);
+			const page = self.owner.listPage(arena, where.container, prefix, "", 1, true) catch return error.Store;
+			if (page.entries.len != 0 or page.folders.len != 0) {
+				return .{ .name = db.store.basename(path), .kind = .dir };
+			}
+			self.owner.complain("{s} is not there", .{path});
+			return error.Store;
+		}
+
+		pub fn openRead(self: Files, arena: std.mem.Allocator, path: []const u8) db.store.Error!Ranged {
+			const where = partsOf(path);
+			const what = try self.stat(arena, path);
+			return .{
+				.owner = self.owner,
+				.container = self.owner.allocator.dupe(u8, where.container) catch return error.OutOfMemory,
+				.blob = self.owner.allocator.dupe(u8, where.blob) catch return error.OutOfMemory,
+				.size = what.size,
+			};
+		}
+
+		pub fn openWrite(self: Files, _: std.mem.Allocator, path: []const u8, size: u64) db.store.Error!Upload {
+			if (size > UPLOAD_LIMIT) {
+				self.owner.complain(
+					"{s} is {d} MB, and a blob goes up in one request here - the ceiling is {d} MB",
+					.{ path, size >> 20, UPLOAD_LIMIT >> 20 },
+				);
+				return error.Store;
+			}
+			const where = partsOf(path);
+			return .{
+				.owner = self.owner,
+				.container = self.owner.allocator.dupe(u8, where.container) catch return error.OutOfMemory,
+				.blob = self.owner.allocator.dupe(u8, where.blob) catch return error.OutOfMemory,
+			};
+		}
+
+		pub fn makeDir(self: Files, arena: std.mem.Allocator, path: []const u8) db.store.Error!void {
+			const where = partsOf(path);
+			if (where.blob.len == 0) {
+				return;
+			}
+			const response = self.owner.call(arena, .{
+				.method = "PUT",
+				.container = where.container,
+				.blob = try asFolder(arena, where.blob),
+				.headers = &.{.{ .name = "x-ms-blob-type", .value = "BlockBlob" }},
+			}) catch return error.Store;
+			if (!response.ok()) {
+				return self.blame(response);
+			}
+			self.owner.pages.forget();
+		}
+
+		pub fn remove(self: Files, arena: std.mem.Allocator, path: []const u8, kind: db.store.Kind) db.store.Error!void {
+			const where = partsOf(path);
+			const name = if (kind == .dir) try asFolder(arena, where.blob) else where.blob;
+			const response = self.owner.call(arena, .{
+				.method = "DELETE",
+				.container = where.container,
+				.blob = name,
+			}) catch return error.Store;
+			if (!response.ok() and !(kind == .dir and response.status == 404)) {
+				return self.blame(response);
+			}
+			self.owner.pages.forget();
+		}
+
+		/// Azure has no rename either, so this is a copy and a delete. The copy is
+		/// the server's own, which is why it takes a URL and not the bytes.
+		pub fn rename(self: Files, arena: std.mem.Allocator, from: []const u8, to: []const u8) db.store.Error!void {
+			const source = partsOf(from);
+			const target = partsOf(to);
+			const url = self.owner.urlOf(arena, source.container, source.blob) catch return error.Store;
+			const response = self.owner.call(arena, .{
+				.method = "PUT",
+				.container = target.container,
+				.blob = target.blob,
+				.headers = &.{.{ .name = "x-ms-copy-source", .value = url }},
+			}) catch return error.Store;
+			if (!response.ok()) {
+				return self.blame(response);
+			}
+			try self.remove(arena, from, .file);
+		}
+	};
+
+	/// A blob read in pieces, for the same reason S3 objects are.
+	pub const Ranged = struct {
+		owner: *Db,
+		container: []const u8,
+		blob: []const u8,
+		size: u64 = 0,
+		at: u64 = 0,
+		held: []const u8 = &.{},
+		taken: usize = 0,
+		scratch: ?std.heap.ArenaAllocator = null,
+
+		pub fn read(self: *Ranged, into: []u8) db.store.Error!usize {
+			if (self.taken == self.held.len) {
+				if (self.at >= self.size) {
+					return 0;
+				}
+				try self.fetch();
+			}
+			const count = @min(into.len, self.held.len - self.taken);
+			@memcpy(into[0..count], self.held[self.taken .. self.taken + count]);
+			self.taken += count;
+			return count;
+		}
+
+		fn fetch(self: *Ranged) db.store.Error!void {
+			if (self.scratch) |*old| {
+				old.deinit();
+			}
+			self.scratch = std.heap.ArenaAllocator.init(self.owner.allocator);
+			const arena = self.scratch.?.allocator();
+
+			const last = @min(self.at + RANGE, self.size) - 1;
+			const range = std.fmt.allocPrint(arena, "bytes={d}-{d}", .{ self.at, last }) catch return error.OutOfMemory;
+			const response = self.owner.call(arena, .{
+				.container = self.container,
+				.blob = self.blob,
+				.headers = &.{.{ .name = "x-ms-range", .value = range }},
+				.limit = RANGE + (1 << 20),
+			}) catch return error.Store;
+			if (!response.ok()) {
+				_ = self.owner.fail(response) catch {};
+				return error.Store;
+			}
+			self.held = response.body;
+			self.taken = 0;
+			self.at += response.body.len;
+			if (response.body.len == 0) {
+				self.at = self.size;
+			}
+		}
+
+		pub fn close(self: *Ranged) void {
+			if (self.scratch) |*old| {
+				old.deinit();
+			}
+			self.scratch = null;
+			self.owner.allocator.free(self.container);
+			self.owner.allocator.free(self.blob);
+		}
+	};
+
+	/// A blob written in one go, held until the end because the request has to
+	/// say how long it is and be signed over that.
+	pub const Upload = struct {
+		owner: *Db,
+		container: []const u8,
+		blob: []const u8,
+		held: List = .empty,
+
+		pub fn write(self: *Upload, bytes: []const u8) db.store.Error!void {
+			self.held.appendSlice(self.owner.allocator, bytes) catch return error.OutOfMemory;
+			if (self.held.items.len > UPLOAD_LIMIT) {
+				return error.Store;
+			}
+		}
+
+		pub fn finish(self: *Upload) db.store.Error!void {
+			defer self.release();
+			var scratch = std.heap.ArenaAllocator.init(self.owner.allocator);
+			defer scratch.deinit();
+			const response = self.owner.call(scratch.allocator(), .{
+				.method = "PUT",
+				.container = self.container,
+				.blob = self.blob,
+				.headers = &.{.{ .name = "x-ms-blob-type", .value = "BlockBlob" }},
+				.body = self.held.items,
+			}) catch return error.Store;
+			if (!response.ok()) {
+				_ = self.owner.fail(response) catch {};
+				return error.Store;
+			}
+			self.owner.pages.forget();
+		}
+
+		pub fn abandon(self: *Upload) void {
+			self.release();
+		}
+
+		fn release(self: *Upload) void {
+			self.held.deinit(self.owner.allocator);
+			self.owner.allocator.free(self.container);
+			self.owner.allocator.free(self.blob);
+		}
+	};
+
 	fn help(self: *Db) db.Error!Rows {
 		var rows = self.newNamed(&.{ "command", "what it does" }, &.{ false, false });
 		const LINES = [_][2][]const u8{
@@ -1046,11 +1369,13 @@ const Pages = struct {
 /// hangs under `Properties`, which is the whole of the difference from S3.
 pub fn parseListing(arena: std.mem.Allocator, body: []const u8) !Db.Listing {
 	var entries: std.ArrayListUnmanaged(Db.Entry) = .empty;
+	var folders: std.ArrayListUnmanaged([]const u8) = .empty;
 	var next: ?[]const u8 = null;
 
 	var reader = xml.Reader{ .text = body };
 	var current: []const u8 = "";
 	var inside = false;
+	var folding = false;
 	var entry = Db.Entry{};
 	while (reader.next()) |event| {
 		switch (event) {
@@ -1059,17 +1384,25 @@ pub fn parseListing(arena: std.mem.Allocator, body: []const u8) !Db.Listing {
 				if (std.mem.eql(u8, name, "Blob")) {
 					entry = .{};
 					inside = true;
+				} else if (std.mem.eql(u8, name, "BlobPrefix")) {
+					folding = true;
 				}
 			},
 			.close => |name| {
 				if (std.mem.eql(u8, name, "Blob")) {
 					try entries.append(arena, entry);
 					inside = false;
+				} else if (std.mem.eql(u8, name, "BlobPrefix")) {
+					folding = false;
 				}
 				current = "";
 			},
 			.text => |text| {
-				if (inside) {
+				if (folding) {
+					if (std.mem.eql(u8, current, "Name")) {
+						try folders.append(arena, try xml.unescape(arena, text));
+					}
+				} else if (inside) {
 					if (std.mem.eql(u8, current, "Name")) {
 						entry.name = try xml.unescape(arena, text);
 					} else if (std.mem.eql(u8, current, "Content-Length")) {
@@ -1091,6 +1424,7 @@ pub fn parseListing(arena: std.mem.Allocator, body: []const u8) !Db.Listing {
 	}
 	return .{
 		.entries = entries.items,
+		.folders = folders.items,
 		// An empty `<NextMarker/>` is the end, and it is written that way rather
 		// than left out - so an empty one is not a next page.
 		.next = if (next != null and next.?.len != 0) next else null,

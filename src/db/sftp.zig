@@ -195,6 +195,95 @@ pub const Db = struct {
 		return address.join(arena, self.cwd, path) catch error.OutOfMemory;
 	}
 
+	// ------------------------------------------------- as a place holding files
+
+	/// The same connection seen as somewhere files can be copied to and from.
+	pub fn files(self: *Db) db.store.Store {
+		return .{ .sftp = .{ .owner = self } };
+	}
+
+	/// The driver answers questions about rows; this answers the handful the file
+	/// manager asks, in the words every other place uses. It is a value rather
+	/// than a pointer because it is only a connection wearing a different hat.
+	pub const Files = struct {
+		owner: *Db,
+
+		pub fn label(self: Files) []const u8 {
+			return self.owner.parts.host;
+		}
+
+		pub fn message(self: Files) []const u8 {
+			if (self.owner.conn) |conn| {
+				return conn.message();
+			}
+			return self.owner.last_error.items;
+		}
+
+		pub fn start(self: Files, _: std.mem.Allocator) db.store.Error![]const u8 {
+			return self.owner.cwd;
+		}
+
+		fn connection(self: Files) db.store.Error!*ssh.Connection {
+			return self.owner.conn orelse error.Store;
+		}
+
+		pub fn list(self: Files, arena: std.mem.Allocator, path: []const u8) db.store.Error![]db.store.Entry {
+			const conn = try self.connection();
+			const found = ssh.readDir(conn, arena, path, ENTRIES) catch return error.Store;
+			const out = arena.alloc(db.store.Entry, found.len) catch return error.OutOfMemory;
+			for (found, 0..) |entry, index| {
+				out[index] = .{
+					.name = entry.name,
+					.kind = if (entry.attributes.isDir()) .dir else .file,
+					.size = entry.attributes.filesize,
+					.modified = @intCast(entry.attributes.mtime),
+				};
+			}
+			return out;
+		}
+
+		pub fn stat(self: Files, _: std.mem.Allocator, path: []const u8) db.store.Error!db.store.Entry {
+			const conn = try self.connection();
+			const what = ssh.stat(conn, path) catch return error.Store;
+			return .{
+				.name = address.basename(path),
+				.kind = if (what.isDir()) .dir else .file,
+				.size = what.filesize,
+				.modified = @intCast(what.mtime),
+			};
+		}
+
+		pub fn openRead(self: Files, _: std.mem.Allocator, path: []const u8) db.store.Error!db.store.Remote {
+			const conn = try self.connection();
+			return .{ .file = ssh.openRead(conn, path) catch return error.Store };
+		}
+
+		pub fn openWrite(self: Files, _: std.mem.Allocator, path: []const u8, _: u64) db.store.Error!db.store.Remote {
+			const conn = try self.connection();
+			return .{ .file = ssh.openWrite(conn, path) catch return error.Store };
+		}
+
+		pub fn makeDir(self: Files, _: std.mem.Allocator, path: []const u8) db.store.Error!void {
+			const conn = try self.connection();
+			// A directory that is already there is what was wanted. SFTP answers
+			// every failure with the same code, so the only way to tell is to look.
+			if (ssh.stat(conn, path)) |what| {
+				return if (what.isDir()) {} else error.Store;
+			} else |_| {}
+			ssh.makeDir(conn, path, 0o755) catch return error.Store;
+		}
+
+		pub fn remove(self: Files, _: std.mem.Allocator, path: []const u8, kind: db.store.Kind) db.store.Error!void {
+			const conn = try self.connection();
+			ssh.remove(conn, path, kind == .dir) catch return error.Store;
+		}
+
+		pub fn rename(self: Files, _: std.mem.Allocator, from: []const u8, to: []const u8) db.store.Error!void {
+			const conn = try self.connection();
+			ssh.rename(conn, from, to) catch return error.Store;
+		}
+	};
+
 	/// The directory a request is about: the schema when there is one, and where
 	/// we are otherwise.
 	fn directoryOf(self: *Db, table: db.Table) []const u8 {
