@@ -129,6 +129,19 @@ pub const KNOWNHOST_FAILURE: c_int = 3;
 pub const KNOWNHOST_TYPE_PLAIN: c_int = 1;
 pub const KNOWNHOST_KEYENC_RAW: c_int = 1 << 16;
 pub const KNOWNHOST_KEY_SHIFT: c_int = 18;
+pub const KNOWNHOST_KEY_UNKNOWN: c_int = 15 << KNOWNHOST_KEY_SHIFT;
+
+/// libssh2 numbers a host key one way when it hands it over and another way when
+/// it is asked to look it up: RSA is 1 and then 2, ed25519 is 6 and then 7. The
+/// two lists sit in the same header a few hundred lines apart, and using the
+/// first where the second belongs makes every known host look like an impostor -
+/// which is what it did.
+pub fn knownHostKind(hostkey_type: c_int) c_int {
+	return switch (hostkey_type) {
+		1...6 => (hostkey_type + 1) << KNOWNHOST_KEY_SHIFT,
+		else => KNOWNHOST_KEY_UNKNOWN,
+	};
+}
 
 pub const HOSTKEY_HASH_SHA256: c_int = 3;
 
@@ -399,7 +412,7 @@ fn checkHost(allocator: std.mem.Allocator, session: *Session, options: Options, 
 	_ = libssh2_knownhost_readfile(hosts, path.ptr, 1);
 
 	const zero_host = arena.dupeZ(u8, options.host) catch return error.OutOfMemory;
-	const typemask = KNOWNHOST_TYPE_PLAIN | KNOWNHOST_KEYENC_RAW | (kind << KNOWNHOST_KEY_SHIFT);
+	const typemask = KNOWNHOST_TYPE_PLAIN | KNOWNHOST_KEYENC_RAW | knownHostKind(kind);
 	switch (libssh2_knownhost_checkp(hosts, zero_host.ptr, @intCast(options.port), key, length, typemask, null)) {
 		KNOWNHOST_MATCH => return,
 		KNOWNHOST_MISMATCH => {
@@ -714,8 +727,22 @@ test "the library is linked and says which one it is" {
 	try testing.expect(!std.mem.eql(u8, text, "?"));
 }
 
-test "a file type is read out of the permission bits" {
-	const dir = Attributes{ .permissions = S_IFDIR | 0o755 };
+test "a host key is numbered one way and looked up another" {
+	// The numbers are libssh2's own, from libssh2.h: HOSTKEY_TYPE_RSA is 1 and
+	// KNOWNHOST_KEY_SSHRSA is 2<<18, and so on up. Off by one here means every
+	// host in known_hosts is reported as the wrong one.
+	try testing.expectEqual(@as(c_int, 2 << 18), knownHostKind(1)); // RSA
+	try testing.expectEqual(@as(c_int, 3 << 18), knownHostKind(2)); // DSS
+	try testing.expectEqual(@as(c_int, 4 << 18), knownHostKind(3)); // ECDSA 256
+	try testing.expectEqual(@as(c_int, 5 << 18), knownHostKind(4)); // ECDSA 384
+	try testing.expectEqual(@as(c_int, 6 << 18), knownHostKind(5)); // ECDSA 521
+	try testing.expectEqual(@as(c_int, 7 << 18), knownHostKind(6)); // ed25519
+	// Anything else is "unknown" rather than a type that happens to be next.
+	try testing.expectEqual(KNOWNHOST_KEY_UNKNOWN, knownHostKind(0));
+	try testing.expectEqual(KNOWNHOST_KEY_UNKNOWN, knownHostKind(99));
+}
+
+test "a file type is read out of the permission bits" {	const dir = Attributes{ .permissions = S_IFDIR | 0o755 };
 	const file = Attributes{ .permissions = S_IFREG | 0o644 };
 	const link = Attributes{ .permissions = S_IFLNK | 0o777 };
 	try testing.expect(dir.isDir());

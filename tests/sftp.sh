@@ -14,7 +14,10 @@ NAME=${NAME:-krtek-sftp-test}
 IMAGE=${IMAGE:-atmoz/sftp:alpine}
 PORT=${PORT:-2222}
 KEY=/tmp/krtek-sftp-test-key
-trap 'docker rm -f "$NAME" >/dev/null 2>&1 || true; rm -f "$KEY" "$KEY.pub"' EXIT
+# A home of its own, so the check below reads a known_hosts this script wrote
+# and not the one belonging to whoever is running it.
+HOME_DIR=/tmp/krtek-sftp-test-home
+trap 'docker rm -f "$NAME" >/dev/null 2>&1 || true; rm -rf "$KEY" "$KEY.pub" "$HOME_DIR"' EXIT
 
 BIN=zig-out/bin/krtek
 test -x "$BIN" || { echo "$BIN is not there - zig build first" >&2; exit 1; }
@@ -75,7 +78,22 @@ check "a name with a space in it comes back whole" "$ROOT" "0 august trip.txt"
 check "the count is exact, because the listing is all here" "$ROOT" "exact=4"
 check "paging covers everything exactly once" "$ROOT" "paged: 4 records, 4 distinct"
 
-# The host key is the point of the exercise: unknown means refused.
+# The host key is the point of the exercise: known means in, unknown means out.
+# Both halves are checked, because checking only the refusal is how a driver ends
+# up refusing everybody - which is exactly what happened.
+rm -rf "$HOME_DIR"
+mkdir -p "$HOME_DIR/.ssh"
+ssh-keyscan -p "$PORT" 127.0.0.1 > "$HOME_DIR/.ssh/known_hosts" 2>/dev/null
+test -s "$HOME_DIR/.ssh/known_hosts" || fail "ssh-keyscan brought back nothing"
+
+out=$(HOME="$HOME_DIR" zig build dbcheck -- "sftp://foo:heslo@127.0.0.1:$PORT/upload" 2>&1 || true)
+printf '%s' "$out" | grep -q "connected: foo@127.0.0.1:/upload" || {
+	echo "--- what came back:" >&2
+	printf '%s\n' "$out" >&2
+	fail "a host that is in known_hosts connects"
+}
+echo "ok: a host that is in known_hosts connects"
+
 check "an unknown host is refused, with its fingerprint" \
 	"sftp://foo:heslo@127.0.0.1:$PORT/upload" "known_hosts"
 check "a wrong password says so" \
