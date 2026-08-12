@@ -76,6 +76,7 @@ pub const Engine = enum {
 	redis,
 	kafka,
 	s3,
+	azure,
 	rabbit,
 	/// Whatever this does not model: the target as it stands.
 	other,
@@ -88,6 +89,7 @@ pub const Engine = enum {
 			.redis => "Redis",
 			.kafka => "Kafka",
 			.s3 => "S3",
+			.azure => "Azure",
 			.rabbit => "RabbitMQ",
 			.other => "target",
 		};
@@ -106,7 +108,7 @@ pub const Engine = enum {
 
 /// In the order the form offers them, most used first.
 pub const ENGINES = [_][]const u8{
-	"SQLite", "PostgreSQL", "MySQL", "Redis", "Kafka", "S3", "RabbitMQ", "target",
+	"SQLite", "PostgreSQL", "MySQL", "Redis", "Kafka", "S3", "Azure", "RabbitMQ", "target",
 };
 
 pub fn engineOf(target: []const u8) Engine {
@@ -124,6 +126,17 @@ pub fn engineOf(target: []const u8) Engine {
 		if (std.ascii.startsWithIgnoreCase(target, prefix)) {
 			return .s3;
 		}
+	}
+	for ([_][]const u8{ "azure://", "azure+http://", "azure+https://", "blob://" }) |prefix| {
+		if (std.ascii.startsWithIgnoreCase(target, prefix)) {
+			return .azure;
+		}
+	}
+	// The connection string the Azure portal hands out, which is a target too.
+	if (std.mem.indexOf(u8, target, "AccountName=") != null and
+		std.mem.indexOf(u8, target, "AccountKey=") != null)
+	{
+		return .azure;
 	}
 	for ([_][]const u8{ "rabbit://", "rabbitmq://", "rabbit+tls://", "rabbits://", "rabbitmq+tls://", "amqp://", "amqps://" }) |prefix| {
 		if (std.ascii.startsWithIgnoreCase(target, prefix)) {
@@ -177,18 +190,22 @@ pub fn compose(arena: std.mem.Allocator, shape: Shape) ![]const u8 {
 		.mysql => "mysql://",
 		.redis => "redis://",
 		.kafka => if (shape.tls) "kafka+ssl://" else "kafka://",
-		// S3 is TLS unless somebody says otherwise, which is the other way round
-		// from the rest: a bucket on the open internet is the usual case.
+		// S3 and Azure are TLS unless somebody says otherwise, which is the other
+		// way round from the rest: a bucket on the open internet is the usual case.
 		.s3 => if (shape.tls) "s3://" else "s3+http://",
+		.azure => if (shape.tls) "azure://" else "azure+http://",
 		.rabbit => if (shape.tls) "rabbits://" else "rabbit://",
 		else => "",
 	});
 	if (shape.user.len != 0) {
 		try out.print(arena, "{s}@", .{shape.user});
 	}
-	// On S3 the host is the server, and without one the bucket takes its place:
-	// `s3://photos` is a bucket on Amazon.
-	const host = if (shape.engine == .s3 and shape.host.len == 0) shape.name else shape.host;
+	// On S3 and Azure the host is the server, and without one the bucket or the
+	// container takes its place: `s3://photos` is a bucket on Amazon.
+	const host = if ((shape.engine == .s3 or shape.engine == .azure) and shape.host.len == 0)
+		shape.name
+	else
+		shape.host;
 	try out.appendSlice(arena, host);
 	if (shape.port.len != 0) {
 		try out.print(arena, ":{s}", .{shape.port});
@@ -222,6 +239,7 @@ pub fn decompose(arena: std.mem.Allocator, target: []const u8) ?Shape {
 			shape.tls = switch (engine) {
 				.kafka, .rabbit => !std.mem.eql(u8, url.scheme, "kafka") and !std.mem.eql(u8, url.scheme, "rabbit"),
 				.s3 => !std.mem.eql(u8, url.scheme, "s3+http"),
+				.azure => !std.mem.eql(u8, url.scheme, "azure+http"),
 				else => false,
 			};
 			if (url.query.len != 0) {
@@ -236,8 +254,8 @@ pub fn decompose(arena: std.mem.Allocator, target: []const u8) ?Shape {
 					return null;
 				}
 			}
-			// A bucket with no server of its own arrives as the host.
-			if (engine == .s3 and shape.name.len == 0) {
+			// A bucket or a container with no server of its own arrives as the host.
+			if ((engine == .s3 or engine == .azure) and shape.name.len == 0) {
 				shape.name = shape.host;
 				shape.host = "";
 			}
@@ -777,6 +795,22 @@ test "a target comes apart into the fields a form asks for" {
 		try std.testing.expectEqualStrings("%2F", shape.name);
 	}
 	{
+		const shape = decompose(a, "azure://mystorage@photos").?;
+		try std.testing.expectEqual(Engine.azure, shape.engine);
+		try std.testing.expectEqualStrings("mystorage", shape.user);
+		try std.testing.expectEqualStrings("photos", shape.name);
+		try std.testing.expectEqualStrings("", shape.host);
+		try std.testing.expect(shape.tls);
+	}
+	{
+		const shape = decompose(a, "azure+http://devstoreaccount1@127.0.0.1:10000/photos").?;
+		try std.testing.expectEqualStrings("devstoreaccount1", shape.user);
+		try std.testing.expectEqualStrings("127.0.0.1", shape.host);
+		try std.testing.expectEqualStrings("10000", shape.port);
+		try std.testing.expectEqualStrings("photos", shape.name);
+		try std.testing.expect(!shape.tls);
+	}
+	{
 		const shape = decompose(a, "/tmp/books.db").?;
 		try std.testing.expectEqual(Engine.sqlite, shape.engine);
 		try std.testing.expectEqualStrings("/tmp/books.db", shape.path);
@@ -791,6 +825,13 @@ test "what it cannot put back together again, it does not take apart" {
 	// A query nobody modelled, a keyword string, and a scheme with a spelling of
 	// its own: every one of them stays the single field it was, because a form
 	// that rewrote them would be worse than a form that does not offer them.
+	// A connection string is a target and its engine is known, but it is not
+	// something a form takes apart.
+	try std.testing.expectEqual(
+		Engine.azure,
+		engineOf("DefaultEndpointsProtocol=https;AccountName=a;AccountKey=k;EndpointSuffix=x"),
+	);
+	try std.testing.expect(decompose(a, "DefaultEndpointsProtocol=https;AccountName=a;AccountKey=k;EndpointSuffix=x") == null);
 	try std.testing.expect(decompose(a, "postgres://u@h/d?sslmode=require") == null);
 	try std.testing.expect(decompose(a, "host=h dbname=d user=u") == null);
 	try std.testing.expect(decompose(a, "amqp://guest@h:5672/%2F") == null);

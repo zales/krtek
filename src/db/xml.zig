@@ -1,19 +1,19 @@
-//! Just enough XML to read what S3 answers.
+//! Just enough XML to read what an object store answers.
 //!
-//! S3's replies are a handful of shapes - a list of objects, a list of buckets,
-//! an error - all of them elements with text in them and no attributes worth
-//! reading. So this is a pull parser over a string: it hands out an element
-//! opening, some text, an element closing, and knows nothing about namespaces,
-//! entities beyond the five, DTDs or validation. A general XML parser would be
-//! ten times this and would still only be used for these four shapes.
+//! S3's replies and Azure's are a handful of shapes - a list of objects, a list
+//! of containers, an error - all of them elements with text in them and no
+//! attributes worth reading. So this is a pull parser over a string: it hands out
+//! an element opening, some text, an element closing, and knows nothing about
+//! namespaces, entities beyond the five, DTDs or validation. A general XML parser
+//! would be ten times this and would still only be used for those shapes.
 //!
 //! It never fails. Malformed input runs out of events rather than reporting an
 //! error, because a driver that got nonsense back from something claiming to be
-//! S3 has nothing better to do with the reason than say the reply made no sense -
-//! which the missing element already says.
+//! a storage service has nothing better to do with the reason than say the reply
+//! made no sense - which the missing element already says.
 
 const std = @import("std");
-const db = @import("../db.zig");
+const db = @import("db.zig");
 
 const List = db.List;
 

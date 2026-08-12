@@ -8,7 +8,7 @@
 //! * `http.zig` and `net.zig` - the socket, the TLS and HTTP/1.1, shared with
 //!   whatever speaks HTTP next.
 //! * `s3/sigv4.zig` - the signature, against Amazon's own worked examples.
-//! * `s3/xml.zig` - a pull parser for the replies.
+//! * `xml.zig` - a pull parser for the replies, shared with the other store.
 //! * `s3/target.zig` - what `s3://key@host:9000/bucket` means, and where the
 //!   credentials come from when it says nothing.
 //!
@@ -37,7 +37,7 @@ const db = @import("db.zig");
 const http = @import("http.zig");
 
 pub const sigv4 = @import("s3/sigv4.zig");
-pub const xml = @import("s3/xml.zig");
+pub const xml = @import("xml.zig");
 pub const address = @import("s3/target.zig");
 
 const List = db.List;

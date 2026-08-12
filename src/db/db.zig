@@ -17,6 +17,7 @@ const mysql = @import("mysql.zig");
 pub const redis = @import("redis.zig");
 pub const kafka = @import("kafka.zig");
 pub const s3 = @import("s3.zig");
+pub const azure = @import("azure.zig");
 pub const rabbit = @import("rabbit.zig");
 
 /// A socket that may have TLS on it, and HTTP over it: what the drivers that
@@ -39,6 +40,7 @@ comptime {
 	_ = redis;
 	_ = kafka;
 	_ = s3;
+	_ = azure;
 	_ = rabbit;
 	_ = http;
 	_ = sigv4;
@@ -164,6 +166,7 @@ pub const Rows = union(enum) {
 	redis: redis.Rows,
 	kafka: kafka.Rows,
 	s3: s3.Rows,
+	azure: azure.Rows,
 	rabbit: rabbit.Rows,
 
 	pub fn next(self: *Rows) Error!bool {
@@ -235,6 +238,7 @@ pub const Db = union(enum) {
 	redis: *redis.Db,
 	kafka: *kafka.Db,
 	s3: *s3.Db,
+	azure: *azure.Db,
 	rabbit: *rabbit.Db,
 
 	/// Open whatever the target describes: a file path, or a URL like
@@ -245,6 +249,9 @@ pub const Db = union(enum) {
 		}
 		if (s3.owns(target)) {
 			return .{ .s3 = try s3.Db.open(allocator, target, report) };
+		}
+		if (azure.owns(target)) {
+			return .{ .azure = try azure.Db.open(allocator, target, report) };
 		}
 		if (rabbit.owns(target)) {
 			return .{ .rabbit = try rabbit.Db.open(allocator, target, report) };
@@ -527,6 +534,7 @@ pub const Ddl = union(enum) {
 	redis: redis.Ddl,
 	kafka: kafka.Ddl,
 	s3: s3.Ddl,
+	azure: azure.Ddl,
 	rabbit: rabbit.Ddl,
 
 	pub fn createTable(self: Ddl, out: *List, a: std.mem.Allocator, table: Table, cols: []const Column, keys: []const ForeignKey) !void {

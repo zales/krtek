@@ -22,6 +22,7 @@ const usage =
 	\\       krtek kafka+ssl://user@host:port?mechanism=SCRAM-SHA-256
 	\\       krtek s3://bucket
 	\\       krtek s3+http://key:secret@localhost:9000/bucket
+	\\       krtek azure://account:key@container
 	\\       krtek rabbit://guest@host:15672/vhost
 	\\       krtek "host=... dbname=... user=..."
 	\\

@@ -166,7 +166,7 @@ fn connections(app: *App, size: Size, rows: usize) void {
 		line += 1;
 		screen.moveTo(line, left);
 		screen.style(.{ .fg = C.faint });
-		_ = write(app, "    A file path opens SQLite; postgres://, mysql://, redis://, kafka://, s3:// and rabbit:// the rest.", width);
+		_ = write(app, "    A file path opens SQLite; postgres://, mysql://, redis://, kafka://, s3://, azure:// and rabbit:// the rest.", width);
 		line += 1;
 		screen.moveTo(line, left);
 		screen.style(.{ .fg = C.faint });

@@ -646,6 +646,18 @@ pub const App = struct {
 				try form.note("goes in the path there. The secret key is the password below, and an");
 				try form.note("empty access key means ~/.aws and AWS_ACCESS_KEY_ID are looked at.");
 			},
+			.azure => {
+				try form.text("account", shape.user, 24);
+				try form.text("container", shape.name, 24);
+				try form.text("endpoint", shape.host, 24);
+				try form.text("port", shape.port, 6);
+				form.sameLine();
+				try form.toggle("TLS", shape.tls);
+				form.sameLine();
+				try form.note("no endpoint means Azure itself; one means Azurite or a proxy, and");
+				try form.note("the account goes in the path there. The account key is the password");
+				try form.note("below - the long base64 one from the portal, not the connection string.");
+			},
 			.rabbit => {
 				try form.text("host", shape.host, 24);
 				try form.text("port", shape.port, 6);

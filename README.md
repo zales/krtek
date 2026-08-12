@@ -4,8 +4,8 @@
 
 A database manager for the terminal, written in Zig: what a graphical client
 does - browse, edit, alter, dump, import - on a text screen, and quicker, because
-everything is a key press. **SQLite, PostgreSQL, MySQL/MariaDB, Redis, Kafka, S3
-and RabbitMQ**, behind one interface.
+everything is a key press. **SQLite, PostgreSQL, MySQL/MariaDB, Redis, Kafka, S3,
+Azure Blob and RabbitMQ**, behind one interface.
 
 *Krtek* is Czech for a mole: a small thing that digs through what is underneath
 and comes back up with what it found.
@@ -51,8 +51,8 @@ architectures. The `.deb` installs the binary, the man page and the copyright, a
 **Depends on nothing at all**, so it goes on any Debian or Ubuntu of any age.
 
 **It needs nothing installed.** SQLite, libpq, the MariaDB connector and OpenSSL
-are linked into the binary, and Redis, Kafka, S3 and RabbitMQ are spoken
-directly. The Linux
+are linked into the binary, and Redis, Kafka, S3, Azure Blob and RabbitMQ are
+spoken directly. The Linux
 builds are static against musl and run on any distribution - checked on Debian with nothing
 installed at all; the macOS builds leave only Apple's own libraries dynamic. That
 is `-Dstatic`.
@@ -69,6 +69,7 @@ zig build -Doptimize=ReleaseSafe
 ./zig-out/bin/krtek kafka://host:9092
 ./zig-out/bin/krtek s3://bucket
 ./zig-out/bin/krtek s3+http://key:secret@localhost:9000/bucket
+./zig-out/bin/krtek azure://account:key@container
 ./zig-out/bin/krtek rabbit://guest@host:15672/vhost
 ```
 
@@ -321,8 +322,47 @@ the string to sign are functions of their own, checked against Amazon's own work
 examples byte for byte, including a presigned URL: see
 [src/db/s3/sigv4.zig](src/db/s3/sigv4.zig).
 
-## RabbitMQ
+## Azure Blob
 
+The same shape as S3, because the service has the same shape: a container is a
+table, a blob is a row, with `name`, `size`, `modified`, `etag`, `type` and
+`tier` for columns. Names come back sorted, a `WHERE name LIKE 'a/b%'` is the
+listing's own prefix, and paging is by marker, which only goes forwards - so the
+markers are kept and going back a page costs nothing. The console is `CONTAINERS`,
+`LS`, `GET`, `HEAD`, `PUT`, `DEL`.
+
+**Three ways to write a target, because there are three things people have to
+hand:**
+
+```sh
+krtek "azure://mystorage:key@photos"                      # the account's own endpoint
+krtek "azure+http://devstoreaccount1:key@127.0.0.1:10000/photos"   # Azurite, or a proxy
+krtek "DefaultEndpointsProtocol=https;AccountName=…;AccountKey=…;EndpointSuffix=core.windows.net"
+```
+
+That last one is what the portal shows and what Azurite prints on startup, so it
+is taken as a target rather than made into homework; `;Container=photos` names
+one, and without it every container the key can see is a table. The key can also
+be left out of the target and typed as the password, which is where the keychain
+takes it, or found in `AZURE_STORAGE_KEY` and `AZURE_STORAGE_CONNECTION_STRING`.
+A shared access signature works instead of a key, and then nothing is signed at
+all: the token is the whole of it.
+
+**Shared Key is written out**, and it is wrong in the same places S3's signature
+is - none of them cryptographic. The account key is base64 and has to be
+*decoded* before it is used, the account appears twice in the resource line when
+it is in the path (which is what the emulator does), and a body of nothing is
+signed as an empty slot rather than as a zero while the `Content-Length: 0`
+header still has to be sent. Every one of those is a 403 with no explanation, and
+every one of them has a test - against signatures computed outside this program,
+and against the emulator itself.
+
+Google Cloud Storage is **not** a driver here: it has an S3-compatible XML API,
+so `s3://key:secret@storage.googleapis.com/bucket` with HMAC keys is the shape
+that should work. It is untested - there was no account to try it against - so
+that is a suggestion rather than a claim.
+
+## RabbitMQ
 **Reading a queue is destructive, so this driver does not read queues.** AMQP has
 no peek: `basic.get` takes the message off, and putting it back with
 `nack requeue=true` changes the order and marks it redelivered. A queue is not a
@@ -550,7 +590,10 @@ permanent.
 | `src/db/net.zig` | a socket with TLS on it, shared by the drivers that speak their own protocol |
 | `src/db/http.zig` | HTTP/1.1 over that socket: keep-alive, chunked, and a ceiling |
 | `src/db/s3.zig` | S3: buckets as tables, listing by continuation token |
-| `src/db/s3/` | the signature, the XML and the target - again, no connection in any of them |
+| `src/db/s3/` | the signature and the target - again, no connection in either of them |
+| `src/db/xml.zig` | just enough XML for what an object store answers |
+| `src/db/azure.zig` | Azure Blob: the same shape, a different signature |
+| `src/db/azure/` | Shared Key, and the three ways to write a target |
 | `src/db/rabbit.zig` | RabbitMQ: the topology as tables, over the management API |
 | `src/db/rabbit/` | which endpoint each table is, where its columns live in the JSON, and the target |
 | `packaging/` | the `.deb` and the Homebrew formula |
@@ -646,6 +689,18 @@ all - has to say what is wrong rather than a number.
 zig build && ./tests/s3.sh
 ```
 
+[tests/azure.sh](tests/azure.sh) does it for Azure Blob against Azurite,
+Microsoft's own emulator - which is the better test for the same reason MinIO is:
+it keeps the account in the *path*, which is what a driver written only against
+Azure gets wrong. The account and key in that script are not secrets; they are
+the same on every machine that has ever run the emulator, which is what makes it
+reproducible. It seeds itself with a signature of its own making, so the seeding
+does not depend on the thing being tested.
+
+```sh
+zig build && ./tests/azure.sh
+```
+
 [tests/rabbit.sh](tests/rabbit.sh) brings up a broker with its management plugin,
 declares a topology with a queue whose name has a space in it - which is where an
 unescaped vhost or name shows up as a 404 - and checks the listings, the counts
@@ -712,6 +767,12 @@ with `psql` doing the same.
   acking somebody else's delivery, no shovel or federation management - and a
   broker without the management plugin cannot be opened, because that plugin is
   the whole protocol here.
+
+* **Azure Blob has no link and no upload either.** A link needs a shared access
+  signature, which is a signature of its own and is not written yet; a big blob
+  needs blocks, which `PUT` does not do. Snapshots, versions, leases, the change
+  feed and anything Data Lake adds are not there: a listing shows what a listing
+  gives.
 
 ## Licence
 

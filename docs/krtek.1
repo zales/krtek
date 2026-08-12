@@ -29,6 +29,9 @@ krtek \- a database manager for the terminal
 .RI s3+http://key:secret@localhost:9000/bucket
 .br
 .B krtek
+.RI azure://account:key@container
+.br
+.B krtek
 .RI rabbit://guest@host:15672/vhost
 .br
 .B krtek
@@ -42,9 +45,9 @@ krtek \- a database manager for the terminal
 .SH DESCRIPTION
 .B krtek
 browses, edits, alters, dumps and imports a database on a text screen. It speaks
-SQLite, PostgreSQL, MySQL/MariaDB, Redis, Kafka, S3 and RabbitMQ behind one
-interface, and needs nothing installed: the client libraries are linked into the
-binary, and Redis, Kafka, S3 and RabbitMQ are spoken directly.
+SQLite, PostgreSQL, MySQL/MariaDB, Redis, Kafka, S3, Azure Blob and RabbitMQ
+behind one interface, and needs nothing installed: the client libraries are
+linked into the binary, and the rest are spoken directly.
 .PP
 A Kafka topic is a table of
 .IR partition ", " offset ", " timestamp ", " key ", " value " and " headers .
@@ -65,6 +68,15 @@ in that order. A target that names a key and no secret is asked for the secret,
 which is kept wherever that connection keeps its password. Anything that speaks
 S3 works:
 .IR s3+http://key:secret@localhost:9000/bucket .
+.PP
+Azure Blob is the same shape with a signature of its own: a container is a table
+and a blob is a row. A target is
+.IR azure://account:key@container ,
+an endpoint of its own for the emulator or a proxy, or the connection string the
+portal hands out, pasted as it stands. The account key can be typed as the
+password instead, or left in
+.BR AZURE_STORAGE_KEY ;
+a shared access signature works in place of one.
 .PP
 RabbitMQ is reached through its management API, and what is a table is the
 topology:

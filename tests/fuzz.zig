@@ -29,7 +29,7 @@
 const std = @import("std");
 const db = @import("db");
 
-const Target = enum { snappy, lz4, gzip, zstd, records, resp, http, listing, management };
+const Target = enum { snappy, lz4, gzip, zstd, records, resp, http, listing, blobs, management };
 
 /// What one input may allocate: comfortably more than any parser needs for a real
 /// batch, and far less than a machine has.
@@ -117,6 +117,7 @@ fn run(gpa: std.mem.Allocator, target: Target, input: []const u8) !void {
 			_ = try db.http.readResponse(a, source.source(), "GET", 1 << 20);
 		},
 		.listing => _ = try db.s3.parseListing(a, input),
+		.blobs => _ = try db.azure.parseListing(a, input),
 		// The JSON is Zig's to parse; what is ours is the walk over it, the base64
 		// in a message body and the flattening of whatever shape came back.
 		.management => {
@@ -224,6 +225,14 @@ fn corpusFor(target: Target) []const []const u8 {
 				"</ListBucketResult>",
 			"<Error><Code>NoSuchBucket</Code><Message>nope</Message></Error>",
 			"<ListAllMyBucketsResult><Buckets><Bucket><Name>photos</Name></Bucket></Buckets></ListAllMyBucketsResult>",
+		},
+		.blobs => &.{
+			"<EnumerationResults ContainerName=\"photos\"><Blobs><Blob><Name>a b.txt</Name><Properties>" ++
+				"<Last-Modified>Wed, 12 Aug 2026 17:16:36 GMT</Last-Modified><Etag>0x8D</Etag>" ++
+				"<Content-Length>9</Content-Length><BlobType>BlockBlob</BlobType><AccessTier>Hot</AccessTier>" ++
+				"</Properties></Blob></Blobs><NextMarker>2!76!MDAw</NextMarker></EnumerationResults>",
+			"<EnumerationResults><Containers><Container><Name>photos</Name></Container></Containers></EnumerationResults>",
+			"<Error><Code>BlobNotFound</Code><Message>nope</Message></Error>",
 		},
 		.management => &.{
 			"{\"items\":[{\"name\":\"orders\",\"messages\":12,\"durable\":true,\"arguments\":{}}]," ++

@@ -110,7 +110,10 @@ pub fn parse(arena: std.mem.Allocator, target: []const u8) !Parts {
 		}
 	}
 
-	if (std.mem.lastIndexOfScalar(u8, authorityOf(rest), '@')) |at| {
+	// The credentials end at the *last* at sign rather than at the first slash: a
+	// secret key is base64 and holds slashes, and no bucket name may hold an at
+	// sign.
+	if (std.mem.lastIndexOfScalar(u8, rest, '@')) |at| {
 		const userinfo = rest[0..at];
 		rest = rest[at + 1 ..];
 		if (std.mem.indexOfScalar(u8, userinfo, ':')) |colon| {
@@ -173,13 +176,6 @@ pub fn parse(arena: std.mem.Allocator, target: []const u8) !Parts {
 	// the classic MinIO afternoon, so the guess follows from who is answering.
 	self.path_style = style_given orelse !isAmazon(self.endpoint);
 	return self;
-}
-
-/// Everything up to the first slash: an `@` after it belongs to a key, not to a
-/// user, and a bucket may well have one in its name.
-fn authorityOf(rest: []const u8) []const u8 {
-	const slash = std.mem.indexOfScalar(u8, rest, '/') orelse return rest;
-	return rest[0..slash];
 }
 
 fn firstSegment(path: []const u8) []const u8 {
