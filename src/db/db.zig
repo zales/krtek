@@ -16,6 +16,14 @@ pub const postgres = @import("postgres.zig");
 const mysql = @import("mysql.zig");
 pub const redis = @import("redis.zig");
 pub const kafka = @import("kafka.zig");
+pub const s3 = @import("s3.zig");
+pub const rabbit = @import("rabbit.zig");
+
+/// A socket that may have TLS on it, and HTTP over it: what the drivers that
+/// speak their own protocol share.
+pub const net = @import("net.zig");
+pub const http = @import("http.zig");
+pub const sigv4 = @import("s3/sigv4.zig");
 
 /// What the interface asks for, as a structure: see the file for why.
 pub const ask = @import("ask.zig");
@@ -30,6 +38,10 @@ comptime {
 	_ = mysql;
 	_ = redis;
 	_ = kafka;
+	_ = s3;
+	_ = rabbit;
+	_ = http;
+	_ = sigv4;
 }
 
 pub const Error = error{ Driver, OutOfMemory };
@@ -132,6 +144,10 @@ pub const Caps = struct {
 	/// the user writes in the editor is passed to the engine as its own kind of
 	/// command - which turns the editor into a console for it.
 	speaks_sql: bool = true,
+	/// A dump can hold this engine's rows. False where a row only *names* bytes
+	/// kept elsewhere: an S3 listing without the objects is a list, and replaying
+	/// it would put empty objects where the data was.
+	dumps_rows: bool = true,
 };
 
 /// One statement out of a batch, with the text the user wrote.
@@ -147,6 +163,8 @@ pub const Rows = union(enum) {
 	mysql: mysql.Rows,
 	redis: redis.Rows,
 	kafka: kafka.Rows,
+	s3: s3.Rows,
+	rabbit: rabbit.Rows,
 
 	pub fn next(self: *Rows) Error!bool {
 		switch (self.*) {
@@ -216,12 +234,20 @@ pub const Db = union(enum) {
 	mysql: *mysql.Db,
 	redis: *redis.Db,
 	kafka: *kafka.Db,
+	s3: *s3.Db,
+	rabbit: *rabbit.Db,
 
 	/// Open whatever the target describes: a file path, or a URL like
 	/// postgres://user:password@host:port/database.
 	pub fn open(allocator: std.mem.Allocator, target: []const u8, report: *std.ArrayListUnmanaged(u8)) !Db {
 		if (kafka.owns(target)) {
 			return .{ .kafka = try kafka.Db.open(allocator, target, report) };
+		}
+		if (s3.owns(target)) {
+			return .{ .s3 = try s3.Db.open(allocator, target, report) };
+		}
+		if (rabbit.owns(target)) {
+			return .{ .rabbit = try rabbit.Db.open(allocator, target, report) };
 		}
 		if (redis.owns(target)) {
 			return .{ .redis = try redis.Db.open(allocator, target, report) };
@@ -500,6 +526,8 @@ pub const Ddl = union(enum) {
 	mysql: mysql.Ddl,
 	redis: redis.Ddl,
 	kafka: kafka.Ddl,
+	s3: s3.Ddl,
+	rabbit: rabbit.Ddl,
 
 	pub fn createTable(self: Ddl, out: *List, a: std.mem.Allocator, table: Table, cols: []const Column, keys: []const ForeignKey) !void {
 		switch (self) {

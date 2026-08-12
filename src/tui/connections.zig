@@ -64,6 +64,16 @@ pub const Connection = struct {
 				return "Kafka";
 			}
 		}
+		for ([_][]const u8{ "s3://", "s3+http://", "s3+https://", "s3s://" }) |prefix| {
+			if (std.ascii.startsWithIgnoreCase(self.target, prefix)) {
+				return "S3";
+			}
+		}
+		for ([_][]const u8{ "rabbit://", "rabbitmq://", "rabbit+tls://", "rabbits://", "rabbitmq+tls://", "amqp://", "amqps://" }) |prefix| {
+			if (std.ascii.startsWithIgnoreCase(self.target, prefix)) {
+				return "RabbitMQ";
+			}
+		}
 		if (std.ascii.startsWithIgnoreCase(self.target, "mysql://") or
 			std.ascii.startsWithIgnoreCase(self.target, "mariadb://"))
 		{
@@ -506,6 +516,10 @@ test "the engine is told from the target" {
 	try std.testing.expectEqualStrings("Redis", (Connection{ .name = "a", .target = "redis://h/0" }).engine());
 	try std.testing.expectEqualStrings("Kafka", (Connection{ .name = "a", .target = "kafka://h:9092" }).engine());
 	try std.testing.expectEqualStrings("Kafka", (Connection{ .name = "a", .target = "kafka+ssl://h:9093" }).engine());
+	try std.testing.expectEqualStrings("S3", (Connection{ .name = "a", .target = "s3://photos" }).engine());
+	try std.testing.expectEqualStrings("S3", (Connection{ .name = "a", .target = "s3+http://localhost:9000/photos" }).engine());
+	try std.testing.expectEqualStrings("RabbitMQ", (Connection{ .name = "a", .target = "rabbit://h:15672/" }).engine());
+	try std.testing.expectEqualStrings("RabbitMQ", (Connection{ .name = "a", .target = "amqp://guest@h:5672/%2F" }).engine());
 	try std.testing.expectEqualStrings("MySQL", (Connection{ .name = "a", .target = "mysql://h/d" }).engine());
 	try std.testing.expectEqualStrings("MySQL", (Connection{ .name = "a", .target = "mariadb://h/d" }).engine());
 	try std.testing.expectEqualStrings("PostgreSQL", (Connection{ .name = "a", .target = "postgres://h/d" }).engine());

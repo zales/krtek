@@ -20,6 +20,9 @@ const usage =
 	\\       krtek redis://host:port/index
 	\\       krtek kafka://host:port
 	\\       krtek kafka+ssl://user@host:port?mechanism=SCRAM-SHA-256
+	\\       krtek s3://bucket
+	\\       krtek s3+http://key:secret@localhost:9000/bucket
+	\\       krtek rabbit://guest@host:15672/vhost
 	\\       krtek "host=... dbname=... user=..."
 	\\
 	\\With no argument it opens the list of saved connections.

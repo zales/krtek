@@ -166,7 +166,7 @@ fn connections(app: *App, size: Size, rows: usize) void {
 		line += 1;
 		screen.moveTo(line, left);
 		screen.style(.{ .fg = C.faint });
-		_ = write(app, "    A file path opens SQLite; postgres://, mysql://, redis:// and kafka:// the rest.", width);
+		_ = write(app, "    A file path opens SQLite; postgres://, mysql://, redis://, kafka://, s3:// and rabbit:// the rest.", width);
 		line += 1;
 		screen.moveTo(line, left);
 		screen.style(.{ .fg = C.faint });
@@ -368,10 +368,15 @@ fn grid(app: *App, size: Size, side: usize, rows: usize) void {
 	screen.style(.{ .fg = C.dim });
 	var buf: [160]u8 = undefined;
 	const first: usize = if (app.rows.items.len == 0) 0 else app.page * app.limit + 1;
-	const summary = std.fmt.bufPrint(&buf, "  {d}-{d} of {d}   page {d}/{d}{s}{s}{s}", .{
+	var counted: [24]u8 = undefined;
+	const total = if (app.counted)
+		std.fmt.bufPrint(&counted, "{d}", .{app.total}) catch "?"
+	else
+		"?";
+	const summary = std.fmt.bufPrint(&buf, "  {d}-{d} of {s}   page {d}/{d}{s}{s}{s}", .{
 		first,
 		app.page * app.limit + app.rows.items.len,
-		app.total,
+		total,
 		app.page + 1,
 		app.pages(),
 		if (app.order != null) "   order " else "",

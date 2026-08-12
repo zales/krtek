@@ -154,6 +154,10 @@ pub const App = struct {
 	widths: std.ArrayListUnmanaged(usize) = .empty,
 	rows: std.ArrayListUnmanaged(Row) = .empty,
 	total: i64 = 0,
+	/// Whether `total` is a number at all. An engine that cannot count without
+	/// reading everything - a bucket of a million keys - says so, and `of ?` is
+	/// the honest thing to draw; `of 0` was a lie.
+	counted: bool = true,
 	editable: bool = false,
 
 	page: usize = 0,
@@ -788,10 +792,12 @@ pub const App = struct {
 
 	pub fn reload(self: *App) !void {
 		const table = self.currentTable() orelse return;
-		self.total = if (!self.isFiltered())
-			(self.conn.rowCount(table) orelse 0)
+		const counted = if (!self.isFiltered())
+			self.conn.rowCount(table)
 		else
-			(self.conn.count(self.filtered(table)) orelse 0);
+			self.conn.count(self.filtered(table));
+		self.counted = counted != null;
+		self.total = counted orelse 0;
 
 		const page_count = self.pages();
 		if (self.page >= page_count) {
@@ -1082,6 +1088,11 @@ pub const App = struct {
 	}
 
 	pub fn pages(self: *App) usize {
+		// Without a count there is no last page: there is this one, and another one
+		// if this one filled up.
+		if (!self.counted) {
+			return self.page + 1 + @intFromBool(self.rows.items.len >= self.limit);
+		}
 		return @max(1, divCeil(@intCast(@max(0, self.total)), self.limit));
 	}
 
@@ -1495,6 +1506,15 @@ pub const App = struct {
 		defer arena.deinit();
 		const names = try self.columnsOf(arena.allocator(), table.name);
 		if (names.len == 0) {
+			return;
+		}
+		// Where a row only names bytes kept elsewhere, a file of commands that put
+		// the names back would put empty things where the data was.
+		if (!self.conn.caps().dumps_rows) {
+			try out.print(self.allocator, "-- {s} keeps the bytes, not this file: {s} was listed, not dumped\n", .{
+				self.conn.caps().label,
+				table.name,
+			});
 			return;
 		}
 		if (!self.conn.caps().speaks_sql) {
@@ -2583,8 +2603,13 @@ pub const App = struct {
 		}
 		if (!self.isFiltered()) {
 			self.say("filter cleared", .{});
-		} else {
+		} else if (self.counted) {
 			self.say("{d} row(s) match", .{self.total});
+		} else {
+			self.say("{d} row(s) on this page; {s} cannot count the rest without reading it", .{
+				self.rows.items.len,
+				self.conn.caps().label,
+			});
 		}
 	}
 
@@ -2960,9 +2985,10 @@ pub fn looksNumeric(text: []const u8) bool {
 	return digits != 0;
 }
 
-/// Whether the driver's complaint is about a missing password.
+/// Whether the driver's complaint is about a missing password - or a missing
+/// secret key, which is what S3 calls one.
 fn needsPassword(message: []const u8) bool {
-	for ([_][]const u8{ "password", "authentication" }) |needle| {
+	for ([_][]const u8{ "password", "authentication", "secret key" }) |needle| {
 		if (std.ascii.indexOfIgnoreCase(message, needle) != null) {
 			return true;
 		}

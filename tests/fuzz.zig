@@ -29,7 +29,7 @@
 const std = @import("std");
 const db = @import("db");
 
-const Target = enum { snappy, lz4, gzip, zstd, records, resp };
+const Target = enum { snappy, lz4, gzip, zstd, records, resp, http, listing, management };
 
 /// What one input may allocate: comfortably more than any parser needs for a real
 /// batch, and far less than a machine has.
@@ -110,6 +110,23 @@ fn run(gpa: std.mem.Allocator, target: Target, input: []const u8) !void {
 		.zstd => _ = try db.kafka.decompress(a, .zstd, input),
 		.records => try db.kafka.fuzzBatches(gpa, input),
 		.resp => _ = try db.redis.parseReply(gpa, a, input),
+		// The HTTP reader believes a Content-Length and a chunk size, both of which
+		// come off the wire; the ceiling is what stops it believing them too far.
+		.http => {
+			var source = db.http.Slice{ .text = input, .step = 7 };
+			_ = try db.http.readResponse(a, source.source(), "GET", 1 << 20);
+		},
+		.listing => _ = try db.s3.parseListing(a, input),
+		// The JSON is Zig's to parse; what is ours is the walk over it, the base64
+		// in a message body and the flattening of whatever shape came back.
+		.management => {
+			const answer = try db.rabbit.api.page(a, input);
+			for (answer.items) |item| {
+				_ = try db.rabbit.api.flatten(a, item);
+				_ = try db.rabbit.api.payload(a, item);
+				_ = db.rabbit.api.pick(item, "channel_details.name");
+			}
+		},
 	}
 }
 
@@ -193,6 +210,27 @@ fn corpusFor(target: Target) []const []const u8 {
 			"*2\r\n$1\r\na\r\n$1\r\nb\r\n",
 			"*3\r\n:1\r\n:2\r\n*1\r\n$2\r\nhi\r\n",
 			"%2\r\n$1\r\na\r\n:1\r\n$1\r\nb\r\n:2\r\n",
+		},
+		.http => &.{
+			"HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\nabc",
+			"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabc\r\n0\r\n\r\n",
+			"HTTP/1.1 404 Not Found\r\nx-amz-bucket-region: eu-west-1\r\nContent-Length: 0\r\n\r\n",
+			"HTTP/1.1 204 No Content\r\n\r\n",
+			"HTTP/1.1 500 Oops\r\n\r\nno length at all",
+		},
+		.listing => &.{
+			"<ListBucketResult><IsTruncated>true</IsTruncated><NextContinuationToken>t</NextContinuationToken>" ++
+				"<Contents><Key>a%20b</Key><Size>12</Size><ETag>&quot;x&quot;</ETag><StorageClass>STANDARD</StorageClass></Contents>" ++
+				"</ListBucketResult>",
+			"<Error><Code>NoSuchBucket</Code><Message>nope</Message></Error>",
+			"<ListAllMyBucketsResult><Buckets><Bucket><Name>photos</Name></Bucket></Buckets></ListAllMyBucketsResult>",
+		},
+		.management => &.{
+			"{\"items\":[{\"name\":\"orders\",\"messages\":12,\"durable\":true,\"arguments\":{}}]," ++
+				"\"filtered_count\":1,\"item_count\":1,\"total_count\":1,\"page\":1}",
+			"[{\"payload\":\"AAECAw==\",\"payload_encoding\":\"base64\",\"routing_key\":\"a\",\"properties\":{}}]",
+			"[{\"consumer_tag\":\"ctag\",\"queue\":{\"name\":\"q\"},\"channel_details\":{\"name\":\"c\"}}]",
+			"{\"error\":\"not_found\",\"reason\":\"Object Not Found\"}",
 		},
 	};
 }
