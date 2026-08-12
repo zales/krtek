@@ -11,6 +11,7 @@ comptime {
 	_ = @import("csv.zig");
 	_ = @import("connections.zig");
 	_ = @import("editor.zig");
+	_ = @import("files.zig");
 	_ = @import("fuzzy.zig");
 	_ = @import("input.zig");
 }

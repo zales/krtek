@@ -20,7 +20,7 @@ LONE=/tmp/krtek-sftp-test-lone
 # A home of its own, so the check below reads a known_hosts this script wrote
 # and not the one belonging to whoever is running it.
 HOME_DIR=/tmp/krtek-sftp-test-home
-trap 'docker rm -f "$NAME" >/dev/null 2>&1 || true; rm -rf "$KEY" "$KEY.pub" "$LONE" "$HOME_DIR"' EXIT
+trap 'docker rm -f "$NAME" >/dev/null 2>&1 || true; rm -rf "$KEY" "$KEY.pub" "$LONE" "$HOME_DIR" /tmp/krtek-sftp-test-local' EXIT
 
 BIN=zig-out/bin/krtek
 test -x "$BIN" || { echo "$BIN is not there - zig build first" >&2; exit 1; }
@@ -112,5 +112,55 @@ check "a file is not a directory" \
 	"sftp://foo:heslo@127.0.0.1:$PORT/upload/velky.bin?insecure=1" "is a file, not a directory"
 check "a directory that is not there says so" \
 	"sftp://foo:heslo@127.0.0.1:$PORT/neexistuje?insecure=1" "there is nothing there"
+
+# --- and the file manager, which is the only way the copying is reachable ---
+#
+# Driven through the pty harness rather than called directly, because what is
+# worth checking is that the keys reach the copy and the copy reaches the far
+# end - the parts either side of the transfer are where the mistakes were.
+#
+# The cursor is moved by counting, so each side is arranged to have exactly the
+# entries these counts assume: a check that works because of how a listing
+# happened to sort is a check that fails on the next change.
+LOCAL=/tmp/krtek-sftp-test-local
+rm -rf "$LOCAL"
+mkdir -p "$LOCAL/strom/hloubeji" "$LOCAL/dolu"
+echo ahoj > "$LOCAL/strom/jedna.txt"
+echo nazdar > "$LOCAL/strom/hloubeji/dva.txt"
+
+TARGET="sftp://foo:heslo@127.0.0.1:$PORT/upload?insecure=1"
+
+# Down: the remote 2015 directory onto this machine, with everything in it.
+# On the far side: .. 2015 podadresar, so one step down is 2015.
+out=$(tests/screen.py "$TARGET" \
+	"{sleep}f{sleep}/$LOCAL/dolu{enter}{sleep}{tab}{down}c{sleep}{keep}" 2>/dev/null || true)
+test -f "$LOCAL/dolu/2015/soubor-01.txt" || {
+	printf '%s\n' "$out" >&2
+	fail "a directory comes down whole"
+}
+test "$(cat "$LOCAL/dolu/2015/soubor-12.txt")" = "zaznam 12" || fail "and arrives with what was in it"
+echo "ok: a directory comes down whole, and arrives with what was in it"
+
+# Up: a tree of directories from this machine to the server.
+# On this side: .. dolu strom, so two steps down is strom.
+out=$(tests/screen.py "$TARGET" \
+	"{sleep}f{sleep}/$LOCAL{enter}{sleep}{down}{down}c{sleep}{keep}" 2>/dev/null || true)
+docker exec "$NAME" test -f /home/foo/upload/strom/hloubeji/dva.txt || {
+	printf '%s\n' "$out" >&2
+	fail "a tree goes up whole"
+}
+test "$(docker exec "$NAME" cat /home/foo/upload/strom/hloubeji/dva.txt)" = "nazdar" ||
+	fail "and lands with what was in it"
+echo "ok: a tree goes up whole, and lands with what was in it"
+
+# And removing one on the far side takes what is under it.
+# On the far side now: .. 2015 podadresar strom, so three steps down is strom.
+out=$(tests/screen.py "$TARGET" \
+	"{sleep}f{sleep}{tab}{down}{down}{down}x{sleep}y{enter}{sleep}{keep}" 2>/dev/null || true)
+if docker exec "$NAME" test -e /home/foo/upload/strom; then
+	printf '%s\n' "$out" >&2
+	fail "a tree is removed with everything under it"
+fi
+echo "ok: a tree is removed with everything under it"
 
 echo "all good"

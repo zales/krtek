@@ -12,6 +12,7 @@ const sql_syntax = @import("editor.zig");
 const fuzzy = @import("fuzzy.zig");
 const conns = @import("connections.zig");
 const keychain = @import("keychain.zig");
+const Files = @import("files.zig");
 
 pub const Term = term.Term;
 
@@ -91,7 +92,7 @@ pub const Object = struct {
 	rows: ?i64,
 };
 
-pub const View = enum { grid, structure, messages, help, info, relations, connections };
+pub const View = enum { grid, structure, messages, help, info, relations, connections, files };
 pub const Focus = enum { sidebar, main };
 /// A place on screen, in cells.
 pub const Spot = struct { row: usize, col: usize };
@@ -109,7 +110,7 @@ pub const Palette = struct {
 	at: usize = 0,
 };
 
-pub const PromptKind = enum { command, filter, edit, confirm, password };
+pub const PromptKind = enum { command, filter, edit, confirm, password, new_dir, rename_file, remove_files, go_to };
 
 pub const Prompt = struct {
 	kind: PromptKind,
@@ -211,6 +212,9 @@ pub const App = struct {
 	/// top of it changes, the fields under it are somebody else's.
 	built_engine: conns.Engine = .sqlite,
 	palette: ?Palette = null,
+	/// The two panes, while the file manager is on screen. Null the rest of the
+	/// time: a connection that holds rows has no business keeping one open.
+	files: ?*Files.Manager = null,
 	/// The SQL editor, when it is open. This is where statements are written;
 	/// the one-line prompt only takes the short `:` commands now.
 	editor: ?Editor = null,
@@ -225,7 +229,9 @@ pub const App = struct {
 	/// While a statement is running: when it started, when the spinner was last
 	/// drawn, which frame it is on, and whether the user has asked to stop.
 	run_started: f64 = 0,
-	run_ticked: f64 = 0,
+	/// The same clock for a copy, which is a different kind of long wait.
+	copy_started: f64 = 0,
+	copy_ticked: f64 = 0,	run_ticked: f64 = 0,
 	run_frame: usize = 0,
 	cancelled: bool = false,
 	/// Set once the App sits at its final address. `init` connects while the
@@ -762,6 +768,10 @@ pub const App = struct {
 
 	pub fn deinit(self: *App) void {
 		self.screen.deinit();
+		if (self.files) |open| {
+			open.deinit();
+			self.files = null;
+		}
 		self.deinitConnection();
 		self.freeObjects();
 		self.objects.deinit(self.allocator);
@@ -1418,6 +1428,210 @@ pub const App = struct {
 		self.prompt = .{ .kind = .confirm, .label = " type y to " };
 		try self.prompt.?.buffer.appendSlice(self.allocator, "");
 		self.say("{s}: {s}", .{ verb, statement });
+	}
+
+	// ------------------------------------------------------- the file manager
+
+	/// Open the two panes: this machine on the left, and the connection on the
+	/// right when it is somewhere files live. A database is not, and says so.
+	pub fn openFiles(self: *App) !void {
+		if (self.files != null) {
+			self.view = .files;
+			return;
+		}
+		const far = if (self.connected) self.conn.files() else null;
+		if (far == null) {
+			self.complain("{s} holds rows, not files - this is for SFTP, S3 and Azure", .{self.conn.caps().label});
+			return;
+		}
+		self.files = try Files.Manager.init(self.allocator, far);
+		try self.files.?.open();
+		self.view = .files;
+		self.say("tab switches panes, c copies, ? shows the rest", .{});
+	}
+
+	pub fn closeFiles(self: *App) void {
+		if (self.files) |open| {
+			open.deinit();
+		}
+		self.files = null;
+		self.view = .grid;
+	}
+
+	/// Copy what is chosen in this pane to where the other one is looking.
+	pub fn copyFiles(self: *App) !void {
+		const manager = self.files orelse return;
+		const from = manager.here();
+		const to = manager.there();
+
+		var scratch = std.heap.ArenaAllocator.init(self.allocator);
+		defer scratch.deinit();
+		const arena = scratch.allocator();
+
+		const chosen = try from.chosen(arena);
+		if (chosen.len == 0) {
+			self.complain("nothing to copy", .{});
+			return;
+		}
+
+		self.copy_started = monotonicMs();
+		self.copy_ticked = self.copy_started - 1000;
+		self.cancelled = false;
+		var total = database.store.Tally{};
+		for (chosen) |entry| {
+			const source = try database.store.join(arena, from.where(), entry.name);
+			const target = try database.store.join(arena, to.where(), entry.name);
+			// Into itself is the one mistake here that eats a disk, and it can only
+			// happen when both panes are the same place.
+			if (std.meta.activeTag(from.place) == std.meta.activeTag(to.place) and
+				entry.kind == .dir and database.store.within(source, target))
+			{
+				self.complain("{s} is inside itself - that would not end", .{entry.name});
+				return;
+			}
+			const tally = database.store.copy(arena, from.place, source, to.place, target, .{
+				.context = self,
+				.step = copyStep,
+			}) catch {
+				const why = to.place.message();
+				const from_why = from.place.message();
+				self.complain("{s}: {s}", .{
+					entry.name,
+					if (self.cancelled) "stopped" else if (why.len != 0) why else from_why,
+				});
+				to.reload(self.allocator);
+				return;
+			};
+			total.files += tally.files;
+			total.dirs += tally.dirs;
+			total.bytes += tally.bytes;
+		}
+		to.reload(self.allocator);
+		from.marked.clearRetainingCapacity();
+		var room: [16]u8 = undefined;
+		self.say("copied {d} file{s} - {s}", .{
+			total.files,
+			if (total.files == 1) "" else "s",
+			Files.size(&room, total.bytes),
+		});
+	}
+
+	/// Asked as the bytes move: draws a line and looks for ctrl+c, exactly as a
+	/// long query does.
+	fn copyStep(context: *anyopaque, name: []const u8, done: u64, whole: u64) bool {
+		const self: *App = @ptrCast(@alignCast(context));
+		const now = monotonicMs();
+		if (now - self.copy_ticked < 90) {
+			return !self.cancelled;
+		}
+		self.copy_ticked = now;
+		if (self.screen.interrupted()) {
+			self.cancelled = true;
+		}
+		self.drawCopying(name, done, whole);
+		return !self.cancelled;
+	}
+
+	fn drawCopying(self: *App, name: []const u8, done: u64, whole: u64) void {
+		const size = self.screen.size();
+		var moved: [16]u8 = undefined;
+		var all: [16]u8 = undefined;
+		var line: [256]u8 = undefined;
+		const text = std.fmt.bufPrint(&line, " copying {s} - {s} of {s}   ctrl+c stops it", .{
+			Files.trim(database.store.basename(name), 40),
+			Files.size(&moved, done),
+			Files.size(&all, whole),
+		}) catch return;
+		self.screen.moveTo(size.rows - 2, 0);
+		self.screen.style(.{ .bg = C.bar, .fg = if (self.cancelled) C.warn else C.accent, .bold = true });
+		self.screen.put(text);
+		self.screen.clearToEol();
+		self.screen.reset();
+		self.screen.flush() catch {};
+	}
+
+	/// Remove what is chosen, once it has been asked about. A directory takes
+	/// everything under it, which is why it is asked about at all.
+	pub fn deleteFiles(self: *App) !void {
+		const manager = self.files orelse return;
+		const pane = manager.here();
+		var scratch = std.heap.ArenaAllocator.init(self.allocator);
+		defer scratch.deinit();
+		const arena = scratch.allocator();
+		const chosen = try pane.chosen(arena);
+		if (chosen.len == 0) {
+			self.complain("nothing to remove", .{});
+			return;
+		}
+		var gone: usize = 0;
+		for (chosen) |entry| {
+			const path = try database.store.join(arena, pane.where(), entry.name);
+			database.store.removeAll(arena, pane.place, path, 0) catch {
+				self.complain("{s}: {s}", .{ entry.name, pane.place.message() });
+				pane.reload(self.allocator);
+				return;
+			};
+			gone += 1;
+		}
+		pane.reload(self.allocator);
+		self.say("removed {d}", .{gone});
+	}
+
+	pub fn makeFileDir(self: *App, name: []const u8) !void {
+		const manager = self.files orelse return;
+		const pane = manager.here();
+		var scratch = std.heap.ArenaAllocator.init(self.allocator);
+		defer scratch.deinit();
+		const arena = scratch.allocator();
+		const path = try database.store.join(arena, pane.where(), name);
+		pane.place.makeDir(arena, path) catch {
+			self.complain("{s}", .{pane.place.message()});
+			return;
+		};
+		pane.reload(self.allocator);
+		self.say("created {s}", .{name});
+	}
+
+	/// Walking to a path is fine until it is twelve directories deep, so it can
+	/// be typed as well. `~` is expanded, because a person types one.
+	pub fn goToPath(self: *App, path: []const u8) !void {
+		const manager = self.files orelse return;
+		const pane = manager.here();
+		var scratch = std.heap.ArenaAllocator.init(self.allocator);
+		defer scratch.deinit();
+		const arena = scratch.allocator();
+		const wanted = try database.store.expand(arena, std.mem.trim(u8, path, " \t"));
+		const full = if (wanted.len != 0 and wanted[0] == '/')
+			wanted
+		else
+			try database.store.join(arena, pane.where(), wanted);
+		const what = pane.place.stat(arena, full) catch {
+			self.complain("{s}", .{pane.place.message()});
+			return;
+		};
+		if (what.kind != .dir) {
+			self.complain("{s} is a file", .{full});
+			return;
+		}
+		try pane.goTo(self.allocator, full);
+		pane.reload(self.allocator);
+	}
+
+	pub fn renameFile(self: *App, name: []const u8) !void {
+		const manager = self.files orelse return;
+		const pane = manager.here();
+		const one = pane.current() orelse return;
+		var scratch = std.heap.ArenaAllocator.init(self.allocator);
+		defer scratch.deinit();
+		const arena = scratch.allocator();
+		const from = try database.store.join(arena, pane.where(), one.name);
+		const to = try database.store.join(arena, pane.where(), name);
+		pane.place.rename(arena, from, to) catch {
+			self.complain("{s}", .{pane.place.message()});
+			return;
+		};
+		pane.reload(self.allocator);
+		self.say("renamed to {s}", .{name});
 	}
 
 	pub fn clearPending(self: *App) void {

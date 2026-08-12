@@ -43,6 +43,10 @@ pub fn handle(app: *App, key: Key, size: term.Size) !void {
 		try onConnections(app, key);
 		return;
 	}
+	if (app.view == .files) {
+		try onFiles(app, key);
+		return;
+	}
 	if (app.detail) {
 		// The detail box only closes; navigation would be confusing under it.
 		switch (key) {
@@ -150,6 +154,7 @@ pub const actions = [_]Action{
 	.{ .key = 'L', .label = "list every relation", .also = "objects tables views indexes" },
 	.{ .key = '#', .label = "switch schema", .also = "namespace search path" },
 	.{ .key = 'O', .label = "connections", .also = "open connect database server saved" },
+	.{ .key = 'f', .label = "browse the files", .also = "copy upload download transfer sftp s3 azure manager" },
 	.{ .key = 'm', .label = "messages", .also = "log reports errors" },
 	.{ .key = '?', .label = "help: the whole key map", .also = "keys shortcuts" },
 	.{ .key = ':', .label = "a command", .also = "limit text vacuum analyze check" },
@@ -500,7 +505,12 @@ fn letter(app: *App, point: u21, size: term.Size) !void {
 	_ = size;
 	switch (point) {
 		'q' => app.quit = true,
-		'?' => app.view = if (app.view == .help) .grid else .help,
+		'?' => app.view = if (app.view == .help)
+			// Back to wherever the question was asked from, which is the file
+			// manager when that is what is open.
+			(if (app.files != null) .files else .grid)
+		else
+			.help,
 		'j' => try move(app, 1),
 		'k' => try move(app, -1),
 		'h' => moveColumn(app, -1),
@@ -571,6 +581,7 @@ fn letter(app: *App, point: u21, size: term.Size) !void {
 		'E' => try app.openExportForm(),
 		'M' => try app.openImportForm(),
 		'O' => app.view = .connections,
+		'f' => try app.openFiles(),
 		'#' => try app.openSchemaForm(),
 		'b' => app.view = if (app.view == .info) .grid else .info,
 		'L' => app.view = if (app.view == .relations) .grid else .relations,
@@ -742,6 +753,88 @@ fn edit(app: *App) !void {
 	}
 }
 
+/// The two panes. Everything here acts on the pane the cursor is in, and `tab`
+/// is what moves the cursor to the other one - which is the whole of what makes
+/// copying between two places one keystroke.
+fn onFiles(app: *App, key: Key) !void {
+	const manager = app.files orelse {
+		app.view = .grid;
+		return;
+	};
+	const pane = manager.here();
+	switch (key) {
+		.ctrl => |code| switch (code) {
+			'c' => app.quit = true,
+			'd' => pane.move(10),
+			'u' => pane.move(-10),
+			else => {},
+		},
+		.tab, .back_tab => manager.swap(),
+		.up => pane.move(-1),
+		.down => pane.move(1),
+		.page_up => pane.move(-20),
+		.page_down => pane.move(20),
+		.home => pane.selected = 0,
+		.end => pane.selected = pane.entries.len -| 1,
+		.enter, .right => _ = try manager.enter(),
+		.backspace, .left => try manager.up(),
+		.escape => app.closeFiles(),
+		.char => |point| switch (point) {
+			'q' => app.closeFiles(),
+			'j' => pane.move(1),
+			'k' => pane.move(-1),
+			'l' => _ = try manager.enter(),
+			'h' => try manager.up(),
+			'g' => pane.selected = 0,
+			'G' => pane.selected = pane.entries.len -| 1,
+			' ' => {
+				try pane.toggleMark(app.allocator, pane.selected);
+				pane.move(1);
+			},
+			'c' => try app.copyFiles(),
+			'x' => try askRemove(app),
+			'n' => try ask(app, .new_dir, " new directory: "),
+			'/' => try ask(app, .go_to, " go to: "),
+			'r' => try askRename(app),
+			'R' => {
+				manager.reload();
+				app.say("reloaded", .{});
+			},
+			'?' => app.view = .help,
+			else => {},
+		},
+		else => {},
+	}
+}
+
+/// Removing a tree is the one thing here that cannot be undone, so it says how
+/// much is going before it asks.
+fn askRemove(app: *App) !void {
+	const manager = app.files orelse return;
+	const pane = manager.here();
+	const count = if (pane.marked.items.len != 0) pane.marked.items.len else @as(usize, 1);
+	const one = pane.current() orelse return;
+	if (pane.marked.items.len == 0 and std.mem.eql(u8, one.name, "..")) {
+		return;
+	}
+	try ask(app, .remove_files, " type y to remove: ");
+	if (pane.marked.items.len == 0) {
+		app.say("remove {s}{s}?", .{ one.name, if (one.kind == .dir) " and everything in it" else "" });
+	} else {
+		app.say("remove {d} marked?", .{count});
+	}
+}
+
+fn askRename(app: *App) !void {
+	const manager = app.files orelse return;
+	const one = manager.here().current() orelse return;
+	if (std.mem.eql(u8, one.name, "..")) {
+		return;
+	}
+	try ask(app, .rename_file, " rename to: ");
+	try app.prompt.?.buffer.appendSlice(app.allocator, one.name);
+}
+
 fn ask(app: *App, kind: PromptKind, label: []const u8) !void {
 	if (app.prompt) |*old| {
 		old.buffer.deinit(app.allocator);
@@ -788,6 +881,16 @@ fn typing(app: *App, key: Key) !void {
 				},
 				.command => try app.command(line),
 				.edit => try app.saveCell(line),
+				.new_dir => if (line.len != 0) try app.makeFileDir(line),
+				.go_to => if (line.len != 0) try app.goToPath(line),
+				.rename_file => if (line.len != 0) try app.renameFile(line),
+				.remove_files => {
+					if (line.len != 0 and (line[0] == 'y' or line[0] == 'Y')) {
+						try app.deleteFiles();
+					} else {
+						app.say("left alone", .{});
+					}
+				},
 			}
 		},
 		.backspace => {

@@ -9,6 +9,7 @@ const term = @import("term.zig");
 const input = @import("input.zig");
 const sql_syntax = @import("editor.zig");
 const fuzzy = @import("fuzzy.zig");
+const Files = @import("files.zig");
 
 const App = app_mod.App;
 const C = app_mod.C;
@@ -24,7 +25,9 @@ pub fn frame(app: *App, size: Size) !void {
 	app.type_cursor = null;
 
 	const body_rows = if (size.rows > 3) size.rows - 3 else 1;
-	const side = if (size.cols > SIDEBAR + 20 and app.view != .connections) SIDEBAR else 0;
+	// The file manager takes the whole width: two panes and a sidebar on eighty
+	// columns would leave neither pane a name to show.
+	const side = if (size.cols > SIDEBAR + 20 and app.view != .connections and app.view != .files) SIDEBAR else 0;
 
 	header(app, size);
 	if (app.view == .connections) {
@@ -50,6 +53,7 @@ pub fn frame(app: *App, size: Size) !void {
 		.help => help(app, size, side, body_rows),
 		.info => info(app, size, side, body_rows),
 		.relations => relations(app, size, side, body_rows),
+		.files => files(app, size, body_rows),
 		.connections => {},
 	}
 	if (app.form != null) {
@@ -647,6 +651,115 @@ fn rowsOf(app: *App, left: usize, width: usize, start: usize, rows: usize, sql: 
 	return line;
 }
 
+/// Two panes side by side, each one a place and a path in it. Which pane the
+/// keys go to is shown the same way the grid shows focus, because it is the
+/// same idea: there is exactly one cursor and it is somewhere.
+fn files(app: *App, size: Size, rows: usize) void {
+	const screen = app.screen;
+	const manager = app.files orelse return;
+	// One column between them, and the odd column goes to the left pane.
+	const gap: usize = 1;
+	const right_width = if (size.cols > gap + 4) (size.cols - gap) / 2 else 2;
+	const left_width = size.cols - gap - right_width;
+
+	pane(app, &manager.left, 0, left_width, rows, manager.active == .left);
+	pane(app, &manager.right, left_width + gap, right_width, rows, manager.active == .right);
+
+	// The gap, cleared down the whole height so nothing shows through it.
+	var line: usize = 1;
+	while (line <= rows) : (line += 1) {
+		screen.moveTo(line, left_width);
+		screen.reset();
+		_ = write(app, " ", gap);
+	}
+	screen.reset();
+}
+
+fn pane(app: *App, one: *Files.Pane, left: usize, width: usize, rows: usize, active: bool) void {
+	const screen = app.screen;
+	if (width < 4) {
+		return;
+	}
+
+	// The heading: which place, and where in it. The path matters more than the
+	// name of the place, so it is the end of it that survives a narrow pane.
+	screen.moveTo(1, left);
+	screen.style(.{ .bg = if (active) C.accent else C.bar, .fg = if (active) C.bar else C.dim, .bold = true });
+	var head: [512]u8 = undefined;
+	const title = std.fmt.bufPrint(&head, " {s}:{s}", .{
+		one.place.label(),
+		one.where(),
+	}) catch " ";
+	pad(app, endOf(title, width), width, false);
+
+	const body = if (rows > 2) rows - 2 else 1;
+	one.follow(body);
+
+	var line: usize = 2;
+	var at = one.scroll;
+	while (line < 2 + body) : (line += 1) {
+		screen.moveTo(line, left);
+		if (at >= one.entries.len) {
+			screen.reset();
+			pad(app, "", width, false);
+			at += 1;
+			continue;
+		}
+		const entry = one.entries[at];
+		const on = at == one.selected and active;
+		const marked = one.isMarked(at);
+		screen.style(.{
+			.bg = if (on) C.selected else null,
+			.fg = if (marked) C.warn else if (entry.kind == .dir) C.accent else C.text,
+			.bold = entry.kind == .dir,
+		});
+
+		// The size and the time are fixed width on the right; the name takes what
+		// is left, because the name is what is being looked for.
+		var room: [16]u8 = undefined;
+		var clock: [20]u8 = undefined;
+		const shown_size = if (entry.kind == .dir) "<dir>" else Files.size(&room, entry.size);
+		const shown_when = Files.when(&clock, entry.modified);
+		const right_room = 6 + 1 + @as(usize, if (width > 46) 16 else 0);
+		const name_room = if (width > right_room + 2) width - right_room - 1 else width - 1;
+
+		_ = write(app, if (marked) "*" else " ", 1);
+		pad(app, entry.name, name_room, false);
+		if (width > right_room + 2) {
+			pad(app, shown_size, 6, true);
+			if (width > 46) {
+				_ = write(app, " ", 1);
+				pad(app, shown_when, 16, true);
+			}
+		}
+		at += 1;
+	}
+
+	// The last line of the pane says what is in it, or why it is empty.
+	screen.moveTo(1 + rows - 1, left);
+	screen.style(.{ .bg = C.bar, .fg = if (one.trouble.items.len != 0) C.danger else C.faint });
+	var foot: [256]u8 = undefined;
+	const summary = if (one.trouble.items.len != 0)
+		std.fmt.bufPrint(&foot, " {s}", .{one.trouble.items}) catch " "
+	else if (one.marked.items.len != 0)
+		std.fmt.bufPrint(&foot, " {d} marked of {d}", .{ one.marked.items.len, one.entries.len }) catch " "
+	else
+		std.fmt.bufPrint(&foot, " {d} items", .{one.entries.len}) catch " ";
+	pad(app, endOf(summary, width), width, false);
+	screen.reset();
+}
+
+/// The end of a path rather than the start of it, for when it does not fit:
+/// `/home/zales/very/deep` says more as `very/deep` than as `/home/zal`.
+fn endOf(text: []const u8, width: usize) []const u8 {
+	if (term.width(text) <= width or width < 2) {
+		return text;
+	}
+	var at = text.len -| (width - 1);
+	while (at < text.len and text[at] & 0xC0 == 0x80) : (at += 1) {}
+	return text[at..];
+}
+
 fn messages(app: *App, size: Size, side: usize, rows: usize) void {
 	const screen = app.screen;
 	const left = side;
@@ -736,6 +849,14 @@ const HELP = [_][2][]const u8{
 	.{ "C c r p s", "copy the value, the row, the page, the last SQL" },
 	.{ "O #", "connections, schema" },
 	.{ ":", "export dump limit text open check analyze vacuum q" },
+	.{ "", "FILES: SFTP, S3, AZURE" },
+	.{ "f", "the two panes: this machine on one side, the connection on the other" },
+	.{ "tab", "the other pane, which is where a copy goes" },
+	.{ "enter h l", "into a directory, out of it" },
+	.{ "/", "go to a path" },
+	.{ "space", "mark, and unmark" },
+	.{ "c", "copy to the other pane, directories and all" },
+	.{ "n r x", "new directory, rename, remove" },
 	.{ "", "IN THE SQL EDITOR" },
 	.{ "ctrl+s", "run it" },
 	.{ "tab", "complete a name" },
@@ -1136,6 +1257,7 @@ fn footerHints(app: *App) []const u8 {
 		.help => " ? back   ctrl+k commands",
 		.info => " b back   ctrl+k commands",
 		.relations => " L back   d browse   ctrl+k commands",
+		.files => " tab other pane   enter opens   c copy   space mark   n mkdir   r rename   x remove   q back",
 		.grid => if (app.focus == .sidebar)
 			" enter opens   / filter   c create table   E export   ctrl+k commands   q quit"
 		else
