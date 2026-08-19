@@ -1527,10 +1527,22 @@ pub const App = struct {
 			total.files += tally.files;
 			total.dirs += tally.dirs;
 			total.bytes += tally.bytes;
+			total.refused += tally.refused;
 		}
 		to.reload(self.allocator);
 		from.marked.clearRetainingCapacity();
 		var room: [16]u8 = undefined;
+		if (total.refused != 0) {
+			// A name that could have been written somewhere else is worth saying out
+			// loud, not counting quietly: it means the other end sent something it had
+			// no business sending.
+			self.complain("copied {d} file(s) - {s}, and left {d} with a name that would not stay put", .{
+				total.files,
+				Files.size(&room, total.bytes),
+				total.refused,
+			});
+			return;
+		}
 		self.say("copied {d} file{s} - {s}", .{
 			total.files,
 			if (total.files == 1) "" else "s",

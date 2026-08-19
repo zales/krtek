@@ -87,6 +87,13 @@ pub fn basename(path: []const u8) []const u8 {
 /// itself is the one mistake a file manager can make that eats the disk, so it
 /// is asked about before anything is written.
 pub fn within(outer: []const u8, inner: []const u8) bool {
+	// A `..` anywhere means the text says one thing and the filesystem will do
+	// another, and this comparison is text. Rather than resolve it - which needs to
+	// know about symlinks to be right - a path with one in it is simply not inside
+	// anything.
+	if (climbs(inner)) {
+		return false;
+	}
 	const top = std.mem.trimEnd(u8, outer, "/");
 	if (top.len == 0) {
 		return true;
@@ -95,6 +102,41 @@ pub fn within(outer: []const u8, inner: []const u8) bool {
 		return false;
 	}
 	return inner.len == top.len or inner[top.len] == '/';
+}
+
+/// Whether a path has a `..` as one of its parts. `a..b` and `..hidden` are
+/// ordinary names and do not count.
+pub fn climbs(path: []const u8) bool {
+	var parts = std.mem.splitScalar(u8, path, '/');
+	while (parts.next()) |part| {
+		if (std.mem.eql(u8, part, "..")) {
+			return true;
+		}
+	}
+	return false;
+}
+
+/// Whether a name out of a listing may be joined onto a path.
+///
+/// A listing comes from the other end of a connection, and an S3 key is any string
+/// somebody was allowed to write. A name with a slash in it, or one that is `..`,
+/// moves the write somewhere the user did not choose: downloading a tree from a
+/// server that is not yours could then land a file in /etc. Nothing checked this,
+/// and `within` - which exists for exactly that - was called by nothing but its own
+/// tests.
+pub fn plainName(name: []const u8) bool {
+	if (name.len == 0 or std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, "..")) {
+		return false;
+	}
+	// A slash and a NUL, and nothing else: a backslash is an ordinary character in a
+	// name on the systems this runs on, and refusing it would turn a legitimate
+	// download into a refusal.
+	for (name) |char| {
+		if (char == '/' or char == 0) {
+			return false;
+		}
+	}
+	return true;
 }
 
 /// `~` back to the home directory, because a path typed by a person has one in
@@ -495,6 +537,10 @@ pub const Tally = struct {
 	files: usize = 0,
 	dirs: usize = 0,
 	bytes: u64 = 0,
+	/// Entries whose names were not safe to write, left where they were. Counted
+	/// rather than fatal: one strange name in a listing should not stop a transfer
+	/// of ten thousand files, but it must not pass unmentioned either.
+	refused: usize = 0,
 };
 
 pub const Trouble = struct {
@@ -591,8 +637,20 @@ fn walk(
 
 	const entries = try from.list(here, from_path);
 	for (entries) |entry| {
+		// The name came from the other end. Everything after this point writes to
+		// this machine, so it is checked before it is joined onto anything - and the
+		// result is checked again, which costs nothing and catches a `join` that
+		// learns a new trick.
+		if (!plainName(entry.name)) {
+			tally.refused += 1;
+			continue;
+		}
 		const source = join(here, from_path, entry.name) catch return error.OutOfMemory;
 		const target = join(here, to_path, entry.name) catch return error.OutOfMemory;
+		if (!within(to_path, target)) {
+			tally.refused += 1;
+			continue;
+		}
 		if (entry.kind == .dir) {
 			try walk(arena, from, source, to, target, watcher, tally, depth + 1);
 		} else {
@@ -663,6 +721,40 @@ test "a name is the last part of a path" {
 	try testing.expectEqualStrings("b", basename("/a/b/"));
 	try testing.expectEqualStrings("/", basename("/"));
 	try testing.expectEqualStrings("a", basename("a"));
+}
+
+test "a name out of a listing is not trusted with where it lands" {
+	// What an ordinary listing holds, dots and all.
+	try testing.expect(plainName("notes.txt"));
+	try testing.expect(plainName("..hidden"));
+	try testing.expect(plainName("a..b"));
+	try testing.expect(plainName("what a name"));
+	// And what it must never be allowed to be: a path rather than a name.
+	try testing.expect(!plainName(".."));
+	try testing.expect(!plainName("."));
+	try testing.expect(!plainName(""));
+	try testing.expect(!plainName("../escaped"));
+	try testing.expect(!plainName("/etc/cron.d/escaped"));
+	try testing.expect(!plainName("sub/dir"));
+	// A backslash is a character, not a separator, on a Mac and on Linux.
+	try testing.expect(plainName("back\\slash"));
+	try testing.expect(!plainName("nul\x00byte"));
+}
+
+test "containment sees through a climb, because the filesystem will" {
+	try testing.expect(within("/a", "/a/b/c"));
+	try testing.expect(within("/a", "/a"));
+	try testing.expect(!within("/a", "/b"));
+	// The three that used to pass: the text starts with /a and the write does not
+	// end up there.
+	try testing.expect(!within("/a", "/a/../b"));
+	try testing.expect(!within("/a", "/a/b/../../c"));
+	try testing.expect(!within("/a", "/a/.."));
+	// A name that merely contains dots is not a climb.
+	try testing.expect(within("/a", "/a/..hidden"));
+	try testing.expect(within("/a", "/a/x..y"));
+	try testing.expect(climbs("/a/../b"));
+	try testing.expect(!climbs("/a/..b"));
 }
 
 test "a directory is not copied into itself" {
