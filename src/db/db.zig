@@ -23,6 +23,7 @@ pub const sftp = @import("sftp.zig");
 pub const k8s_yaml = @import("k8s/yaml.zig");
 pub const k8s_exec = @import("k8s/exec.zig");
 pub const k8s_config = @import("k8s/config.zig");
+pub const k8s_api = @import("k8s/api.zig");
 
 /// A socket that may have TLS on it, and HTTP over it: what the drivers that
 /// speak their own protocol share.
@@ -57,6 +58,7 @@ comptime {
 	_ = k8s_yaml;
 	_ = k8s_exec;
 	_ = k8s_config;
+	_ = k8s_api;
 	_ = net;
 	_ = http;
 	_ = ssh;

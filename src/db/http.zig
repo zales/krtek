@@ -79,6 +79,12 @@ pub const Client = struct {
 	/// Whether the certificate has to check out. Off is for MinIO with a
 	/// certificate of its own making, and has to be asked for.
 	verify: bool = true,
+	/// The certificate authority to trust instead of the machine's, and a client
+	/// certificate to offer - both PEM, both borrowed for as long as the client
+	/// lives. A Kubernetes cluster wants one or both; nothing else here does.
+	ca_pem: []const u8 = "",
+	cert_pem: []const u8 = "",
+	key_pem: []const u8 = "",
 	stream: ?net.Stream = null,
 	progress: ?db.Progress = null,
 	/// What went wrong with the last request, for a driver to show.
@@ -150,7 +156,12 @@ pub const Client = struct {
 		stream.setTimeout(net.READ_TIMEOUT_MS);
 		if (self.tls) {
 			self.trouble.clearRetainingCapacity();
-			net.startTls(self.allocator, &stream, self.host, .{ .verify = self.verify }, &self.trouble) catch {
+			net.startTls(self.allocator, &stream, self.host, .{
+				.verify = self.verify,
+				.ca_pem = self.ca_pem,
+				.cert_pem = self.cert_pem,
+				.key_pem = self.key_pem,
+			}, &self.trouble) catch {
 				return error.Gone;
 			};
 		}
