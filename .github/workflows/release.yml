@@ -289,11 +289,26 @@ jobs:
             krtek/bottling/krtek
           ls -l ./*.bottle.*
 
+      # `brew bottle` writes the file under its cache name, which doubles the dash
+      # so it can sit next to a source tarball of the same version without one
+      # overwriting the other. The name Homebrew later asks the root_url for is the
+      # other one in the JSON, and uploading under the cache name is a 404.
       - name: attach it to the release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           version="${{ inputs.tag || github.ref_name }}"
+          python3 - <<'PY'
+          import glob, json, os
+          for path in glob.glob("*.bottle.json"):
+              with open(path) as f:
+                  root = json.load(f)
+              for formula in root.values():
+                  for said in formula.get("bottle", {}).get("tags", {}).values():
+                      if said["local_filename"] != said["filename"]:
+                          os.replace(said["local_filename"], said["filename"])
+                          print(said["local_filename"], "->", said["filename"])
+          PY
           gh release upload "$version" --repo "$GITHUB_REPOSITORY" --clobber ./*.bottle.tar.gz
 
       # The JSON says which tag and which checksum, which is what the formula has
