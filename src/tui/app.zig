@@ -171,6 +171,20 @@ pub const App = struct {
 	limit: usize = 200,
 	order: ?[]const u8 = null,
 	descending: bool = false,
+	/// How often the grid reads its table again, in milliseconds, or 0 when it
+	/// does not. Following is what makes a log readable: the page stays on the
+	/// end of the table and records appear under the cursor as they are written,
+	/// which for Kafka is the difference between a topic and a transcript of one.
+	follow_ms: u64 = 0,
+	/// The interval the follow key turns on, and what `:follow` changes.
+	follow_every: u64 = 2000,
+	/// While following, the window is counted from the end of the table instead
+	/// of from a page boundary: the newest `limit` rows, always that many of them.
+	/// Paged, the row that fills a page up would appear alone at the top of the
+	/// next one - everything it followed pushed off the screen at exactly the
+	/// moment somebody watching wants the context. Worked out by every reload, so
+	/// it is never left over from an older one.
+	tail_from: ?usize = null,
 
 	cursor_row: usize = 0,
 	cursor_col: usize = 0,
@@ -297,6 +311,8 @@ pub const App = struct {
 		if (self.connected) {
 			self.conn.close();
 		}
+		// Whatever was being followed belongs to the connection being replaced.
+		self.setFollow(0);
 		self.conn = opened;
 		self.connected = true;
 		if (self.watch_armed) {
@@ -993,7 +1009,17 @@ pub const App = struct {
 		self.total = counted orelse 0;
 
 		const page_count = self.pages();
-		if (self.page >= page_count) {
+		// Following means staying where new rows land, and that moves as the table
+		// grows: the end of it, or the beginning when the order is reversed and the
+		// end is drawn at the top. An engine that cannot count has no end to go to,
+		// so its view is left where it is.
+		self.tail_from = null;
+		if (self.follow_ms != 0 and self.counted) {
+			self.page = if (self.descending) 0 else page_count - 1;
+			if (!self.descending) {
+				self.tail_from = @intCast(@max(0, self.total - @as(i64, @intCast(self.limit))));
+			}
+		} else if (self.page >= page_count) {
 			self.page = page_count - 1;
 		}
 
@@ -1013,7 +1039,7 @@ pub const App = struct {
 			request.descending = self.descending;
 		}
 		request.limit = self.limit;
-		request.offset = self.page * self.limit;
+		request.offset = self.firstRow() - 1;
 
 		self.grid_failed = false;
 		self.loadSelect(request, table, hidden_key) catch {
@@ -1025,7 +1051,43 @@ pub const App = struct {
 			self.complain("{s}", .{self.conn.message()});
 			return;
 		};
+		if (self.follow_ms != 0) {
+			// On the newest row, so the grid scrolls to it and the record just
+			// written is the one under the cursor.
+			self.cursor_row = if (self.descending) 0 else self.rows.items.len -| 1;
+		}
 		self.setTitle("{s}", .{table.name});
+	}
+
+	/// Read the open table every `ms` milliseconds, or stop with 0. The timer
+	/// itself lives in the screen, because waking the key loop is the one thing
+	/// only the screen can do.
+	pub fn setFollow(self: *App, ms: u64) void {
+		self.follow_ms = ms;
+		self.screen.follow(ms);
+		if (ms != 0 and !self.screen.following()) {
+			self.follow_ms = 0;
+			self.complain("there is no timer to follow with", .{});
+		}
+	}
+
+	/// A tick from that timer: read the table again and stay at the end of it.
+	/// Nothing is said on the status line - a message every two seconds would bury
+	/// whatever is already there - and anything modal is left alone, because a
+	/// grid that reloads under a half-typed form is worse than one that waits.
+	pub fn followTick(self: *App) void {
+		if (self.follow_ms == 0 or self.view != .grid or !self.hasTable()) {
+			return;
+		}
+		if (self.prompt != null or self.form != null or self.editor != null or self.files != null or self.detail) {
+			return;
+		}
+		self.reload() catch {};
+		// A table that cannot be read now will not read any better in two seconds,
+		// and reload has already said why: stop rather than say it again forever.
+		if (self.grid_failed) {
+			self.setFollow(0);
+		}
 	}
 
 	/// The table as the grid is looking at it: whatever the filter row says, and
@@ -1293,6 +1355,12 @@ pub const App = struct {
 		if (self.cursor_col >= self.cols.items.len) {
 			self.cursor_col = if (self.cols.items.len == 0) 0 else self.cols.items.len - 1;
 		}
+	}
+
+	/// Which row of the table the grid starts at, counting from 1. Normally the
+	/// top of the page; the tail of it while following.
+	pub fn firstRow(self: *App) usize {
+		return (self.tail_from orelse self.page * self.limit) + 1;
 	}
 
 	pub fn pages(self: *App) usize {
@@ -1716,6 +1784,8 @@ pub const App = struct {
 			self.limit = @max(1, @min(100000, value));
 			self.reload() catch {};
 			self.say("{d} rows per page", .{self.limit});
+		} else if (std.mem.eql(u8, verb, "follow")) {
+			try self.followCommand(argument);
 		} else if (std.mem.eql(u8, verb, "export")) {
 			try self.exportRows(argument);
 		} else if (std.mem.eql(u8, verb, "dump")) {
@@ -1760,8 +1830,48 @@ pub const App = struct {
 			};
 			self.say("database vacuumed", .{});
 		} else {
-			self.complain("unknown :{s} - try :export, :dump, :limit, :text, :open, :check, :analyze, :vacuum, :q", .{verb});
+			self.complain("unknown :{s} - try :export, :dump, :limit, :text, :follow, :open, :check, :analyze, :vacuum, :q", .{verb});
 		}
+	}
+
+	/// `:follow 0.5`, `:follow 5`, `:follow off`. The number is seconds, because
+	/// that is how anybody watching a topic thinks about it, and it is kept when
+	/// the following is switched off so the key turns it back on the same way.
+	fn followCommand(self: *App, argument: []const u8) !void {
+		if (argument.len == 0 or std.mem.eql(u8, argument, "off")) {
+			self.setFollow(0);
+			self.say("no longer following", .{});
+			return;
+		}
+		const seconds = std.fmt.parseFloat(f64, argument) catch {
+			self.complain(":follow takes seconds - :follow 2, :follow 0.5, :follow off", .{});
+			return;
+		};
+		if (!(seconds > 0)) {
+			self.setFollow(0);
+			self.say("no longer following", .{});
+			return;
+		}
+		self.follow_every = @intFromFloat(@max(200, @min(3_600_000, seconds * 1000)));
+		try self.startFollowing();
+	}
+
+	/// Turn the following on at the interval last asked for, and jump to the end
+	/// of the table straight away rather than after the first tick.
+	pub fn startFollowing(self: *App) !void {
+		if (!self.hasTable()) {
+			self.complain("open a table to follow", .{});
+			return;
+		}
+		self.setFollow(self.follow_every);
+		if (self.follow_ms == 0) {
+			return;
+		}
+		try self.reload();
+		self.say("following {s}, every {d:.1}s", .{
+			self.title.items,
+			@as(f64, @floatFromInt(self.follow_every)) / 1000.0,
+		});
 	}
 
 	/// Write the loaded rows as a delimited file: "csv <path>" or "tsv <path>".

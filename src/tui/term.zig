@@ -49,6 +49,10 @@ pub const Key = union(enum) {
 	page_up,
 	page_down,
 	mouse: Mouse,
+	/// Not a key at all: the follow timer asking for the view to be looked at
+	/// again. It arrives through the same queue, so the loop that handles keys
+	/// handles this too and nothing else had to learn about time.
+	tick,
 	unknown,
 };
 
@@ -65,6 +69,9 @@ const Event = union(enum) {
 	color_scheme: vaxis.Color.Scheme,
 	/// The answer to asking what the background colour is.
 	color_report: vaxis.Color.Report,
+	/// Posted by the follow timer, which is the only event here the terminal
+	/// did not send.
+	tick,
 };
 
 pub const Scheme = enum { dark, light };
@@ -123,6 +130,7 @@ fn isDark(rgb: [3]u8) bool {
 
 pub const Term = struct {
 	allocator: std.mem.Allocator,
+	io: std.Io,
 	tty: vaxis.Tty,
 	vx: vaxis.Vaxis,
 	loop: vaxis.Loop(Event),
@@ -150,6 +158,14 @@ pub const Term = struct {
 	/// from, so a redraw places it again instead of sending it again.
 	picture: ?vaxis.Image = null,
 	picture_hash: u64 = 0,
+	/// The follow timer, while the grid is watching a table: a task of its own
+	/// that sleeps and posts a tick. Null the rest of the time, so an app that is
+	/// only being read still blocks on the terminal and wakes for nothing.
+	ticker: ?std.Io.Future(void) = null,
+	/// How long that task sleeps between ticks. Written only while there is no
+	/// task to read it - `follow` stops the old one before it sets this - so the
+	/// two never touch it at once.
+	tick_ms: u64 = 0,
 
 	pub fn init(allocator: std.mem.Allocator, io: std.Io, env: *std.process.Environ.Map) !*Term {
 		const self = try allocator.create(Term);
@@ -157,6 +173,7 @@ pub const Term = struct {
 		const buffer = try allocator.alloc(u8, 64 * 1024);
 		self.* = .{
 			.allocator = allocator,
+			.io = io,
 			.buffer = buffer,
 			.tty = try vaxis.Tty.init(io, buffer),
 			.vx = undefined,
@@ -188,6 +205,7 @@ pub const Term = struct {
 	}
 
 	pub fn deinit(self: *Term) void {
+		self.follow(0);
 		self.forgetImage();
 		self.frame.deinit();
 		self.loop.stop();
@@ -331,12 +349,51 @@ pub const Term = struct {
 		self.vx.screen.cursor_vis = false;
 	}
 
+	// --- following ---
+
+	/// Deliver a `tick` every `ms` milliseconds, or stop with 0. Nothing is
+	/// polled and the wait for a key still blocks: the ticks come from a task of
+	/// its own that sleeps and pushes an event into the same queue the terminal
+	/// is read into, so one wait covers both.
+	pub fn follow(self: *Term, ms: u64) void {
+		if (self.ticker) |*running| {
+			running.cancel(self.io);
+			self.ticker = null;
+		}
+		self.tick_ms = ms;
+		if (ms == 0) {
+			return;
+		}
+		// A timer that cannot be started is not worth failing over: the view
+		// simply does not follow, and the key that turns it on says so.
+		self.ticker = self.io.concurrent(Term.tickRun, .{self}) catch null;
+	}
+
+	/// Whether ticks are being delivered.
+	pub fn following(self: *Term) bool {
+		return self.ticker != null;
+	}
+
+	fn tickRun(self: *Term) void {
+		while (true) {
+			// The sleep is the cancellation point: `follow(0)` ends the task here.
+			self.io.sleep(.fromMilliseconds(@intCast(self.tick_ms)), .awake) catch return;
+			// Dropped when the queue is full, because a tick is only ever a request
+			// to look again and the app is plainly already behind on the last one.
+			_ = self.loop.tryPostEvent(.tick) catch return;
+		}
+	}
+
 	// --- input ---
 
 	/// Wait for something to happen, then take whatever else is already queued.
 	pub fn keys(self: *Term, out: *std.ArrayListUnmanaged(Key)) !void {
 		out.clearRetainingCapacity();
 		var first = true;
+		// Ticks are coalesced: a reload that took longer than the interval leaves
+		// several waiting, and doing them all in a row would only fall further
+		// behind. One request to look again is the same as five.
+		var ticked = false;
 		while (true) {
 			const event = if (first) try self.loop.nextEvent() else (try self.loop.tryEvent()) orelse break;
 			first = false;
@@ -391,6 +448,10 @@ pub const Term = struct {
 					self.paste_after_cr = false;
 				},
 				.paste_end => self.pasting = false,
+				.tick => if (!ticked) {
+					ticked = true;
+					try out.append(self.allocator, .tick);
+				},
 				else => {},
 			}
 		}

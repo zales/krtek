@@ -209,6 +209,16 @@ that is a `Produce`, and the partition is chosen with the same murmur2 hash Kafk
 own clients use, so a key written from here lands where it would have landed from
 anywhere else.
 
+**A topic can be watched rather than asked about.** `R` follows the open one:
+every couple of seconds - `:follow 0.5` or `:follow 10` for another interval - the
+records are read again and the view stays on the newest `limit` of them, counted
+from the end of the log rather than from a page boundary, so a record that arrives
+appears under the cursor with everything before it still on the screen instead of
+alone at the top of a fresh page. Turning a page says the watching is over, which
+is what turning a page means. It costs one `ListOffsets` and one `Fetch` a tick,
+and nothing was added to the driver to do it: the end of a topic is a page number
+like any other.
+
 The structure view shows the partitions with their leader, replicas, in-sync
 replicas and offset range, and the definition is what `DescribeConfigs` says, with
 the values inherited from the broker commented out so the ones actually set on the
@@ -576,7 +586,9 @@ wants one.
 **Browsing.** Object list with row counts and a filter (PostgreSQL's estimate is
 replaced with an exact count), a data grid with paging,
 sorting, horizontal scrolling, a detail box for the whole value, and a structure
-view with columns, indexes, foreign keys and the `CREATE` statement. Column
+view with columns, indexes, foreign keys and the `CREATE` statement. `R` follows
+a table: it reads it again every couple of seconds and keeps the view on the last
+`limit` rows, so an append arrives on the screen by itself. Column
 visibility and a filter of up to three conditions plus a raw `WHERE`. Database
 info - pragmas and an integrity check on SQLite, server settings and size on
 PostgreSQL - and a list of every relation.
@@ -605,7 +617,7 @@ colour, `tab` completing table and column names from a list under the cursor,
 one on its own, search across every text column of every table, export as an SQL
 dump (whole database or one table, structure and/or data) or CSV/TSV, and import
 of an SQL script or a CSV file. Commands: `:export`, `:dump`, `:limit`, `:text`,
-`:open`, `:check`, `:analyze`, `:vacuum`, `:q`.
+`:open`, `:check`, `:analyze`, `:vacuum`, `:follow`, `:q`.
 
 A batch reports each statement separately, and one that leaves a transaction
 open is rolled back. A generated schema change

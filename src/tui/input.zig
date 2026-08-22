@@ -12,6 +12,13 @@ const Prompt = app_mod.Prompt;
 const PromptKind = app_mod.PromptKind;
 
 pub fn handle(app: *App, key: Key, size: term.Size) !void {
+	// Not a key press at all: the follow timer. It is never input, so it is taken
+	// before everything below that swallows keys - a prefix waiting for its second
+	// key must not be spent on it, and neither must a form field.
+	if (key == .tick) {
+		app.followTick();
+		return;
+	}
 	if (app.prompt != null) {
 		try typing(app, key);
 		return;
@@ -131,6 +138,7 @@ pub const actions = [_]Action{
 	.{ .key = 'w', .label = "choose visible columns", .also = "hide show" },
 	.{ .key = 'o', .label = "sort by this column", .also = "order asc desc" },
 	.{ .key = 'r', .label = "reload", .also = "refresh again" },
+	.{ .key = 'R', .label = "follow the table", .also = "auto reload refresh tail watch live new rows messages kafka" },
 	.{ .key = 'i', .label = "insert a row", .also = "new add", .needs = .main },
 	.{ .key = 'e', .label = "edit the row", .also = "change update", .needs = .main },
 	.{ .key = 'y', .label = "clone the row", .also = "copy duplicate", .needs = .main },
@@ -237,6 +245,11 @@ test "the palette finds an action by a few letters of it" {
 	count = paletteMatches("vacuum", &found);
 	try std.testing.expect(count == 1);
 	try std.testing.expectEqualStrings("a command", actions[found[0]].label);
+
+	// And one whose whole point is a word nobody would guess the key for.
+	count = paletteMatches("tail", &found);
+	try std.testing.expect(count >= 1);
+	try std.testing.expectEqualStrings("follow the table", actions[found[0]].label);
 
 	try std.testing.expect(paletteMatches("zzz", &found) == 0);
 }
@@ -556,6 +569,7 @@ fn letter(app: *App, point: u21, size: term.Size) !void {
 			try app.reload();
 			app.say("reloaded", .{});
 		},
+		'R' => try toggleFollow(app),
 		'o' => try sort(app),
 		'e' => try edit(app),
 		'v' => {
@@ -649,6 +663,18 @@ fn moveColumn(app: *App, delta: i32) void {
 	app.cursor_col = next;
 }
 
+/// `r` reads the table once; this keeps reading it. The view stays at the end,
+/// which is where an append lands, so a Kafka topic can be watched filling up
+/// instead of being asked about again and again.
+fn toggleFollow(app: *App) !void {
+	if (app.follow_ms != 0) {
+		app.setFollow(0);
+		app.say("no longer following", .{});
+		return;
+	}
+	try app.startFollowing();
+}
+
 fn movePage(app: *App, delta: i32) !void {
 	if (!app.hasTable()) {
 		return;
@@ -660,6 +686,13 @@ fn movePage(app: *App, delta: i32) !void {
 		app.page -= 1;
 	} else {
 		return;
+	}
+	// Having turned a page, the user is asking to look somewhere other than the
+	// end, and the next tick would drag the view straight back: the following
+	// stops instead.
+	if (app.follow_ms != 0) {
+		app.setFollow(0);
+		app.say("no longer following", .{});
 	}
 	try app.reload();
 }

@@ -371,7 +371,7 @@ fn grid(app: *App, size: Size, side: usize, rows: usize) void {
 	var used: usize = write(app, " ", width) + write(app, app.title.items, width - 2);
 	screen.style(.{ .fg = C.dim });
 	var buf: [160]u8 = undefined;
-	const first: usize = if (app.rows.items.len == 0) 0 else app.page * app.limit + 1;
+	const first: usize = if (app.rows.items.len == 0) 0 else app.firstRow();
 	var counted: [24]u8 = undefined;
 	const total = if (app.counted)
 		std.fmt.bufPrint(&counted, "{d}", .{app.total}) catch "?"
@@ -379,7 +379,7 @@ fn grid(app: *App, size: Size, side: usize, rows: usize) void {
 		"?";
 	const summary = std.fmt.bufPrint(&buf, "  {d}-{d} of {s}   page {d}/{d}{s}{s}{s}", .{
 		first,
-		app.page * app.limit + app.rows.items.len,
+		app.firstRow() - 1 + app.rows.items.len,
 		total,
 		app.page + 1,
 		app.pages(),
@@ -388,6 +388,18 @@ fn grid(app: *App, size: Size, side: usize, rows: usize) void {
 		if (app.order != null and app.descending) " desc" else "",
 	}) catch "";
 	used += write(app, summary, width - used);
+	if (app.follow_ms != 0) {
+		// In green, the colour of something going well: this is the one thing on
+		// the line that is still happening, and it should be seen without being
+		// read.
+		screen.style(.{ .fg = C.ok, .bold = true });
+		var every: [24]u8 = undefined;
+		const text = std.fmt.bufPrint(&every, "   following {d:.1}s", .{
+			@as(f64, @floatFromInt(app.follow_ms)) / 1000.0,
+		}) catch "   following";
+		used += write(app, text, width - used);
+		screen.style(.{ .fg = C.dim });
+	}
 	if (!app.editable and app.rows.items.len > 0) {
 		screen.style(.{ .fg = C.faint });
 		used += write(app, "   read-only", width - used);
@@ -826,6 +838,7 @@ const HELP = [_][2][]const u8{
 	.{ "b L", "database info, relations" },
 	.{ "m", "report of the last batch" },
 	.{ "r", "reload" },
+	.{ "R", "follow: reload every couple of seconds, staying at the end" },
 	.{ "q ctrl+c", "quit" },
 	.{ "", "ROWS" },
 	.{ "enter", "edit the row in a form" },
@@ -848,7 +861,7 @@ const HELP = [_][2][]const u8{
 	.{ "E M", "export, import" },
 	.{ "C c r p s", "copy the value, the row, the page, the last SQL" },
 	.{ "O #", "connections, schema" },
-	.{ ":", "export dump limit text open check analyze vacuum q" },
+	.{ ":", "export dump limit text follow open check analyze vacuum q" },
 	.{ "", "FILES: SFTP, S3, AZURE" },
 	.{ "f", "the two panes: this machine on one side, the connection on the other" },
 	.{ "tab", "the other pane, which is where a copy goes" },
@@ -1249,6 +1262,10 @@ fn footerHints(app: *App) []const u8 {
 	if (app.form != null) {
 		// Not the palette here: in a form ctrl+k removes a row.
 		return " tab moves   ctrl+s saves   ctrl+u clears the field   esc cancels";
+	}
+	if (app.follow_ms != 0 and app.view == .grid) {
+		// The one key worth knowing while the grid moves on its own.
+		return " R stops following   ctrl+k commands   q quit";
 	}
 	return switch (app.view) {
 		.connections => " enter connect   a add   e edit   d remove   ctrl+k commands   q quit",

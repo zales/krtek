@@ -175,6 +175,15 @@ Insert a row.
 Filter the rows.
 .BR o " sorts by the column under the cursor."
 .TP
+.B R
+Follow the table: read it again every couple of seconds and stay at the end of
+it, which is where an append lands - a Kafka topic fills up on the screen instead
+of being asked about again and again.
+.B r
+reads it once,
+.B :follow
+sets how often, and turning a page stops it.
+.TP
 .B C
 Copy: then
 .BR c " for the cell, " r " for the row, " p " for the page as CSV, " s
