@@ -401,6 +401,10 @@ pub const Db = struct {
 			.text_cast = "TEXT",
 			// Asked with a structure; the editor is a Kafka command line.
 			.speaks_sql = false,
+			// The log is append-only, and both of these say so before a form is
+			// filled in rather than after.
+			.no_update = "a kafka record cannot be changed - the log is append-only. Write a new one with i, or PRODUCE in the editor",
+			.no_delete = "kafka deletes a prefix of a partition, not one record - X empties the topic, or DELETE RECORDS in the editor",
 		};
 	}
 

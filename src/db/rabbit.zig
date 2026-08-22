@@ -162,6 +162,10 @@ pub const Db = struct {
 			.label = "RabbitMQ",
 			.schema_noun = "vhost",
 			.speaks_sql = false,
+			// Declared, not altered - which is true of every table here, unlike
+			// adding and removing, which depend on which one.
+			.no_update = "a queue, an exchange or a binding is declared rather than altered - delete it and declare it again",
+			.no_ddl = "the tables here are the broker's topology and are fixed - DECLARE QUEUE, DECLARE EXCHANGE and BIND in the editor are what make one",
 		};
 	}
 

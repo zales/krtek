@@ -536,6 +536,12 @@ finished is phase `Succeeded` where kubectl says `Completed` - so a column that
 showed the phase would call the one broken pod in a namespace healthy, which is
 the single thing anybody scans a pod list for.
 
+None of that is discovered by trying it. What an engine will not do is a
+capability with the reason in it, so the footer offers only the keys that work
+here - `x` and no `i` or `e` on a cluster, `i` and no `e` or `x` on a Kafka topic -
+and a key that cannot work says why the moment it is pressed rather than after a
+form has been filled in.
+
 **Reading, deleting and scaling, and not editing.** An object is a document with a
 controller acting on it; writing one back from a grid of flattened cells is a way
 to lose a field nobody displayed, and `e` says so instead of trying. What is

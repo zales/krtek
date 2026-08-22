@@ -570,8 +570,20 @@ fn scrollHelp(app: *App, key: Key) bool {
 	return true;
 }
 
+/// The keys that write a schema statement. They are refused together, because an
+/// engine that has no schema anybody writes has none of them - and each of these
+/// otherwise opens a form to be filled in before the engine says no.
+const SCHEMA_KEYS = [_]u21{ 'c', 'a', 'I', 'K', 'V', 'T', 'N', 'Y', 'X', 'D' };
+
 fn letter(app: *App, point: u21, size: term.Size) !void {
 	_ = size;
+	if (std.mem.indexOfScalar(u21, &SCHEMA_KEYS, point) != null) {
+		const refused = app.conn.caps().no_ddl;
+		if (refused.len != 0) {
+			app.complain("{s}", .{refused});
+			return;
+		}
+	}
 	switch (point) {
 		'q' => app.quit = true,
 		'?' => if (app.view == .help) {
@@ -834,6 +846,13 @@ fn edit(app: *App) !void {
 	}
 	if (!app.editable) {
 		app.complain("these rows cannot be addressed, so they are read-only", .{});
+		return;
+	}
+	// Before the value is typed rather than after: on an engine that cannot
+	// change a row, typing one in is time spent on an answer that was already no.
+	const refused = app.conn.caps().no_update;
+	if (refused.len != 0) {
+		app.complain("{s}", .{refused});
 		return;
 	}
 	try ask(app, .edit, " value: ");

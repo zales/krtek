@@ -165,3 +165,35 @@ test "a key that points past the row is left out rather than read" {
 comptime {
 	_ = @import("db");
 }
+
+test "an engine that refuses a change says so in one place" {
+	// The three texts are the flag and the reason at once, so a driver cannot
+	// half-declare one: a refusal with no reason would reach the screen as a
+	// blank complaint, and a reason nobody checks would never be shown at all.
+	const drivers = [_]db.Caps{
+		db.k8s.Db.caps(undefined),
+		db.kafka.Db.caps(undefined),
+		db.rabbit.Db.caps(undefined),
+		db.sqlite.Db.caps(undefined),
+	};
+	for (drivers) |caps| {
+		for ([_][]const u8{ caps.no_insert, caps.no_update, caps.no_delete, caps.no_ddl }) |why| {
+			// Either it is allowed, or it is refused with something worth reading.
+			try std.testing.expect(why.len == 0 or why.len > 20);
+		}
+	}
+	// And the ones this review was about, named rather than assumed.
+	try std.testing.expect(db.k8s.Db.caps(undefined).no_insert.len != 0);
+	try std.testing.expect(db.k8s.Db.caps(undefined).no_update.len != 0);
+	try std.testing.expect(db.k8s.Db.caps(undefined).no_ddl.len != 0);
+	try std.testing.expect(db.k8s.Db.caps(undefined).no_delete.len == 0);
+	try std.testing.expect(db.kafka.Db.caps(undefined).no_update.len != 0);
+	try std.testing.expect(db.kafka.Db.caps(undefined).no_delete.len != 0);
+	try std.testing.expect(db.kafka.Db.caps(undefined).no_insert.len == 0);
+	try std.testing.expect(db.kafka.Db.caps(undefined).no_ddl.len == 0);
+	try std.testing.expect(db.rabbit.Db.caps(undefined).no_update.len != 0);
+	// A database does all four, and nothing above should have changed that.
+	const sqlite = db.sqlite.Db.caps(undefined);
+	try std.testing.expect(sqlite.no_insert.len == 0 and sqlite.no_update.len == 0);
+	try std.testing.expect(sqlite.no_delete.len == 0 and sqlite.no_ddl.len == 0);
+}

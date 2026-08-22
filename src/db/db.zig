@@ -184,13 +184,30 @@ pub const Caps = struct {
 	/// screen that says "schema" to somebody looking at a cluster is asking them
 	/// to translate.
 	schema_noun: []const u8 = "schema",
-	/// A table can be created. False where the tables are fixed: the kinds a
-	/// cluster has are what its API groups say it has.
-	creates_tables: bool = true,
-	/// A row can be added. False where the rows are things this program can read
-	/// and remove but has no business making: a Kubernetes object is a document
-	/// with a controller behind it, and an empty grid there must not offer `i`.
-	inserts_rows: bool = true,
+	/// Why no schema statement can be written here - empty where they can. One
+	/// text for the lot of them, because where an engine has no schema anybody
+	/// writes it has none of them: creating a table, altering one, an index, a
+	/// key, a view, a trigger, a rename, a copy, a truncate and a drop are all the
+	/// same answer. Kafka is not one of these - a topic really is created and
+	/// dropped - which is why this is a text per engine and not a rule about
+	/// engines that do not speak SQL.
+	no_ddl: []const u8 = "",
+	/// Why a row cannot be added, changed or removed here - empty where it can.
+	///
+	/// These are the reason and the flag at once, because a screen that refuses
+	/// has to say why in the same breath. Three engines cannot do one of these at
+	/// all: a Kafka record cannot be changed or deleted because the log is
+	/// append-only, a RabbitMQ queue is declared rather than altered, and a
+	/// Kubernetes object is a document with a controller behind it. Before this
+	/// the interface offered all three to all of them and let the driver refuse
+	/// after the form had been filled in, which is the worst moment to find out.
+	///
+	/// Connection-wide only. Where it varies by table - RabbitMQ's topology,
+	/// which of a cluster's kinds may be deleted - the driver still answers for
+	/// itself, and does it before anything is typed.
+	no_insert: []const u8 = "",
+	no_update: []const u8 = "",
+	no_delete: []const u8 = "",
 };
 
 /// One statement out of a batch, with the text the user wrote.

@@ -2528,6 +2528,15 @@ pub const App = struct {
 			self.complain("open a table first", .{});
 			return;
 		};
+		// An engine that will not take this is asked before the form is drawn, not
+		// after it has been filled in. Which of the two it is matters: a Kafka
+		// record can be written and not changed, and a Kubernetes object neither.
+		const caps = self.conn.caps();
+		const refused = if (mode == .edit) caps.no_update else caps.no_insert;
+		if (refused.len != 0) {
+			self.complain("{s}", .{refused});
+			return;
+		}
 		if (mode != .insert and self.noRowHere()) {
 			return;
 		}
@@ -2802,6 +2811,13 @@ pub const App = struct {
 	}
 
 	pub fn openImportForm(self: *App) !void {
+		// Importing is inserting, so an engine that takes no new rows takes no
+		// file of them either.
+		const refused = self.conn.caps().no_insert;
+		if (refused.len != 0) {
+			self.complain("{s}", .{refused});
+			return;
+		}
 		const form = try self.newForm(.import_data, "import", "");
 		try form.choice("kind", &[_][]const u8{ "sql script", "csv into a table" }, 0);
 		try form.text("file", "", 40);

@@ -66,6 +66,11 @@ const LIST_LIMIT: usize = 32 << 20;
 /// How many lines of a pod's log `LOGS` asks for when nobody said.
 const LOG_LINES: usize = 200;
 
+/// Why an object is not made or changed from a grid. Said by `caps` before
+/// anything is typed and by `apply` if anything asks anyway, from one text.
+const NO_INSERT = "an object is a document with a controller acting on it, not a row - kubectl apply is what makes one";
+const NO_UPDATE = "editing an object from a grid would drop every field the grid does not show - SCALE and RESTART are what this does";
+
 pub const Value = union(enum) {
 	nil,
 	number: i64,
@@ -206,10 +211,9 @@ pub const Db = struct {
 			.final_deletes = true,
 			.row_noun = "object",
 			.schema_noun = "namespace",
-			// The kinds are what the cluster's API groups say they are.
-			.creates_tables = false,
-			// kubectl apply makes an object; nothing here does.
-			.inserts_rows = false,
+			.no_ddl = "a cluster's kinds are what its API groups say they are - none of them is made, altered or dropped from here",
+			.no_insert = NO_INSERT,
+			.no_update = NO_UPDATE,
 		};
 	}
 
@@ -610,24 +614,18 @@ pub const Db = struct {
 				self.forgetCount(change.table);
 			},
 			.insert => {
-				self.complain(
-					"an object is a document with a controller acting on it, not a row - kubectl apply is what makes one",
-					.{},
-				);
+				self.remember(NO_INSERT);
 				return error.Driver;
 			},
 			.update => {
-				// Only offer what this kind can actually be told to do.
+				// Only name what this kind can actually be told to do.
 				if (resource.scalable) {
 					self.complain(
-						"editing an object from a grid would drop every field the grid does not show - SCALE {s} <name> <n> and RESTART {s} <name> are what this does",
-						.{ resource.name, resource.name },
+						"{s}: SCALE {s} <name> <n>, RESTART {s} <name>",
+						.{ NO_UPDATE, resource.name, resource.name },
 					);
 				} else {
-					self.complain(
-						"editing an object from a grid would drop every field the grid does not show - kubectl edit is what changes one",
-						.{},
-					);
+					self.remember(NO_UPDATE);
 				}
 				return error.Driver;
 			},

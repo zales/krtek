@@ -496,7 +496,7 @@ fn grid(app: *App, size: Size, side: usize, rows: usize) void {
 		const filtered = app.isFiltered();
 		_ = write(app, if (filtered)
 			"nothing matches the filter - W changes it, esc clears it"
-		else if (app.editable and app.conn.caps().inserts_rows)
+		else if (app.editable and app.conn.caps().no_insert.len == 0)
 			"no rows yet - i inserts one"
 		else
 			"no rows", width);
@@ -1313,7 +1313,7 @@ fn footerHints(app: *App) []const u8 {
 	// The sidebar's hints depend on the engine: a cluster has namespaces rather
 	// than schemas and no tables anybody creates, and offering either of those in
 	// the wrong words is how a key goes unfound.
-	if (app.view == .grid and app.focus == .sidebar and app.files == null) {
+	if (app.view == .grid and app.focus == .sidebar) {
 		const caps = app.conn.caps();
 		var out: std.ArrayListUnmanaged(u8) = .empty;
 		const arena = app.screen.frame.allocator();
@@ -1321,7 +1321,7 @@ fn footerHints(app: *App) []const u8 {
 		if (caps.schemas or caps.databases) {
 			out.print(arena, "   # {s}", .{caps.schema_noun}) catch {};
 		}
-		if (caps.creates_tables) {
+		if (caps.no_ddl.len == 0) {
 			out.appendSlice(arena, "   c create table") catch {};
 		}
 		out.appendSlice(arena, "   E export   ctrl+k commands   q quit") catch {};
@@ -1329,19 +1329,56 @@ fn footerHints(app: *App) []const u8 {
 	}
 	return switch (app.view) {
 		.connections => " enter connect   a add   e edit   d remove   ctrl+k commands   q quit",
-		.structure => " a alter   I index   K key   N rename   S data   ctrl+k commands",
+		.structure => if (app.conn.caps().no_ddl.len == 0)
+			" a alter   I index   K key   N rename   S data   ctrl+k commands"
+		else
+			" S data   ctrl+k commands",
+
 		.messages => " m back   s sql   r reload   ctrl+k commands",
 		.help => " ? back   ctrl+k commands",
 		.info => " b back   ctrl+k commands",
 		.relations => " L back   d browse   ctrl+k commands",
 		.files => " tab other pane   enter opens   c copy   space mark   n mkdir   r rename   x remove   q back",
-		.grid => if (app.focus == .sidebar)
-			" enter opens   / filter   c create table   E export   ctrl+k commands   q quit"
-		else if (app.files != null)
-			" f the two panes   i insert   e edit   x delete   o sort   v whole value   space mark"
-		else
-			" i insert   e edit   x delete   o sort   v whole value   space mark   ctrl+k commands",
+		.grid => rowHints(app),
 	};
+}
+
+/// What to press on a row, less whatever this engine will not do. A hint for
+/// something that cannot happen is worse than no hint, because it is the first
+/// thing somebody tries: a Kafka grid used to offer `e` for a record that cannot
+/// be changed and `x` for one that cannot be removed, and a cluster offered `i`
+/// for an object nothing here makes.
+fn rowHints(app: *App) []const u8 {
+	const caps = app.conn.caps();
+	if (caps.no_insert.len == 0 and caps.no_update.len == 0 and caps.no_delete.len == 0 and app.files == null) {
+		return " i insert   e edit   x delete   o sort   v whole value   space mark   ctrl+k commands";
+	}
+	var out: std.ArrayListUnmanaged(u8) = .empty;
+	const arena = app.screen.frame.allocator();
+	const fallback = " o sort   v whole value   space mark   ctrl+k commands";
+	// One space in front, three between, however many of them there turn out to be.
+	if (app.files != null) {
+		addHint(arena, &out, "f the two panes");
+	}
+	if (caps.no_insert.len == 0) {
+		addHint(arena, &out, "i insert");
+	}
+	if (caps.no_update.len == 0) {
+		addHint(arena, &out, "e edit");
+	}
+	if (caps.no_delete.len == 0) {
+		addHint(arena, &out, "x delete");
+	}
+	addHint(arena, &out, "o sort");
+	addHint(arena, &out, "v whole value");
+	addHint(arena, &out, "space mark");
+	addHint(arena, &out, "ctrl+k commands");
+	return if (out.items.len == 0) fallback else out.items;
+}
+
+fn addHint(arena: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), text: []const u8) void {
+	out.appendSlice(arena, if (out.items.len == 0) " " else "   ") catch return;
+	out.appendSlice(arena, text) catch {};
 }
 
 /// The SQL editor: line numbers, the statement in colour, and the completion
