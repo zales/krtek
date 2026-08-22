@@ -217,12 +217,23 @@ jobs:
           NOTES
           # The indentation above is the workflow's; strip it from the file.
           sed -i 's/^          //' notes.md
-          gh release create "$version" \
-            --title "krtek $version" \
-            --notes-file notes.md \
-            artifacts/*.tar.gz artifacts/*.tar.gz.sha256 \
-            artifacts/*.deb artifacts/*.deb.sha256 \
-            artifacts/krtek.rb
+          # Runnable twice. A release that already exists is edited rather than
+          # refused, so a version can be built again when only the packaging
+          # around it changed and the binaries are the same ones.
+          if gh release view "$version" >/dev/null 2>&1; then
+            gh release edit "$version" --title "krtek $version" --notes-file notes.md
+            gh release upload "$version" --clobber \
+              artifacts/*.tar.gz artifacts/*.tar.gz.sha256 \
+              artifacts/*.deb artifacts/*.deb.sha256 \
+              artifacts/krtek.rb
+          else
+            gh release create "$version" \
+              --title "krtek $version" \
+              --notes-file notes.md \
+              artifacts/*.tar.gz artifacts/*.tar.gz.sha256 \
+              artifacts/*.deb artifacts/*.deb.sha256 \
+              artifacts/krtek.rb
+          fi
 
       # The tap picks the formula up from this release on its own - see the
       # comment in packaging/formula.sh. It is written a second time by the
