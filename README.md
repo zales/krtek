@@ -544,6 +544,24 @@ finished is phase `Succeeded` where kubectl says `Completed` - so a column that
 showed the phase would call the one broken pod in a namespace healthy, which is
 the single thing anybody scans a pod list for.
 
+**`enter` on a row opens a screen about it.** Everything the grid had room for
+and everything it did not: what each container is doing, what the last one died of
+and with what exit code, the labels, and the events - which is where a failed image
+pull or a failed mount is written down and nowhere else. Along the bottom is what
+can be done to that one thing:
+
+```
+ l logs   s shell   t terminal   y as JSON   x delete this pod   esc back
+```
+
+Those are the engine's, not the interface's. A driver says what can be done to a
+row and gives the line of its own console that does it, so the interface draws a
+key and a word and runs what it was given - it neither knows nor needs to know
+what a log or a shell is. A deployment offers `R restart` and no shell, because a
+deployment has no container to be in. Where an engine has nothing to add, `enter`
+still opens the row in a form, which is what it has always done: a database row is
+already all of itself, and opening one means editing it.
+
 None of that is discovered by trying it. What an engine will not do is a
 capability with the reason in it, so the footer offers only the keys that work
 here - `x` and no `i` or `e` on a cluster, `i` and no `e` or `x` on a Kafka topic -
@@ -576,6 +594,9 @@ that no longer exists. So it reads the phase, what each container is doing, what
 the last one died of with its exit code, and what the cluster has said about the
 pod lately, which is where a failed image pull or a failed mount is written down
 and nowhere else.
+
+`s` on that screen is the same as `EXEC` below, aimed at the pod already under
+the cursor.
 
 **`EXEC` opens one shell and keeps it.** What is typed goes to that shell and what
 it says comes back as rows, so the session is the point: `cd /var/log` and then

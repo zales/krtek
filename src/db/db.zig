@@ -146,6 +146,20 @@ pub const ForeignKey = struct {
 	on_delete: []const u8 = "NO ACTION",
 };
 
+/// Something that can be done to the row the cursor is on, offered on the screen
+/// that opens when it does. The statement is the engine's own console line, so
+/// the interface neither knows nor needs to know what a log or a shell is - it
+/// draws a key and a word, and runs what it was given.
+pub const Action = struct {
+	key: u21,
+	label: []const u8,
+	statement: []const u8,
+	/// Ask before running it. For the ones nothing takes back.
+	confirm: bool = false,
+	/// Hands the terminal over rather than filling the grid.
+	terminal: bool = false,
+};
+
 pub const Setting = struct {
 	label: []const u8,
 	value: []const u8,
@@ -633,6 +647,32 @@ pub const Db = union(enum) {
 					return false;
 				}
 				return readsOnly(statement);
+			},
+		}
+	}
+
+	/// What is worth knowing about one row, for the screen that opens on it.
+	/// Null where an engine has nothing to add beyond the row itself, which is
+	/// every engine whose rows are already all of it.
+	pub fn rowDetail(self: Db, arena: std.mem.Allocator, table: Table, name: []const u8) Error!?[]Setting {
+		switch (self) {
+			inline else => |driver| {
+				if (@hasDecl(@TypeOf(driver.*), "rowDetail")) {
+					return driver.rowDetail(arena, table, name);
+				}
+				return null;
+			},
+		}
+	}
+
+	/// What can be done to that row, in the engine's own words.
+	pub fn rowActions(self: Db, arena: std.mem.Allocator, table: Table, name: []const u8) Error![]Action {
+		switch (self) {
+			inline else => |driver| {
+				if (@hasDecl(@TypeOf(driver.*), "rowActions")) {
+					return driver.rowActions(arena, table, name);
+				}
+				return &.{};
 			},
 		}
 	}

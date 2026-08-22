@@ -254,6 +254,19 @@ printf '%s' "$failed" | grep -q "No such file" || fail "the shell's output did n
 printf '%s' "$failed" | grep -q "exit 1" || fail "a command that failed did not say so"
 echo "ok: output comes back as rows, and a non-zero exit is said"
 
+# Enter on a pod opens a screen about that pod, with what can be done to it along
+# the bottom - which is the thing somebody at a terminal reaches for first.
+opened=$(python3 tests/screen.py "$ROOT" '{tab}' '{enter}' '{sleep}' '{keep}' 2>&1)
+printf '%s' "$opened" | grep -q "container" || fail "enter on a pod should open a screen about it"
+printf '%s' "$opened" | grep -q "l logs" || fail "the object screen should offer logs"
+printf '%s' "$opened" | grep -q "s shell" || fail "the object screen should offer a shell"
+echo "ok: enter opens a screen about the pod, with logs and a shell on it"
+
+# And the actions on it are the engine's own console lines.
+logged=$(python3 tests/screen.py "$ROOT" '{tab}' '{enter}' '{sleep}' 'l' '{sleep}' '{keep}' 2>&1)
+printf '%s' "$logged" | grep -q "line" || fail "l on the object screen should show the log"
+echo "ok: l on it shows that pod's log"
+
 # And the terminal is still there for something full screen.
 terminal=$(python3 tests/screen.py "$ROOT" 's' 'EXEC -t shellme' '{ctrl-s}' '{sleep}' \
 	'echo I-AM-$(hostname)' '{enter}' '{sleep}' '{keep}' 2>&1)

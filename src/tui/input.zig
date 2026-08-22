@@ -5,6 +5,7 @@ const std = @import("std");
 const app_mod = @import("app.zig");
 const fuzzy = @import("fuzzy.zig");
 const term = @import("term.zig");
+const database = @import("db");
 const draw = @import("draw.zig");
 
 const App = app_mod.App;
@@ -53,6 +54,10 @@ pub fn handle(app: *App, key: Key, size: term.Size) !void {
 	}
 	if (app.view == .files) {
 		try onFiles(app, key);
+		return;
+	}
+	if (app.view == .object) {
+		try onObject(app, key);
 		return;
 	}
 	if (app.view == .help and scrollHelp(app, key)) {
@@ -784,9 +789,79 @@ fn open(app: *App) !void {
 		}
 		return;
 	}
-	if (app.rows.items.len > 0) {
-		try app.openRowForm(.edit);
+	if (app.rows.items.len == 0) {
+		return;
 	}
+	// A row the engine has more to say about opens on what it has to say. Where
+	// it has nothing, opening a row is editing it, which is what enter has always
+	// done here.
+	if (try app.openRow()) {
+		return;
+	}
+	try app.openRowForm(.edit);
+}
+
+/// The object screen: what the engine said can be done, and moving about what it
+/// said. Its keys are the engine's, so they are matched before anything else -
+/// and everything unmatched does nothing rather than something surprising.
+fn onObject(app: *App, key: Key) !void {
+	switch (key) {
+		.escape => {
+			app.closeObject();
+			return;
+		},
+		.char => |point| {
+			if (point == 'q') {
+				app.quit = true;
+				return;
+			}
+			for (app.object_actions) |action| {
+				if (action.key != point) {
+					continue;
+				}
+				if (action.confirm) {
+					try askAction(app, action);
+				} else {
+					try app.runObjectAction(action);
+				}
+				return;
+			}
+			switch (point) {
+				'j' => app.object_scroll += 1,
+				'k' => app.object_scroll -|= 1,
+				'g' => app.object_scroll = 0,
+				'G' => app.object_scroll = app.object_facts.len,
+				'r' => _ = try app.openRow(),
+				else => {},
+			}
+		},
+		.down => app.object_scroll += 1,
+		.up => app.object_scroll -|= 1,
+		.page_down => app.object_scroll += 10,
+		.page_up => app.object_scroll -|= 10,
+		.mouse => |mouse| switch (mouse.button) {
+			.wheel_down => app.object_scroll += 3,
+			.wheel_up => app.object_scroll -|= 3,
+			else => {},
+		},
+		.ctrl => |code| switch (code) {
+			'c' => app.quit = true,
+			'k', 'p' => try openPalette(app),
+			else => {},
+		},
+		else => {},
+	}
+}
+
+/// An action nothing takes back asks first, in the words the engine gave it.
+fn askAction(app: *App, action: database.Action) !void {
+	if (app.prompt) |*old| {
+		old.buffer.deinit(app.allocator);
+	}
+	app.pending.clearRetainingCapacity();
+	try app.pending.appendSlice(app.allocator, action.statement);
+	app.prompt = .{ .kind = .confirm, .label = " type y to " };
+	app.say("{s}?", .{action.label});
 }
 
 /// Drop the selected object, whatever it is, through the engine's own DDL.

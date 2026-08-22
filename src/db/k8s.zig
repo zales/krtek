@@ -522,6 +522,131 @@ pub const Db = struct {
 		return .{};
 	}
 
+	// ------------------------------------------------------- one object, opened
+
+	/// What is worth knowing about one object: the columns the grid was showing,
+	/// then what its containers are doing and what the last one died of, then
+	/// what the cluster has said about it lately. Which is `WHY`, laid out as
+	/// facts rather than as rows, and for every kind rather than only for a pod.
+	pub fn rowDetail(self: *Db, arena: std.mem.Allocator, table: db.Table, name: []const u8) db.Error!?[]db.Setting {
+		const resource = api.find(table.name) orelse return null;
+		if (name.len == 0) {
+			return null;
+		}
+		const response = self.call(arena, "GET", try self.objectPath(arena, resource, table.schema, name), "") catch return null;
+		if (!response.ok()) {
+			return null;
+		}
+		const object = std.json.parseFromSliceLeaky(Json, arena, response.body, .{}) catch return null;
+
+		var out: std.ArrayListUnmanaged(db.Setting) = .empty;
+		const now = nowSeconds();
+		for (resource.columns) |column| {
+			const said = api.cell(arena, object, column, now) catch "";
+			if (said.len != 0) {
+				try out.append(arena, .{ .label = column.name, .value = said });
+			}
+		}
+		const namespace = textAt(object, "metadata.namespace");
+		if (namespace.len != 0) {
+			try out.append(arena, .{ .label = "namespace", .value = namespace });
+		}
+		const labels = api.cell(arena, object, .{ .name = "labels", .from = .labels }, now) catch "";
+		if (labels.len != 0) {
+			try out.append(arena, .{ .label = "labels", .value = labels });
+		}
+
+		// What each container is doing, and what the one before it died of - the
+		// part a count of restarts cannot tell anybody.
+		if (api.at(object, "status.containerStatuses")) |statuses| {
+			if (statuses == .array) {
+				for (statuses.array.items) |one| {
+					try out.append(arena, .{ .label = "", .value = "" });
+					try out.append(arena, .{ .label = "container", .value = textAt(one, "name") });
+					try out.append(arena, .{ .label = "  image", .value = textAt(one, "image") });
+					try out.append(arena, .{ .label = "  state", .value = try state(arena, api.at(one, "state")) });
+					const restarts = api.at(one, "restartCount");
+					const total: i64 = if (restarts) |value| (if (value == .integer) value.integer else 0) else 0;
+					if (total != 0) {
+						try out.append(arena, .{
+							.label = "  restarts",
+							.value = try std.fmt.allocPrint(arena, "{d}", .{total}),
+						});
+						try out.append(arena, .{ .label = "  last exit", .value = try state(arena, api.at(one, "lastState")) });
+					}
+				}
+			}
+		}
+
+		const path = try std.fmt.allocPrint(arena, "/api/v1/namespaces/{s}/events?fieldSelector=involvedObject.name%3D{s}", .{
+			if (namespace.len != 0) namespace else self.namespace,
+			name,
+		});
+		const events = self.fetch(arena, path, "the events") catch &[_]Json{};
+		if (events.len != 0) {
+			try out.append(arena, .{ .label = "", .value = "" });
+		}
+		for (events) |event| {
+			try out.append(arena, .{
+				.label = try std.fmt.allocPrint(arena, "{s}", .{textAt(event, "reason")}),
+				.value = textAt(event, "message"),
+			});
+		}
+		return out.items;
+	}
+
+	/// What can be done to it. Every one of these is a line of this driver's own
+	/// console, so the interface runs what it is given and knows nothing about
+	/// what a log or a shell is.
+	pub fn rowActions(self: *Db, arena: std.mem.Allocator, table: db.Table, name: []const u8) db.Error![]db.Action {
+		_ = self;
+		const resource = api.find(table.name) orelse return &.{};
+		if (name.len == 0) {
+			return &.{};
+		}
+		var out: std.ArrayListUnmanaged(db.Action) = .empty;
+		if (resource.loggable) {
+			try out.append(arena, .{
+				.key = 'l',
+				.label = "logs",
+				.statement = try std.fmt.allocPrint(arena, "LOGS {s} 500", .{name}),
+			});
+			try out.append(arena, .{
+				.key = 's',
+				.label = "shell",
+				.statement = try std.fmt.allocPrint(arena, "EXEC {s}", .{name}),
+			});
+			try out.append(arena, .{
+				.key = 't',
+				.label = "terminal",
+				.statement = try std.fmt.allocPrint(arena, "EXEC -t {s}", .{name}),
+				.terminal = true,
+			});
+		}
+		if (resource.scalable or std.mem.eql(u8, resource.name, "daemonsets")) {
+			try out.append(arena, .{
+				.key = 'R',
+				.label = "restart",
+				.statement = try std.fmt.allocPrint(arena, "RESTART {s} {s}", .{ resource.name, name }),
+				.confirm = true,
+			});
+		}
+		try out.append(arena, .{
+			.key = 'y',
+			.label = "as JSON",
+			.statement = try std.fmt.allocPrint(arena, "DESCRIBE {s} {s}", .{ resource.name, name }),
+		});
+		if (resource.remove) {
+			try out.append(arena, .{
+				.key = 'x',
+				.label = try std.fmt.allocPrint(arena, "delete this {s}", .{resource.singular}),
+				.statement = try std.fmt.allocPrint(arena, "DELETE {s} {s}", .{ resource.name, name }),
+				.confirm = true,
+			});
+		}
+		return out.items;
+	}
+
 	pub fn alterContext(_: *Db, _: std.mem.Allocator, _: db.Table, _: []const db.Column) db.Error!db.AlterContext {
 		return .{};
 	}
@@ -990,6 +1115,22 @@ pub const Db = struct {
 				"a shell is open in {s} - what you type goes there until EXIT",
 				.{first},
 			)) };
+		}
+		if (eq(verb, "DELETE")) {
+			const resource = api.find(first) orelse api.find(plural(first)) orelse {
+				self.complain("there is nothing here called {s}", .{first});
+				return error.Driver;
+			};
+			if (second.len == 0) {
+				self.complain("DELETE {s} <name>", .{resource.name});
+				return error.Driver;
+			}
+			try self.apply(.{
+				.kind = .delete,
+				.table = .{ .name = resource.name },
+				.where = &[_]db.ask.Filter{.{ .column = "name", .value = second }},
+			});
+			return .{ .k8s = try self.oneText("gone", try std.fmt.allocPrint(arena, "{s} {s} is deleted", .{ resource.singular, second })) };
 		}
 		if (eq(verb, "SCALE")) {
 			try self.scale(arena, first, second, third);

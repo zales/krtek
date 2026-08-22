@@ -57,6 +57,7 @@ pub fn frame(app: *App, size: Size) !void {
 		.help => help(app, size, side, body_rows),
 		.info => info(app, size, side, body_rows),
 		.relations => relations(app, size, side, body_rows),
+		.object => objectScreen(app, size, side, body_rows),
 		.files => files(app, size, body_rows),
 		.connections => {},
 	}
@@ -871,7 +872,7 @@ pub const HELP = [_][2][]const u8{
 	.{ "R", "follow: read it again, staying at the end" },
 	.{ "q ctrl+c", "quit" },
 	.{ "", "ROWS" },
-	.{ "enter", "edit the row in a form" },
+	.{ "enter", "open the row: a form, or a screen about it" },
 	.{ "v", "show the whole value" },
 	.{ "e", "edit the cell, NULL clears it" },
 	.{ "i y", "insert, clone a row" },
@@ -984,6 +985,63 @@ fn help(app: *App, size: Size, side: usize, rows: usize) void {
 		_ = write(app, text, width);
 	}
 	screen.clearToEol();
+}
+
+/// One object, opened: what is known about it, and what can be done to it.
+///
+/// Drawn as facts rather than as a grid, because that is what it is - a label and
+/// a value to a line, the way the database information screen already reads. A
+/// blank label is a blank line, which is how the engine separates one part of it
+/// from the next without this having to know what the parts are.
+fn objectScreen(app: *App, size: Size, side: usize, rows: usize) void {
+	const screen = app.screen;
+	const left = side;
+	const width = size.cols - left;
+
+	screen.moveTo(1, left);
+	screen.style(.{ .fg = C.accent, .bold = true });
+	var used: usize = write(app, " ", width);
+	used += write(app, app.object_title, width -| used);
+	screen.style(.{ .fg = C.dim });
+	if (app.currentTable()) |table| {
+		used += write(app, "   ", width -| used);
+		used += write(app, table.name, width -| used);
+	}
+	screen.clearToEol();
+
+	// The widest label there is, so the values line up without a magic number.
+	var label_width: usize = 8;
+	for (app.object_facts) |fact| {
+		label_width = @max(label_width, term.width(fact.label));
+	}
+	label_width = @min(label_width, @max(12, width / 3));
+
+	const room = if (rows > 2) rows - 1 else 1;
+	if (app.object_scroll + room > app.object_facts.len) {
+		app.object_scroll = app.object_facts.len -| room;
+	}
+	var line: usize = 2;
+	var at = app.object_scroll;
+	while (at < app.object_facts.len and line <= rows) : (at += 1) {
+		const fact = app.object_facts[at];
+		screen.moveTo(line, left);
+		screen.clearToEol();
+		line += 1;
+		if (fact.label.len == 0 and fact.value.len == 0) {
+			continue;
+		}
+		screen.style(.{ .fg = C.dim });
+		_ = write(app, " ", width);
+		pad(app, fact.label, label_width, true);
+		screen.style(.{ .fg = C.text });
+		_ = write(app, "  ", width);
+		_ = write(app, fact.value, width -| label_width -| 4);
+	}
+	while (line <= rows) : (line += 1) {
+		screen.moveTo(line, left);
+		screen.reset();
+		screen.clearToEol();
+	}
 }
 
 /// The full value under the cursor, in a box over the grid.
@@ -1321,6 +1379,22 @@ fn footerHints(app: *App) []const u8 {
 	// The sidebar's hints depend on the engine: a cluster has namespaces rather
 	// than schemas and no tables anybody creates, and offering either of those in
 	// the wrong words is how a key goes unfound.
+	// On an object screen the keys are the engine's own, so the footer is built
+	// from what it said can be done rather than from anything known here.
+	if (app.view == .object) {
+		var out: std.ArrayListUnmanaged(u8) = .empty;
+		const arena = app.screen.frame.allocator();
+		for (app.object_actions) |action| {
+			var key: [8]u8 = undefined;
+			const len = std.unicode.utf8Encode(action.key, &key) catch continue;
+			out.appendSlice(arena, if (out.items.len == 0) " " else "   ") catch break;
+			out.appendSlice(arena, key[0..len]) catch break;
+			out.append(arena, ' ') catch break;
+			out.appendSlice(arena, action.label) catch break;
+		}
+		out.appendSlice(arena, if (out.items.len == 0) " esc back" else "   esc back") catch {};
+		return out.items;
+	}
 	if (app.view == .grid and app.focus == .sidebar) {
 		const caps = app.conn.caps();
 		var out: std.ArrayListUnmanaged(u8) = .empty;
@@ -1343,6 +1417,8 @@ fn footerHints(app: *App) []const u8 {
 			" S data   ctrl+k commands",
 
 		.messages => " m back   s sql   r reload   ctrl+k commands",
+		// Handled above, from what the engine said can be done.
+		.object => " esc back",
 		.help => " ? back   ctrl+k commands",
 		.info => " b back   ctrl+k commands",
 		.relations => " L back   d browse   ctrl+k commands",

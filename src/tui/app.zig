@@ -92,7 +92,7 @@ pub const Object = struct {
 	rows: ?i64,
 };
 
-pub const View = enum { grid, structure, messages, help, info, relations, connections, files };
+pub const View = enum { grid, structure, messages, help, info, relations, connections, files, object };
 pub const Focus = enum { sidebar, main };
 /// A place on screen, in cells.
 pub const Spot = struct { row: usize, col: usize };
@@ -213,6 +213,15 @@ pub const App = struct {
 	limit: usize = 200,
 	order: ?[]const u8 = null,
 	descending: bool = false,
+	/// The object screen: what is known about the row that was opened, what can
+	/// be done to it, and which row it was. Held in an arena of its own, because
+	/// all three are the engine's strings and they last exactly as long as the
+	/// screen does.
+	object_arena: std.heap.ArenaAllocator,
+	object_title: []const u8 = "",
+	object_facts: []const database.Setting = &.{},
+	object_actions: []const database.Action = &.{},
+	object_scroll: usize = 0,
 	/// The statement whose rows are on the grid, where a statement put them there
 	/// rather than a table. Kept so the grid can be filled again - by `r`, and by
 	/// the follow key on a clock - and only ever re-run where the engine says
@@ -319,6 +328,7 @@ pub const App = struct {
 			.allocator = allocator,
 			.arena = std.heap.ArenaAllocator.init(allocator),
 			.reports_arena = std.heap.ArenaAllocator.init(allocator),
+			.object_arena = std.heap.ArenaAllocator.init(allocator),
 			.form_arena = std.heap.ArenaAllocator.init(allocator),
 			.screen = try Term.init(allocator, io, env),
 			.conn = undefined,
@@ -468,8 +478,8 @@ pub const App = struct {
 		// Opening one, or leaving it, changes which of the two this is.
 		if (self.conn.sessionIn().len == 0 and self.editor != null and talking) {
 			self.closeEditor();
-		} else if (self.conn.sessionIn().len != 0 and self.editor == null) {
-			try self.openEditor();
+		} else {
+			try self.followShell();
 		}
 	}
 
@@ -982,6 +992,7 @@ pub const App = struct {
 		self.allocator.free(self.owned_path);
 		self.arena.deinit();
 		self.reports_arena.deinit();
+		self.object_arena.deinit();
 		self.form_arena.deinit();
 	}
 
@@ -1208,6 +1219,79 @@ pub const App = struct {
 			self.cursor_row = if (self.descending) 0 else self.rows.items.len -| 1;
 		}
 		self.setTitle("{s}", .{table.name});
+	}
+
+	/// Open the row the cursor is on: a screen about that one thing, with what can
+	/// be done to it along the bottom.
+	///
+	/// Whether there is such a screen is the engine's to say. A database row is
+	/// already all of itself and opening one means editing it, which is what
+	/// `enter` has always done; a Kubernetes object is a document with a
+	/// controller behind it, and what somebody wants from it is its state, its
+	/// events, its logs and a shell - none of which is in the row.
+	pub fn openRow(self: *App) !bool {
+		const table = self.currentTable() orelse return false;
+		if (self.cursor_row >= self.rows.items.len) {
+			return false;
+		}
+		const name = self.rowName() orelse return false;
+		_ = self.object_arena.reset(.retain_capacity);
+		const arena = self.object_arena.allocator();
+		const facts = (self.conn.rowDetail(arena, table, name) catch null) orelse return false;
+		self.object_facts = facts;
+		self.object_actions = self.conn.rowActions(arena, table, name) catch &.{};
+		self.object_title = try std.fmt.allocPrint(arena, "{s}", .{name});
+		self.object_scroll = 0;
+		self.view = .object;
+		return true;
+	}
+
+	/// What the row the cursor is on is called, by the key the engine gave it.
+	fn rowName(self: *App) ?[]const u8 {
+		const row = self.rows.items[self.cursor_row];
+		if (row.key) |key| {
+			if (database.ask.only(key, "name")) |name| {
+				return name;
+			}
+			if (key.len != 0) {
+				return key[0].value;
+			}
+		}
+		for (self.cols.items, 0..) |column, i| {
+			if (std.mem.eql(u8, column, "name") and i < row.cells.len) {
+				return row.cells[i].text;
+			}
+		}
+		return null;
+	}
+
+	/// Run what an action on the object screen says. It is the engine's own
+	/// console line, so this neither knows nor cares what it does.
+	pub fn runObjectAction(self: *App, action: database.Action) !void {
+		const owned = try self.allocator.dupe(u8, action.statement);
+		defer self.allocator.free(owned);
+		self.view = .grid;
+		try self.runBatch(owned);
+		try self.followShell();
+	}
+
+	/// A shell that has just been opened needs somewhere to be typed into, and one
+	/// that has just closed leaves an editor with nothing to say. Called wherever
+	/// a statement may have opened or closed one.
+	fn followShell(self: *App) !void {
+		const talking = self.conn.sessionIn().len != 0;
+		if (talking and self.editor == null) {
+			try self.openEditor();
+		} else if (!talking and self.editor != null and self.editor.?.text.items.len == 0) {
+			self.closeEditor();
+		}
+	}
+
+	pub fn closeObject(self: *App) void {
+		self.object_facts = &.{};
+		self.object_actions = &.{};
+		self.object_title = "";
+		self.view = .grid;
 	}
 
 	/// Hand the terminal to a shell in a container until it ends.
@@ -2007,6 +2091,11 @@ pub const App = struct {
 	pub fn runPending(self: *App) !void {
 		if (self.pending.items.len == 0) {
 			return;
+		}
+		// Whatever was being looked at may not survive this, and the answer goes
+		// on the grid either way.
+		if (self.view == .object) {
+			self.closeObject();
 		}
 		const statement = try self.allocator.dupe(u8, self.pending.items);
 		defer self.allocator.free(statement);
