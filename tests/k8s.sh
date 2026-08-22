@@ -232,4 +232,22 @@ asked=$(python3 tests/screen.py "$ROOT" '{tab}' 'x' '{sleep}' '{keep}' 2>&1)
 printf '%s' "$asked" | grep -q "type y to delete" || fail "x should ask before deleting an object"
 echo "ok: x asks before deleting, because nothing takes that back"
 
+# A shell in a container: the WebSocket, the channel framing and the terminal
+# handover, checked by asking the container who it is and believing its answer.
+kubectl -n payments run shellme --image=busybox:1.36 --command -- \
+	sh -c 'while true; do sleep 30; done' >/dev/null
+until [ "$(kubectl -n payments get pod shellme -o jsonpath='{.status.phase}' 2>/dev/null)" = "Running" ]; do
+	sleep 2
+done
+inside=$(python3 tests/screen.py "$ROOT" 's' 'EXEC shellme' '{ctrl-s}' '{sleep}' \
+	'echo I-AM-$(hostname)' '{enter}' '{sleep}' '{keep}' 2>&1)
+printf '%s' "$inside" | grep -q "I-AM-shellme" ||
+	fail "EXEC did not get a shell in the container"
+echo "ok: EXEC opens a shell in the container and what is typed reaches it"
+
+# And what it says when the pod is not there, rather than a hung terminal.
+missing=$(python3 tests/screen.py "$ROOT" 's' 'EXEC nosuchpod' '{ctrl-s}' '{sleep}' '{keep}' 2>&1)
+printf '%s' "$missing" | grep -qi "nosuchpod" || fail "EXEC on a missing pod should name it"
+echo "ok: EXEC on a pod that is not there says so"
+
 echo "all good"

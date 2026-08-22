@@ -34,6 +34,7 @@ pub const k8s_target = @import("k8s/target.zig");
 pub const ssh = @import("ssh.zig");
 pub const net = @import("net.zig");
 pub const http = @import("http.zig");
+pub const ws = @import("ws.zig");
 pub const sigv4 = @import("s3/sigv4.zig");
 
 /// What the interface asks for, as a structure: see the file for why.
@@ -64,6 +65,7 @@ comptime {
 	_ = k8s_api;
 	_ = k8s_target;
 	_ = net;
+	_ = ws;
 	_ = http;
 	_ = ssh;
 	_ = sigv4;
@@ -290,6 +292,56 @@ pub const Rows = union(enum) {
 };
 
 // --------------------------------------------------------------- connection
+
+/// A session that owns the terminal until it ends: a shell in a container, and
+/// nothing else so far. Dispatched the way `Rows` is, because it is the same
+/// shape of thing - one driver's, held by the interface.
+pub const Shell = union(enum) {
+	k8s: *k8s.Shell,
+
+	pub fn deinit(self: Shell) void {
+		switch (self) {
+			inline else => |session| {
+				const allocator = session.allocator;
+				session.deinit();
+				allocator.destroy(session);
+			},
+		}
+	}
+
+	/// The socket, so a caller can wait on this and a terminal together.
+	pub fn handle(self: Shell) std.c.fd_t {
+		switch (self) {
+			inline else => |session| return session.handle(),
+		}
+	}
+
+	pub fn write(self: Shell, bytes: []const u8) Error!void {
+		switch (self) {
+			inline else => |session| return session.write(bytes),
+		}
+	}
+
+	pub fn resize(self: Shell, cols: u16, rows: u16) void {
+		switch (self) {
+			inline else => |session| session.resize(cols, rows),
+		}
+	}
+
+	/// Whatever has come back by now, appended. False when it is over.
+	pub fn read(self: Shell, out: *List) Error!bool {
+		switch (self) {
+			inline else => |session| return session.read(out),
+		}
+	}
+
+	/// Why it ended, where that is worth saying.
+	pub fn why(self: Shell, arena: std.mem.Allocator) []const u8 {
+		switch (self) {
+			inline else => |session| return session.why(arena),
+		}
+	}
+};
 
 pub const Db = union(enum) {
 	sqlite: *sqlite.Db,
@@ -581,6 +633,31 @@ pub const Db = union(enum) {
 					return false;
 				}
 				return readsOnly(statement);
+			},
+		}
+	}
+
+	/// Whether this statement wants the terminal rather than the grid. Only one
+	/// engine has anything to say here, and the rest say no by not answering.
+	pub fn wantsTerminal(self: Db, statement: []const u8) bool {
+		switch (self) {
+			inline else => |driver| {
+				if (@hasDecl(@TypeOf(driver.*), "wantsTerminal")) {
+					return driver.wantsTerminal(statement);
+				}
+				return false;
+			},
+		}
+	}
+
+	/// Open the session that statement asked for.
+	pub fn shell(self: Db, statement: []const u8) Error!?Shell {
+		switch (self) {
+			inline else => |driver| {
+				if (@hasDecl(@TypeOf(driver.*), "shell")) {
+					return driver.shell(statement);
+				}
+				return null;
 			},
 		}
 	}

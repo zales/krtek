@@ -142,6 +142,8 @@ fn isDark(rgb: [3]u8) bool {
 	return luma < 128;
 }
 
+extern "c" fn isatty(fd: std.c.fd_t) c_int;
+
 pub const Term = struct {
 	allocator: std.mem.Allocator,
 	io: std.Io,
@@ -180,6 +182,12 @@ pub const Term = struct {
 	/// task to read it - `follow` stops the old one before it sets this - so the
 	/// two never touch it at once.
 	tick_ms: u64 = 0,
+	/// The terminal during a handover, and -1 the rest of the time: which
+	/// descriptor to read what is typed from, which to write to, and which - if
+	/// any - was opened here and has to be closed again. See `handle`.
+	read_fd: std.c.fd_t = -1,
+	write_fd: std.c.fd_t = -1,
+	opened_fd: std.c.fd_t = -1,
 
 	pub fn init(allocator: std.mem.Allocator, io: std.Io, env: *std.process.Environ.Map) !*Term {
 		const self = try allocator.create(Term);
@@ -362,6 +370,100 @@ pub const Term = struct {
 
 	pub fn cursorOff(self: *Term) void {
 		self.vx.screen.cursor_vis = false;
+	}
+
+	// --- handing the terminal over ---
+
+	/// Give the terminal to something else. The key loop stops - its reader
+	/// thread would otherwise eat every keystroke meant for the other program -
+	/// the alternate screen is left so what was on it comes back afterwards, and
+	/// the cursor is shown, because whatever takes over is going to want one.
+	///
+	/// The terminal stays raw. That is what a shell on the far end wants: the pty
+	/// there does the echoing and the line editing, and a local terminal that
+	/// also did them would double every character.
+	pub fn release(self: *Term) void {
+		self.follow(0);
+		self.loop.stop();
+		self.vx.exitAltScreen(self.tty.writer()) catch {};
+		const writer = self.tty.writer();
+		writer.writeAll("\x1b[?25h") catch {};
+		writer.flush() catch {};
+
+		// The descriptors this program was started with, where they are the
+		// terminal - and not one opened from `/dev/tty`.
+		//
+		// On macOS a descriptor for `/dev/tty` cannot be waited on: `poll` calls
+		// it invalid and `select` never calls it ready, while `read` on the very
+		// same descriptor returns what was typed. A shell built on one there sees
+		// no keystroke ever. The descriptor the shell handed over works properly,
+		// so it is the one to use, and `/dev/tty` is the fallback for the case
+		// where standard input is not a terminal at all - where there is nothing
+		// to wait on anyway.
+		self.read_fd = if (isatty(0) == 1) 0 else self.openTerminal();
+		self.write_fd = if (isatty(1) == 1) 1 else self.read_fd;
+	}
+
+	fn openTerminal(self: *Term) std.c.fd_t {
+		self.opened_fd = std.c.open("/dev/tty", .{ .ACCMODE = .RDWR });
+		return self.opened_fd;
+	}
+
+	/// Take it back, and forget everything that was on the screen: what ran in
+	/// between drew whatever it liked, so nothing about the old frame is true.
+	pub fn reclaim(self: *Term) void {
+		if (self.opened_fd >= 0) {
+			_ = std.c.close(self.opened_fd);
+			self.opened_fd = -1;
+		}
+		self.read_fd = -1;
+		self.write_fd = -1;
+		self.vx.enterAltScreen(self.tty.writer()) catch {};
+		self.vx.queueRefresh();
+		self.current = .{};
+		self.loop.start() catch {};
+	}
+
+	/// The terminal itself, for a caller that has to wait on it and on something
+	/// else at the same time.
+	///
+	/// Its own descriptor, opened for the handover and closed after it. The one
+	/// libvaxis holds is not a descriptor anything here may `poll` - it belongs
+	/// to a reader that has just been stopped and to an I/O layer with its own
+	/// ideas - and asking about it gets POLLNVAL rather than an answer. The
+	/// terminal is the terminal whichever descriptor names it, and the raw mode
+	/// it is in is a property of the terminal.
+	pub fn handle(self: *Term) std.c.fd_t {
+		return self.read_fd;
+	}
+
+	/// Bytes straight from the terminal, or none. Only while it is released: the
+	/// key loop owns this at every other moment.
+	///
+	/// `read(2)`, not a reader that waits for a full buffer - what is wanted is
+	/// whatever has been typed *by now*, and holding a keystroke until the next
+	/// four thousand arrive is, for somebody at a shell, forever.
+	pub fn readRaw(self: *Term, into: []u8) usize {
+		if (self.read_fd < 0) {
+			return 0;
+		}
+		const got = std.c.read(self.read_fd, into.ptr, into.len);
+		return if (got > 0) @intCast(got) else 0;
+	}
+
+	/// Bytes straight to the terminal, through nothing at all.
+	pub fn writeRaw(self: *Term, bytes: []const u8) void {
+		if (self.write_fd < 0) {
+			return;
+		}
+		var at: usize = 0;
+		while (at < bytes.len) {
+			const wrote = std.c.write(self.write_fd, bytes[at..].ptr, bytes.len - at);
+			if (wrote <= 0) {
+				return;
+			}
+			at += @intCast(wrote);
+		}
 	}
 
 	// --- following ---

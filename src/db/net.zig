@@ -110,6 +110,23 @@ pub const Stream = struct {
 		}
 	}
 
+	/// Whatever has arrived by now, and nothing if nothing has. For a session
+	/// waiting on two things at once - a terminal and a socket - where sitting on
+	/// either one is the same as ignoring the other.
+	pub fn readNow(self: *Stream, into: []u8) !usize {
+		const read = if (self.ssl) |session|
+			ssl.SSL_read(session, into.ptr, @intCast(into.len))
+		else
+			@as(c_int, @intCast(std.c.recv(self.fd, into.ptr, into.len, 0)));
+		if (read > 0) {
+			return @intCast(read);
+		}
+		if (read == 0) {
+			return error.Gone;
+		}
+		return if (self.timedOut()) 0 else error.Gone;
+	}
+
 	/// Whether the last read came back empty-handed because the timeout ran out,
 	/// rather than because the connection is broken.
 	fn timedOut(self: *Stream) bool {

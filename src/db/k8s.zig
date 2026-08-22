@@ -38,6 +38,7 @@
 const std = @import("std");
 const db = @import("db.zig");
 const http = @import("http.zig");
+const ws = @import("ws.zig");
 
 pub const yaml = @import("k8s/yaml.zig");
 pub const config = @import("k8s/config.zig");
@@ -567,6 +568,77 @@ pub const Db = struct {
 		return false;
 	}
 
+	/// Whether this statement wants the terminal rather than the grid.
+	pub fn wantsTerminal(_: *Db, statement: []const u8) bool {
+		var words = std.mem.tokenizeAny(u8, statement, " \t\r\n;");
+		const verb = words.next() orelse return false;
+		return eq(verb, "EXEC") or eq(verb, "SH") or eq(verb, "SHELL");
+	}
+
+	/// Open a shell in a container: `EXEC <pod> [command...]`, and `sh` where no
+	/// command was named, because that is what anybody means.
+	pub fn shell(self: *Db, statement: []const u8) db.Error!?db.Shell {
+		self.begin();
+		var scratch = std.heap.ArenaAllocator.init(self.allocator);
+		defer scratch.deinit();
+		const arena = scratch.allocator();
+
+		var words = std.mem.tokenizeAny(u8, statement, " \t\r\n;");
+		_ = words.next();
+		const pod = words.next() orelse {
+			self.remember("EXEC <pod> [command] - sh where no command is named");
+			return error.Driver;
+		};
+
+		var target: List = .empty;
+		try target.print(arena, "/api/v1/namespaces/{s}/pods/{s}/exec?stdin=true&stdout=true&stderr=true&tty=true", .{
+			self.namespace,
+			pod,
+		});
+		var commands: usize = 0;
+		while (words.next()) |word| {
+			try target.print(arena, "&command={s}", .{try escapedQuery(arena, word)});
+			commands += 1;
+		}
+		if (commands == 0) {
+			// Not bash: a great many images have only the one shell, and asking
+			// for the one that is not there is a session that ends at once.
+			try target.appendSlice(arena, "&command=sh");
+		}
+
+		const server = splitServer(self.ready.server) orelse return error.Driver;
+		var headers: std.ArrayListUnmanaged([2][]const u8) = .empty;
+		if (self.authorization.len != 0) {
+			try headers.append(arena, .{ "Authorization", self.authorization });
+		}
+		var why: List = .empty;
+		const socket = ws.connect(self.allocator, .{
+			.host = server.host,
+			.port = server.port,
+			.use_tls = server.tls,
+			.tls = .{
+				.verify = !self.ready.insecure,
+				.ca_pem = self.ready.ca_pem,
+				.cert_pem = self.ready.cert_pem,
+				.key_pem = self.ready.key_pem,
+			},
+			.target = target.items,
+			// The framing kubectl has used since 1.10, and the one every cluster
+			// that speaks WebSocket at all speaks.
+			.protocol = "v4.channel.k8s.io",
+			.headers = headers.items,
+			// A shell waits on the person at the keyboard, so the socket must not
+			// sit on a read: this is the tick of the loop that pumps it.
+			.timeout_ms = 50,
+		}, &why) catch {
+			self.complain("{s}: {s}", .{ pod, if (why.items.len != 0) why.items else "the cluster would not open a shell" });
+			return error.Driver;
+		};
+		const opened = try self.allocator.create(Shell);
+		opened.* = .{ .allocator = self.allocator, .socket = socket };
+		return .{ .k8s = opened };
+	}
+
 	pub fn ddl(_: *Db) db.Ddl {
 		return .{ .k8s = Ddl{} };
 	}
@@ -758,7 +830,7 @@ pub const Db = struct {
 			return null;
 		}
 		self.complain(
-			"this is a cluster, not SQL - GET pods, WHY <pod>, LOGS <pod>, DESCRIBE pod <name>, SCALE deployments <name> <n>, RESTART deployments <name>, USE <namespace>, CONTEXTS, VERSION",
+			"this is a cluster, not SQL - GET pods, WHY <pod>, LOGS <pod>, EXEC <pod> [command], DESCRIBE pod <name>, SCALE deployments <name> <n>, RESTART deployments <name>, USE <namespace>, CONTEXTS, VERSION",
 			.{},
 		);
 		return error.Driver;
@@ -1001,6 +1073,19 @@ pub const Db = struct {
 	}
 };
 
+/// A word as it can go in a query string. A command may hold anything.
+fn escapedQuery(arena: std.mem.Allocator, word: []const u8) ![]const u8 {
+	var out: List = .empty;
+	for (word) |char| {
+		if (std.ascii.isAlphanumeric(char) or char == '-' or char == '_' or char == '.' or char == '~' or char == '/') {
+			try out.append(arena, char);
+		} else {
+			try out.print(arena, "%{X:0>2}", .{char});
+		}
+	}
+	return out.items;
+}
+
 fn textAt(object: Json, path: []const u8) []const u8 {
 	const found = api.at(object, path) orelse return "";
 	return if (found == .string) found.string else "";
@@ -1164,6 +1249,106 @@ fn nowSeconds() i64 {
 	}
 	return @intCast(moment.sec);
 }
+
+/// A shell in a container, over the same WebSocket kubectl uses.
+///
+/// Kubernetes multiplexes the streams onto one socket by putting a channel
+/// number in front of every message: 0 is what is typed, 1 and 2 are what comes
+/// back, 3 is how the far end says why it stopped, and 4 is the window size. So
+/// this is a thin thing - the protocol is a first byte - and everything hard
+/// about it is on the other side, in a terminal that has to be handed over and
+/// handed back.
+pub const Shell = struct {
+	allocator: std.mem.Allocator,
+	socket: ws.Socket,
+	/// What channel 3 said, which is how a non-zero exit arrives.
+	status: List = .empty,
+	finished: bool = false,
+
+	const STDIN: u8 = 0;
+	const STDOUT: u8 = 1;
+	const STDERR: u8 = 2;
+	const ERROR: u8 = 3;
+	const RESIZE: u8 = 4;
+
+	pub fn deinit(self: *Shell) void {
+		self.status.deinit(self.allocator);
+		self.socket.deinit();
+	}
+
+	/// The socket, so a caller can wait on this and a terminal together.
+	pub fn handle(self: *Shell) std.c.fd_t {
+		return self.socket.handle();
+	}
+
+	/// What was typed, on its way to the container.
+	pub fn write(self: *Shell, bytes: []const u8) db.Error!void {
+		if (bytes.len == 0) {
+			return;
+		}
+		var framed = try self.allocator.alloc(u8, bytes.len + 1);
+		defer self.allocator.free(framed);
+		framed[0] = STDIN;
+		@memcpy(framed[1..], bytes);
+		self.socket.send(.binary, framed) catch return error.Driver;
+	}
+
+	/// Tell the far end how big the window is. A shell that thinks it is on
+	/// eighty columns when it is not draws everything in the wrong place.
+	pub fn resize(self: *Shell, cols: u16, rows: u16) void {
+		var buffer: [64]u8 = undefined;
+		const message = std.fmt.bufPrint(&buffer, "{c}{{\"Width\":{d},\"Height\":{d}}}", .{ RESIZE, cols, rows }) catch return;
+		self.socket.send(.binary, message) catch {};
+	}
+
+	/// Whatever the container has said by now, appended to `out`. False when the
+	/// session is over.
+	pub fn read(self: *Shell, out: *List) db.Error!bool {
+		if (self.finished) {
+			return false;
+		}
+		if (!(self.socket.drain() catch false)) {
+			self.finished = true;
+			return false;
+		}
+		while (true) {
+			const frame = (self.socket.next() catch {
+				self.finished = true;
+				return false;
+			}) orelse break;
+			defer self.socket.done();
+			if (frame.payload.len == 0) {
+				continue;
+			}
+			switch (frame.payload[0]) {
+				STDOUT, STDERR => try out.appendSlice(self.allocator, frame.payload[1..]),
+				ERROR => {
+					// A JSON status, and `Success` is the boring one.
+					self.status.clearRetainingCapacity();
+					try self.status.appendSlice(self.allocator, frame.payload[1..]);
+					self.finished = true;
+					return false;
+				},
+				else => {},
+			}
+		}
+		return !self.socket.closed;
+	}
+
+	/// Why it ended, where that is worth saying. An ordinary exit says nothing.
+	pub fn why(self: *Shell, arena: std.mem.Allocator) []const u8 {
+		if (self.status.items.len == 0) {
+			return "";
+		}
+		const parsed = std.json.parseFromSliceLeaky(Json, arena, self.status.items, .{}) catch return "";
+		const said = api.at(parsed, "status") orelse return "";
+		if (said == .string and std.mem.eql(u8, said.string, "Success")) {
+			return "";
+		}
+		const message = api.at(parsed, "message") orelse return "";
+		return if (message == .string) message.string else "";
+	}
+};
 
 pub const Rows = struct {
 	owner: *Db,

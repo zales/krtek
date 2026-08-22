@@ -130,6 +130,48 @@ pub const Report = struct {
 	failure: ?[]const u8,
 };
 
+/// Waiting on a terminal and a socket at once, with `select` rather than `poll`.
+///
+/// `poll` is the obvious call and on macOS it does not work here: given a
+/// descriptor for `/dev/tty` it answers POLLNVAL - the descriptor is perfectly
+/// good, and `read` on it returns what was typed - so a shell built on `poll`
+/// there simply never sees a keystroke. `select` answers properly on both
+/// systems, and its bitmap is one line to build.
+const Waiter = struct {
+	/// A thousand and twenty-four bits, which is what `fd_set` is on both
+	/// systems. Little-endian words of any width put bit n in the same place, so
+	/// counting in 32s is right on a 64-bit `fd_set` too.
+	bits: [32]u32 = [_]u32{0} ** 32,
+	highest: c_int = 0,
+
+	extern "c" fn select(nfds: c_int, r: ?*anyopaque, w: ?*anyopaque, e: ?*anyopaque, timeout: ?*std.c.timeval) c_int;
+
+	fn watch(self: *Waiter, fd: std.c.fd_t) void {
+		if (fd < 0 or fd >= 1024) {
+			return;
+		}
+		self.bits[@intCast(@divTrunc(fd, 32))] |= @as(u32, 1) << @intCast(@mod(fd, 32));
+		self.highest = @max(self.highest, fd + 1);
+	}
+
+	fn ready(self: *Waiter, fd: std.c.fd_t) bool {
+		if (fd < 0 or fd >= 1024) {
+			return false;
+		}
+		return (self.bits[@intCast(@divTrunc(fd, 32))] & (@as(u32, 1) << @intCast(@mod(fd, 32)))) != 0;
+	}
+
+	/// Wait for one of them, or for the time to run out. `select` clears the
+	/// bits of whatever is not ready, so the set is built again each time.
+	fn wait(self: *Waiter, ms: i64) void {
+		var timeout = std.c.timeval{
+			.sec = @intCast(@divFloor(ms, 1000)),
+			.usec = @intCast(@mod(ms, 1000) * 1000),
+		};
+		_ = select(self.highest, &self.bits, null, null, &timeout);
+	}
+};
+
 pub const App = struct {
 	allocator: std.mem.Allocator,
 	arena: std.heap.ArenaAllocator, // the loaded page of rows
@@ -1152,6 +1194,76 @@ pub const App = struct {
 		self.setTitle("{s}", .{table.name});
 	}
 
+	/// Hand the terminal to a shell in a container until it ends.
+	///
+	/// Two things are being waited on and neither may be sat upon: what is typed
+	/// has to reach the container without the screen having to change, and what
+	/// the container says has to arrive without a key having to be pressed. So
+	/// both the terminal and the socket are polled together, with a tick short
+	/// enough that a shell feels like a shell.
+	pub fn runShell(self: *App, statement: []const u8) !void {
+		const session = (self.conn.shell(statement) catch {
+			self.complain("{s}", .{self.conn.message()});
+			return;
+		}) orelse return;
+		defer session.deinit();
+
+		self.screen.release();
+		defer {
+			self.screen.reclaim();
+			self.screen.reset();
+		}
+		const size = self.screen.size();
+		session.resize(size.cols, size.rows);
+		self.screen.writeRaw("\r\n");
+
+		var out: database.List = .empty;
+		defer out.deinit(self.allocator);
+		var last = size;
+		const terminal = self.screen.handle();
+		const socket = session.handle();
+		var typed: [4096]u8 = undefined;
+		while (true) {
+			var waiting = Waiter{};
+			waiting.watch(terminal);
+			waiting.watch(socket);
+			// Short enough that the window being resized is noticed while somebody
+			// is still dragging the corner.
+			waiting.wait(50);
+			if (waiting.ready(terminal)) {
+				const got = self.screen.readRaw(&typed);
+				if (got != 0) {
+					session.write(typed[0..got]) catch break;
+				}
+			}
+			out.clearRetainingCapacity();
+			const alive = session.read(&out) catch false;
+			if (out.items.len != 0) {
+				self.screen.writeRaw(out.items);
+			}
+			if (!alive) {
+				break;
+			}
+			// The window may have changed while somebody else had the screen, and
+			// a shell that thinks it is eighty columns wide when it is not draws
+			// everything in the wrong place.
+			const now = self.screen.size();
+			if (now.cols != last.cols or now.rows != last.rows) {
+				session.resize(now.cols, now.rows);
+				last = now;
+			}
+		}
+
+		var scratch = std.heap.ArenaAllocator.init(self.allocator);
+		defer scratch.deinit();
+		const said = session.why(scratch.allocator());
+		if (said.len != 0) {
+			self.complain("{s}", .{said});
+		} else {
+			self.say("the shell ended", .{});
+		}
+	}
+
 	/// Fill the grid again from the statement that filled it, where a statement
 	/// did. Only where the engine says running it twice is the same as running it
 	/// once: a console with `PRODUCE` and `SCALE` in it has statements that must
@@ -1508,6 +1620,11 @@ pub const App = struct {
 	/// generated script needs: its own COMMIT would otherwise make a half
 	/// finished rebuild permanent.
 	pub fn runBatchStopping(self: *App, sql: []const u8, stop_on_error: bool) !void {
+		// A statement that wants the terminal is not a statement the grid can
+		// hold, and it is never one of a batch: it owns the screen until it ends.
+		if (self.conn.wantsTerminal(std.mem.trim(u8, sql, " \t\r\n;"))) {
+			return self.runShell(std.mem.trim(u8, sql, " \t\r\n;"));
+		}
 		_ = self.reports_arena.reset(.retain_capacity);
 		const arena = self.reports_arena.allocator();
 		self.reports.clearRetainingCapacity();
