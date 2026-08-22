@@ -52,7 +52,8 @@ architectures. The `.deb` installs the binary, the man page and the copyright, a
 
 **It needs nothing installed.** SQLite, libpq, the MariaDB connector, libssh2 and
 OpenSSL are linked into the binary, and Redis, Kafka, S3, Azure Blob, RabbitMQ and
-the Kubernetes API are spoken directly. The Linux
+the Kubernetes API are spoken directly - down to the WebSocket a shell in a
+container needs, so no `kubectl` either. The Linux
 builds are static against musl and run on any distribution - checked on Debian with nothing
 installed at all; the macOS builds leave only Apple's own libraries dynamic. That
 is `-Dstatic`.
@@ -181,6 +182,16 @@ The structure of a table: columns, indexes, foreign keys and the `CREATE`
 statement the engine reports.
 
 ![the structure of a table](docs/structure.svg)
+
+A cluster is a database too: a resource kind is a table and a namespace is a
+schema.
+
+![pods listed as a table](docs/kubernetes.svg)
+
+`enter` opens the object - what each container is doing, what the last one died of,
+and the events - with what can be done to it along the bottom.
+
+![one pod, opened](docs/pod.svg)
 
 Those are not photographs of a terminal. The pty harness reproduces what the app
 drew, colours and all, and [tests/shot.py](tests/shot.py) writes that grid out as
@@ -991,6 +1002,7 @@ finished one - and checks that `SCALE` and `RESTART` reach the cluster and that
 
 ```sh
 zig build && ./tests/k8s.sh
+SHOTS=1 ./tests/k8s.sh    # and the two screenshots that need a cluster
 ```
 
 That is how everything described here was verified: against a real SQLite file

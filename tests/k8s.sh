@@ -11,6 +11,9 @@
 # an exec credential plugin, since that last one is how nearly every cloud cluster
 # authenticates and the one most likely to be broken by a change here.
 #
+# Run it with SHOTS=1 to regenerate the two screenshots in docs/ that need a
+# cluster; everything else in there comes from a SQLite file and tests/shots.sh.
+#
 # What is compared is this program against kubectl, column for column, because
 # kubectl is the yardstick everybody already has in their head: a pod that says
 # Running here and CrashLoopBackOff there is a driver that reads the phase and
@@ -318,5 +321,23 @@ bad=$(python3 tests/screen.py "$ROOT" 's' 'APPLY' '{enter}' 'kind: ConfigMap' '{
 	'{ctrl-s}' '{sleep}' 'y' '{enter}' '{sleep}' '{keep}' 2>&1)
 printf '%s' "$bad" | grep -q "apiVersion" || fail "a document with no apiVersion should say so"
 echo "ok: a document that is not a manifest is named rather than sent"
+
+# The screenshots on the website and in the README, which need a cluster with
+# something interesting in it - so they are regenerated here rather than in
+# tests/shots.sh, where everything else comes from a SQLite file.
+if [ -n "${SHOTS:-}" ]; then
+	kubectl -n payments create deployment billing --image=busybox:1.36 -- \
+		sh -c 'echo starting; echo cannot reach the ledger; exit 1' >/dev/null 2>&1 || true
+	printf 'waiting for something to be wrong with'
+	until kubectl -n payments get pods --no-headers 2>/dev/null | grep -q CrashLoopBackOff; do
+		printf .
+		sleep 3
+	done
+	echo " it"
+	SHOT_COLS=104 SHOT_ROWS=14 python3 tests/shot.py docs/kubernetes.svg "$ROOT" '{tab}'
+	SHOT_COLS=104 SHOT_ROWS=26 python3 tests/shot.py docs/pod.svg "$ROOT" \
+		'{tab}' '{down}{down}{down}' '{enter}' '{wait}'
+	echo "ok: docs/kubernetes.svg and docs/pod.svg regenerated"
+fi
 
 echo "all good"

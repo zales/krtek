@@ -1,0 +1,64 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="902" height="280" viewBox="0 0 902 280" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13.0">
+<rect width="100%" height="100%" rx="8" fill="#111114"/>
+<rect x="14.0" y="14.0" width="59.3" height="18.0" fill="#26262c"/>
+<rect x="72.8" y="14.0" width="59.3" height="18.0" fill="#26262c"/>
+<rect x="131.6" y="14.0" width="756.5" height="18.0" fill="#26262c"/>
+<rect x="14.0" y="50.0" width="202.1" height="18.0" fill="#2e2e36"/>
+<rect x="215.6" y="50.0" width="8.9" height="18.0" fill="#2e2e36"/>
+<rect x="232.4" y="50.0" width="588.5" height="18.0" fill="#26262c"/>
+<rect x="820.4" y="50.0" width="67.7" height="18.0" fill="#26262c"/>
+<rect x="232.4" y="68.0" width="202.1" height="18.0" fill="#8aa7f0"/>
+<rect x="434.0" y="68.0" width="193.7" height="18.0" fill="#2e2e36"/>
+<rect x="627.2" y="68.0" width="76.1" height="18.0" fill="#2e2e36"/>
+<rect x="702.8" y="68.0" width="118.1" height="18.0" fill="#2e2e36"/>
+<rect x="14.0" y="230.0" width="286.1" height="18.0" fill="#26262c"/>
+<rect x="299.6" y="230.0" width="588.5" height="18.0" fill="#26262c"/>
+<text x="14.0" y="27.3" fill="#e0e0e6" font-weight="600" xml:space="preserve" textLength="58.8" lengthAdjust="spacing"> krtek </text>
+<text x="72.8" y="27.3" fill="#8aa7f0" xml:space="preserve" textLength="58.8" lengthAdjust="spacing">default</text>
+<text x="131.6" y="27.3" fill="#9a9aa6" xml:space="preserve" textLength="756.0" lengthAdjust="spacing">                                                      Kubernetes v1.31.5+k3s1  18 objects </text>
+<text x="14.0" y="45.3" fill="#9a9aa6" xml:space="preserve" textLength="92.4" lengthAdjust="spacing"> NAMESPACE </text>
+<text x="106.4" y="45.3" fill="#8aa7f0" xml:space="preserve" textLength="67.2" lengthAdjust="spacing">payments</text>
+<text x="173.6" y="45.3" fill="#7c7c88" xml:space="preserve" textLength="58.8" lengthAdjust="spacing">     #│</text>
+<text x="232.4" y="45.3" fill="#8aa7f0" font-weight="600" xml:space="preserve" textLength="42.0" lengthAdjust="spacing"> pods</text>
+<text x="274.4" y="45.3" fill="#9a9aa6" xml:space="preserve" textLength="613.2" lengthAdjust="spacing">  1-5 of ?   page 1/1                                                    </text>
+<text x="14.0" y="63.3" fill="#e0e0e6" xml:space="preserve" textLength="201.6" lengthAdjust="spacing"> ▪ pods                 </text>
+<text x="215.6" y="63.3" fill="#7c7c88" xml:space="preserve" textLength="8.4" lengthAdjust="spacing">?</text>
+<text x="224.0" y="63.3" fill="#7c7c88" xml:space="preserve" textLength="8.4" lengthAdjust="spacing">│</text>
+<text x="232.4" y="63.3" fill="#9a9aa6" font-weight="600" xml:space="preserve" textLength="588.0" lengthAdjust="spacing"> name                    ready status           restarts age ip       </text>
+<text x="14.0" y="81.3" fill="#e0e0e6" xml:space="preserve" textLength="201.6" lengthAdjust="spacing"> ▪ deployments          </text>
+<text x="215.6" y="81.3" fill="#7c7c88" xml:space="preserve" textLength="16.8" lengthAdjust="spacing">?│</text>
+<text x="232.4" y="81.3" fill="#111114" xml:space="preserve" textLength="201.6" lengthAdjust="spacing"> api-579bcf946b-b4h8x   </text>
+<text x="434.0" y="81.3" fill="#e0e0e6" xml:space="preserve" textLength="193.2" lengthAdjust="spacing"> 1/1   Running         </text>
+<text x="627.2" y="81.3" fill="#63a8d8" xml:space="preserve" textLength="75.6" lengthAdjust="spacing">        0</text>
+<text x="702.8" y="81.3" fill="#e0e0e6" xml:space="preserve" textLength="117.6" lengthAdjust="spacing"> 1m  10.42.0.4</text>
+<text x="14.0" y="99.3" fill="#e0e0e6" xml:space="preserve" textLength="201.6" lengthAdjust="spacing"> ▪ statefulsets         </text>
+<text x="215.6" y="99.3" fill="#7c7c88" xml:space="preserve" textLength="16.8" lengthAdjust="spacing">?│</text>
+<text x="232.4" y="99.3" fill="#e0e0e6" xml:space="preserve" textLength="394.8" lengthAdjust="spacing"> api-579bcf946b-ltgbr    1/1   Running         </text>
+<text x="627.2" y="99.3" fill="#63a8d8" xml:space="preserve" textLength="75.6" lengthAdjust="spacing">        0</text>
+<text x="702.8" y="99.3" fill="#e0e0e6" xml:space="preserve" textLength="184.8" lengthAdjust="spacing"> 1m  10.42.0.6        </text>
+<text x="14.0" y="117.3" fill="#e0e0e6" xml:space="preserve" textLength="201.6" lengthAdjust="spacing"> ▪ daemonsets           </text>
+<text x="215.6" y="117.3" fill="#7c7c88" xml:space="preserve" textLength="16.8" lengthAdjust="spacing">?│</text>
+<text x="232.4" y="117.3" fill="#e0e0e6" xml:space="preserve" textLength="394.8" lengthAdjust="spacing"> api-579bcf946b-wxtt4    1/1   Running         </text>
+<text x="627.2" y="117.3" fill="#63a8d8" xml:space="preserve" textLength="75.6" lengthAdjust="spacing">        0</text>
+<text x="702.8" y="117.3" fill="#e0e0e6" xml:space="preserve" textLength="184.8" lengthAdjust="spacing"> 1m  10.42.0.5        </text>
+<text x="14.0" y="135.3" fill="#e0e0e6" xml:space="preserve" textLength="201.6" lengthAdjust="spacing"> ▪ replicasets          </text>
+<text x="215.6" y="135.3" fill="#7c7c88" xml:space="preserve" textLength="16.8" lengthAdjust="spacing">?│</text>
+<text x="232.4" y="135.3" fill="#e0e0e6" xml:space="preserve" textLength="394.8" lengthAdjust="spacing"> billing-b9558874d-6kzwq 0/1   CrashLoopBackOff</text>
+<text x="627.2" y="135.3" fill="#63a8d8" xml:space="preserve" textLength="75.6" lengthAdjust="spacing">        3</text>
+<text x="702.8" y="135.3" fill="#e0e0e6" xml:space="preserve" textLength="184.8" lengthAdjust="spacing"> 1m  10.42.0.8        </text>
+<text x="14.0" y="153.3" fill="#e0e0e6" xml:space="preserve" textLength="201.6" lengthAdjust="spacing"> ▪ jobs                 </text>
+<text x="215.6" y="153.3" fill="#7c7c88" xml:space="preserve" textLength="16.8" lengthAdjust="spacing">?│</text>
+<text x="232.4" y="153.3" fill="#e0e0e6" xml:space="preserve" textLength="394.8" lengthAdjust="spacing"> worker-658654d8d5-cr6tv 1/1   Running         </text>
+<text x="627.2" y="153.3" fill="#63a8d8" xml:space="preserve" textLength="75.6" lengthAdjust="spacing">        0</text>
+<text x="702.8" y="153.3" fill="#e0e0e6" xml:space="preserve" textLength="184.8" lengthAdjust="spacing"> 1m  10.42.0.7        </text>
+<text x="14.0" y="171.3" fill="#e0e0e6" xml:space="preserve" textLength="201.6" lengthAdjust="spacing"> ▪ cronjobs             </text>
+<text x="215.6" y="171.3" fill="#7c7c88" xml:space="preserve" textLength="16.8" lengthAdjust="spacing">?│</text>
+<text x="14.0" y="189.3" fill="#e0e0e6" xml:space="preserve" textLength="201.6" lengthAdjust="spacing"> ▪ services             </text>
+<text x="215.6" y="189.3" fill="#7c7c88" xml:space="preserve" textLength="16.8" lengthAdjust="spacing">?│</text>
+<text x="14.0" y="207.3" fill="#e0e0e6" xml:space="preserve" textLength="201.6" lengthAdjust="spacing"> ▪ ingresses            </text>
+<text x="215.6" y="207.3" fill="#7c7c88" xml:space="preserve" textLength="16.8" lengthAdjust="spacing">?│</text>
+<text x="14.0" y="225.3" fill="#e0e0e6" xml:space="preserve" textLength="201.6" lengthAdjust="spacing"> ▪ configmaps           </text>
+<text x="215.6" y="225.3" fill="#7c7c88" xml:space="preserve" textLength="16.8" lengthAdjust="spacing">?│</text>
+<text x="14.0" y="243.3" fill="#71c68f" xml:space="preserve" textLength="285.6" lengthAdjust="spacing"> default - Kubernetes v1.31.5+k3s1</text>
+<text x="14.0" y="261.3" fill="#7c7c88" xml:space="preserve" textLength="873.6" lengthAdjust="spacing"> x delete   o sort   v whole value   space mark   ctrl+k commands                                       </text>
+</svg>

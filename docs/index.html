@@ -81,6 +81,7 @@ footer { margin-top: 3.5rem; padding-top: 1.5rem; border-top: 1px solid var(--li
 		<span class="engine">Azure Blob</span>
 		<span class="engine">RabbitMQ</span>
 		<span class="engine">SFTP</span>
+		<span class="engine">Kubernetes</span>
 		<span class="engine">one static binary</span>
 	</div>
 	<img src="grid.svg" alt="krtek browsing a table">
@@ -117,7 +118,8 @@ everyone who already trusts it.</p>
 
 <p><strong>It needs nothing installed.</strong> SQLite, libpq, the MariaDB
 connector, libssh2 and OpenSSL are linked into the binary, and Redis, Kafka, S3,
-Azure Blob and RabbitMQ are spoken directly.
+Azure Blob, RabbitMQ and the Kubernetes API are spoken directly - down to the
+WebSocket a shell in a container needs, so no <code>kubectl</code> either.
 The Linux builds are static against musl and run on any distribution; the macOS
 builds leave only Apple's own libraries dynamic.</p>
 
@@ -139,7 +141,27 @@ builds leave only Apple's own libraries dynamic.</p>
 <figure>
 	<img src="connections.svg" alt="the saved connections">
 	<figcaption>Connections are saved, and each one says where its password may be
-	kept: nowhere, the config file, or the macOS keychain.</figcaption>
+	kept: nowhere, the config file, or the macOS keychain. Every context of your
+	kubeconfig is offered here too, without being saved into anything.</figcaption>
+</figure>
+
+<h2>And a cluster is a database too</h2>
+
+<figure>
+	<img src="kubernetes.svg" alt="pods listed as a table">
+	<figcaption>A resource kind is a table and a namespace is a schema. The columns
+	are the ones <code>kubectl</code> prints, including the ones that have to be
+	worked out - an age, a ready count, and the status that says
+	<code>CrashLoopBackOff</code> where the phase would have said
+	<code>Running</code>.</figcaption>
+</figure>
+
+<figure>
+	<img src="pod.svg" alt="one pod, opened">
+	<figcaption><code>enter</code> opens the object: what each container is doing,
+	what the last one died of and with what exit code, and the events - which is
+	where a failed image pull is written down and nowhere else. Along the bottom is
+	what can be done to it, logs and a shell included.</figcaption>
 </figure>
 
 <h2>The rest</h2>
