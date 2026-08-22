@@ -20,10 +20,12 @@ pub const s3 = @import("s3.zig");
 pub const azure = @import("azure.zig");
 pub const rabbit = @import("rabbit.zig");
 pub const sftp = @import("sftp.zig");
+pub const k8s = @import("k8s.zig");
 pub const k8s_yaml = @import("k8s/yaml.zig");
 pub const k8s_exec = @import("k8s/exec.zig");
 pub const k8s_config = @import("k8s/config.zig");
 pub const k8s_api = @import("k8s/api.zig");
+pub const k8s_target = @import("k8s/target.zig");
 
 /// A socket that may have TLS on it, and HTTP over it: what the drivers that
 /// speak their own protocol share.
@@ -55,10 +57,12 @@ comptime {
 	_ = azure;
 	_ = rabbit;
 	_ = sftp;
+	_ = k8s;
 	_ = k8s_yaml;
 	_ = k8s_exec;
 	_ = k8s_config;
 	_ = k8s_api;
+	_ = k8s_target;
 	_ = net;
 	_ = http;
 	_ = ssh;
@@ -169,6 +173,12 @@ pub const Caps = struct {
 	/// kept elsewhere: an S3 listing without the objects is a list, and replaying
 	/// it would put empty objects where the data was.
 	dumps_rows: bool = true,
+	/// A deleted row does not come back. A database has a transaction to take one
+	/// out of and a cluster has nothing of the kind, so `x` asks first - the same
+	/// way it does where a row is a file.
+	final_deletes: bool = false,
+	/// What one row is called, where "row" is the wrong word for it.
+	row_noun: []const u8 = "row",
 };
 
 /// One statement out of a batch, with the text the user wrote.
@@ -188,6 +198,7 @@ pub const Rows = union(enum) {
 	azure: azure.Rows,
 	rabbit: rabbit.Rows,
 	sftp: sftp.Rows,
+	k8s: k8s.Rows,
 
 	pub fn next(self: *Rows) Error!bool {
 		switch (self.*) {
@@ -261,6 +272,7 @@ pub const Db = union(enum) {
 	azure: *azure.Db,
 	rabbit: *rabbit.Db,
 	sftp: *sftp.Db,
+	k8s: *k8s.Db,
 
 	/// Open whatever the target describes: a file path, or a URL like
 	/// postgres://user:password@host:port/database.
@@ -279,6 +291,9 @@ pub const Db = union(enum) {
 		}
 		if (sftp.owns(target)) {
 			return .{ .sftp = try sftp.Db.open(allocator, target, report) };
+		}
+		if (k8s.owns(target)) {
+			return .{ .k8s = try k8s.Db.open(allocator, target, report) };
 		}
 		if (redis.owns(target)) {
 			return .{ .redis = try redis.Db.open(allocator, target, report) };
@@ -573,6 +588,7 @@ pub const Ddl = union(enum) {
 	azure: azure.Ddl,
 	rabbit: rabbit.Ddl,
 	sftp: sftp.Ddl,
+	k8s: k8s.Ddl,
 
 	pub fn createTable(self: Ddl, out: *List, a: std.mem.Allocator, table: Table, cols: []const Column, keys: []const ForeignKey) !void {
 		switch (self) {

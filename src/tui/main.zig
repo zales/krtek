@@ -25,6 +25,8 @@ const usage =
 	\\       krtek azure://account:key@container
 	\\       krtek rabbit://guest@host:15672/vhost
 	\\       krtek sftp://user@host/srv/data
+	\\       krtek k8s://                  the current kubeconfig context
+	\\       krtek k8s://prod/payments     a context, and a namespace in it
 	\\       krtek "host=... dbname=... user=..."
 	\\
 	\\With no argument it opens the list of saved connections.

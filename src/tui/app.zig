@@ -725,8 +725,23 @@ pub const App = struct {
 				try form.note("the port is the management one, 15672, and not the broker's 5672;");
 				try form.note("the default vhost is written %2F");
 			},
+			.k8s => {
+				try form.text("context", shape.host, 32);
+				try form.text("namespace", shape.name, 24);
+				try form.text("kubeconfig", shape.key, 32);
+				try form.toggle("check the certificate", !shape.insecure);
+				try form.note("everything else is in the kubeconfig: empty means its current context,");
+				try form.note("and an empty file means $KUBECONFIG and then ~/.kube/config. There is");
+				try form.note("no password here - a cluster is reached the way kubectl reaches it.");
+			},
 		}
 
+		// A cluster has no password to keep anywhere: it is reached with what the
+		// kubeconfig carries, and offering a place to put one would be offering to
+		// keep something nothing will ever ask for.
+		if (shape.engine == .k8s) {
+			return;
+		}
 		// Only offer what this machine has: the keychain is macOS's.
 		const places = if (keychain.available) &PLACES else PLACES[0..2];
 		try form.choice("keep the password", places, Form.indexOf(places, @tagName(keeps)));
@@ -784,6 +799,9 @@ pub const App = struct {
 			.{ .label = "mechanism", .into = &shape.mechanism },
 			.{ .label = "key file", .into = &shape.key },
 			.{ .label = "directory", .into = &shape.name },
+			.{ .label = "context", .into = &shape.host },
+			.{ .label = "namespace", .into = &shape.name },
+			.{ .label = "kubeconfig", .into = &shape.key },
 		}) |pair| {
 			const value = form.valueNamed(pair.label);
 			if (value.len != 0) {
@@ -793,7 +811,12 @@ pub const App = struct {
 		shape.tls = if (form.fieldNamed("TLS")) |field| field.on else shape.engine == .s3;
 		// The one toggle that reads the other way round: it says to check, and the
 		// target says not to.
-		shape.insecure = if (form.fieldNamed("check the host key")) |field| !field.on else false;
+		shape.insecure = if (form.fieldNamed("check the host key")) |field|
+			!field.on
+		else if (form.fieldNamed("check the certificate")) |field|
+			!field.on
+		else
+			false;
 		return shape;
 	}
 
@@ -1178,15 +1201,18 @@ pub const App = struct {
 			self.complain("there is no row here", .{});
 			return;
 		}
-		// Where a row is a file, deleting one is deleting a file, and there is no
-		// transaction to take it back. A database row goes as it always has.
-		if (self.conn.files() != null) {
+		// Where nothing takes a delete back - a row that is a file, a row that is a
+		// Kubernetes object - it is asked about first. A database row goes as it
+		// always has, because a transaction is there to take it out of.
+		const caps = self.conn.caps();
+		if (self.conn.files() != null or caps.final_deletes) {
 			const count = if (self.marked.items.len != 0) self.marked.items.len else @as(usize, 1);
+			const noun = if (self.conn.files() != null) "file" else caps.row_noun;
 			if (self.prompt) |*old| {
 				old.buffer.deinit(self.allocator);
 			}
 			self.prompt = .{ .kind = .remove_rows, .label = " type y to delete: " };
-			self.say("delete {d} file{s}?", .{ count, if (count == 1) "" else "s" });
+			self.say("delete {d} {s}{s}?", .{ count, noun, if (count == 1) "" else "s" });
 			return;
 		}
 		try self.deleteRowsNow();

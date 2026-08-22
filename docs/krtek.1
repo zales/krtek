@@ -38,6 +38,9 @@ krtek \- a database manager for the terminal
 .RI sftp://user@host/srv/data
 .br
 .B krtek
+.RI k8s://context/namespace
+.br
+.B krtek
 .RB \(dq host=...\ dbname=...\ user=... \(dq
 .br
 .B krtek
@@ -48,9 +51,9 @@ krtek \- a database manager for the terminal
 .SH DESCRIPTION
 .B krtek
 browses, edits, alters, dumps and imports a database on a text screen. It speaks
-SQLite, PostgreSQL, MySQL/MariaDB, Redis, Kafka, S3, Azure Blob, RabbitMQ and
-SFTP behind one interface, and needs nothing installed: the client libraries are
-linked into the binary, and the rest are spoken directly.
+SQLite, PostgreSQL, MySQL/MariaDB, Redis, Kafka, S3, Azure Blob, RabbitMQ, SFTP
+and Kubernetes behind one interface, and needs nothing installed: the client
+libraries are linked into the binary, and the rest are spoken directly.
 .PP
 A Kafka topic is a table of
 .IR partition ", " offset ", " timestamp ", " key ", " value " and " headers .
@@ -96,6 +99,23 @@ keeps them off. The rest of the console is
 An
 .I amqp://
 url is taken as well; its port is not, because 5672 does not answer HTTP.
+.PP
+Kubernetes maps a resource kind to a table and a namespace to a schema:
+.IR pods ", " deployments ", " services ", " nodes " and fourteen others,"
+with the columns kubectl prints, ages and ready counts included. A target names a
+context and at most a namespace -
+.IR k8s://prod/payments ,
+or nothing at all for the kubeconfig's current context - because everything else
+is in the kubeconfig, which is read the way kubectl reads it: its certificate
+authority and client certificate, and
+.B exec
+credential plugins, which are run without a shell and given half a minute. Objects
+are read, deleted and scaled, and not edited: one is a document with a controller
+acting on it, and writing it back from a grid would lose every field the grid does
+not show.
+.B x
+asks before deleting, because nothing takes that back. The console is
+.BR GET ", " DESCRIBE ", " LOGS ", " SCALE ", " RESTART ", " USE ", " NAMESPACES ", " CONTEXTS " and " VERSION .
 .PP
 SFTP is a filesystem rather than a store of keys: a directory is a table and a
 file is a row, a directory is also what a schema is - so

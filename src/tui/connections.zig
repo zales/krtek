@@ -79,6 +79,7 @@ pub const Engine = enum {
 	azure,
 	rabbit,
 	sftp,
+	k8s,
 	/// Whatever this does not model: the target as it stands.
 	other,
 
@@ -93,6 +94,7 @@ pub const Engine = enum {
 			.azure => "Azure",
 			.rabbit => "RabbitMQ",
 			.sftp => "SFTP",
+			.k8s => "Kubernetes",
 			.other => "target",
 		};
 	}
@@ -110,8 +112,28 @@ pub const Engine = enum {
 
 /// In the order the form offers them, most used first.
 pub const ENGINES = [_][]const u8{
-	"SQLite", "PostgreSQL", "MySQL", "Redis", "Kafka", "S3", "Azure", "RabbitMQ", "SFTP", "target",
+	"SQLite",   "PostgreSQL", "MySQL", "Redis",      "Kafka", "S3",
+	"Azure",    "RabbitMQ",   "SFTP",  "Kubernetes", "target",
 };
+
+test "the engine list offers every engine there is" {
+	// A member added to `Engine` and forgotten here is one nobody can pick in the
+	// connection form, which is a thing that has happened.
+	inline for (@typeInfo(Engine).@"enum".fields) |item| {
+		const engine: Engine = @enumFromInt(item.value);
+		var found = false;
+		for (ENGINES) |name| {
+			if (std.mem.eql(u8, name, engine.label())) {
+				found = true;
+			}
+		}
+		if (!found) {
+			std.debug.print("the connection form cannot pick {s}\n", .{engine.label()});
+			return error.TestUnexpectedResult;
+		}
+	}
+	try std.testing.expectEqual(@typeInfo(Engine).@"enum".fields.len, ENGINES.len);
+}
 
 pub fn engineOf(target: []const u8) Engine {
 	if (std.ascii.startsWithIgnoreCase(target, "redis://") or
@@ -148,6 +170,11 @@ pub fn engineOf(target: []const u8) Engine {
 	for ([_][]const u8{ "sftp://", "ssh://", "scp://" }) |prefix| {
 		if (std.ascii.startsWithIgnoreCase(target, prefix)) {
 			return .sftp;
+		}
+	}
+	for ([_][]const u8{ "k8s://", "kubernetes://", "kube://" }) |prefix| {
+		if (std.ascii.startsWithIgnoreCase(target, prefix)) {
+			return .k8s;
 		}
 	}
 	if (std.ascii.startsWithIgnoreCase(target, "mysql://") or
@@ -206,6 +233,7 @@ pub fn compose(arena: std.mem.Allocator, shape: Shape) ![]const u8 {
 		.azure => if (shape.tls) "azure://" else "azure+http://",
 		.rabbit => if (shape.tls) "rabbits://" else "rabbit://",
 		.sftp => "sftp://",
+		.k8s => "k8s://",
 		else => "",
 	});
 	if (shape.user.len != 0) {
@@ -229,6 +257,25 @@ pub fn compose(arena: std.mem.Allocator, shape: Shape) ![]const u8 {
 	}
 	if (shape.engine == .kafka and shape.mechanism.len != 0) {
 		try out.print(arena, "?mechanism={s}", .{shape.mechanism});
+	}
+	if (shape.engine == .k8s) {
+		// Everything else about a cluster is in the kubeconfig; a target that
+		// repeated any of it would be a second place for it to be wrong.
+		out.clearRetainingCapacity();
+		try out.appendSlice(arena, "k8s://");
+		try out.appendSlice(arena, shape.host);
+		if (shape.name.len != 0) {
+			try out.print(arena, "/{s}", .{shape.name});
+		}
+		var first = true;
+		if (shape.key.len != 0) {
+			try out.print(arena, "?kubeconfig={s}", .{shape.key});
+			first = false;
+		}
+		if (shape.insecure) {
+			try out.print(arena, "{s}insecure=1", .{if (first) "?" else "&"});
+		}
+		return out.items;
 	}
 	if (shape.engine == .sftp) {
 		var first = true;
@@ -275,6 +322,10 @@ pub fn decompose(arena: std.mem.Allocator, target: []const u8) ?Shape {
 						shape.mechanism = value;
 					} else if (engine == .sftp and std.mem.eql(u8, key, "key")) {
 						shape.key = value;
+					} else if (engine == .k8s and std.mem.eql(u8, key, "kubeconfig")) {
+						shape.key = value;
+					} else if (engine == .k8s and std.mem.eql(u8, key, "insecure")) {
+						shape.insecure = !std.mem.eql(u8, value, "0");
 					} else if (engine == .sftp and std.mem.eql(u8, key, "insecure")) {
 						shape.insecure = std.mem.eql(u8, value, "1");
 					} else {
@@ -952,4 +1003,38 @@ test "the list keeps the most recent first and replaces by name" {
 	try std.testing.expectEqualStrings("c.db", list.items.items[0].target);
 	list.touch(1);
 	try std.testing.expectEqualStrings("two", list.items.items[0].name);
+}
+
+test "a cluster is a context and a namespace, and nothing else" {
+	var scratch = std.heap.ArenaAllocator.init(std.testing.allocator);
+	defer scratch.deinit();
+	const a = scratch.allocator();
+
+	try std.testing.expectEqual(Engine.k8s, engineOf("k8s://prod"));
+	try std.testing.expectEqual(Engine.k8s, engineOf("kubernetes://prod"));
+
+	{
+		const shape = decompose(a, "k8s://prod/payments").?;
+		try std.testing.expectEqual(Engine.k8s, shape.engine);
+		try std.testing.expectEqualStrings("prod", shape.host);
+		try std.testing.expectEqualStrings("payments", shape.name);
+	}
+	{
+		const shape = decompose(a, "k8s://prod?kubeconfig=/tmp/kc&insecure=1").?;
+		try std.testing.expectEqualStrings("/tmp/kc", shape.key);
+		try std.testing.expect(shape.insecure);
+	}
+	// And back again, unchanged - which is what lets the form edit one in place.
+	try std.testing.expectEqualStrings("k8s://prod/payments", try compose(a, .{
+		.engine = .k8s,
+		.host = "prod",
+		.name = "payments",
+	}));
+	try std.testing.expectEqualStrings("k8s://", try compose(a, .{ .engine = .k8s }));
+	try std.testing.expectEqualStrings("k8s://prod?kubeconfig=/tmp/kc&insecure=1", try compose(a, .{
+		.engine = .k8s,
+		.host = "prod",
+		.key = "/tmp/kc",
+		.insecure = true,
+	}));
 }

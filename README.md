@@ -5,7 +5,7 @@
 A database manager for the terminal, written in Zig: what a graphical client
 does - browse, edit, alter, dump, import - on a text screen, and quicker, because
 everything is a key press. **SQLite, PostgreSQL, MySQL/MariaDB, Redis, Kafka, S3,
-Azure Blob, RabbitMQ and SFTP**, behind one interface.
+Azure Blob, RabbitMQ, SFTP and Kubernetes**, behind one interface.
 
 *Krtek* is Czech for a mole: a small thing that digs through what is underneath
 and comes back up with what it found.
@@ -51,8 +51,8 @@ architectures. The `.deb` installs the binary, the man page and the copyright, a
 **Depends on nothing at all**, so it goes on any Debian or Ubuntu of any age.
 
 **It needs nothing installed.** SQLite, libpq, the MariaDB connector, libssh2 and
-OpenSSL are linked into the binary, and Redis, Kafka, S3, Azure Blob and RabbitMQ
-are spoken directly. The Linux
+OpenSSL are linked into the binary, and Redis, Kafka, S3, Azure Blob, RabbitMQ and
+the Kubernetes API are spoken directly. The Linux
 builds are static against musl and run on any distribution - checked on Debian with nothing
 installed at all; the macOS builds leave only Apple's own libraries dynamic. That
 is `-Dstatic`.
@@ -72,6 +72,8 @@ zig build -Doptimize=ReleaseSafe
 ./zig-out/bin/krtek azure://account:key@container
 ./zig-out/bin/krtek rabbit://guest@host:15672/vhost
 ./zig-out/bin/krtek sftp://user@host/srv/data
+./zig-out/bin/krtek k8s://                 # the kubeconfig's current context
+./zig-out/bin/krtek k8s://prod/payments    # a context, and a namespace in it
 ```
 
 A SQLite file is opened through SQLite's own VFS: edits go straight to disk and
@@ -492,6 +494,71 @@ agent, then `~/.ssh/id_ed25519`, `id_ecdsa` and `id_rsa`, and a password last -
 asked for the way every other engine's is, and kept wherever that connection
 keeps its password.
 
+## Kubernetes
+
+**A resource kind is a table and a namespace is a schema.** `#` switches namespace
+the way it switches schema on PostgreSQL, the object list is pods, deployments,
+services, nodes and fourteen others, and a row is one object with the columns
+kubectl would have printed - including the four that have to be worked out rather
+than read: how old a thing is, how many of a pod's containers are ready, how many
+times they have restarted, and how many of a deployment's replicas are up.
+
+```sh
+krtek k8s://                          # the kubeconfig's current context
+krtek k8s://prod                      # the context called prod
+krtek k8s://prod/payments             # that context, opened on that namespace
+krtek "k8s://?kubeconfig=/tmp/other"  # a file other than $KUBECONFIG or ~/.kube/config
+```
+
+A target names a context and at most a namespace, and nothing else. Everything
+about how to reach a cluster is already in the kubeconfig, and a second place for
+the same fact to be wrong is worse than a longer command line.
+
+**The kubeconfig is read the way kubectl reads it**, which meant three things this
+program did not have. A YAML reader, written for the shape a kubeconfig actually
+is - block mappings, sequences and plain scalars - and refusing by name and line
+number anything it does not know, because an anchor read as a plain scalar puts
+`&ca` where a certificate belongs. A TLS layer that takes a certificate authority
+and a client certificate as PEM in memory, trusting the cluster's own authority
+*instead of* the machine's, the way kubectl does. And a runner for `exec`
+credential plugins, since that is how nearly every cloud cluster authenticates.
+
+The plugin runner does not go through a shell - the `args:` list goes to `execve`
+as an array, so an argument with a quote in it is one argument - allocates nothing
+between `fork` and `exec`, because this program has a thread reading the terminal
+and the child of a fork has only the one that called it, and gives up after half a
+minute, because a plugin that opens a browser and waits would otherwise hold the
+interface forever.
+
+**Reading, deleting and scaling, and not editing.** An object is a document with a
+controller acting on it; writing one back from a grid of flattened cells is a way
+to lose a field nobody displayed, and `e` says so instead of trying. What is
+there instead is exact: `x` deletes an object and asks first, because nothing takes
+that back, and the editor is a console for the cluster:
+
+```
+GET pods                        the same as choosing pods on the left
+DESCRIBE pod api-7c9d4          one object, whole, as the cluster holds it
+LOGS api-7c9d4 500              the last lines of a pod's log
+SCALE deployments api 5         replicas
+RESTART deployments api         a rolling restart, the annotation kubectl uses
+USE kube-system                 another namespace
+NAMESPACES / CONTEXTS / VERSION
+```
+
+**A list is fetched whole and paged here**, because Kubernetes pages with a
+`continue` token that walks forwards only and cannot answer "the rows from 400",
+which is what a grid with page numbers asks. Filtering and sorting are done here
+for the same reason, over the text the grid shows - `2/3` is not a number and
+neither is `4d2h`.
+
+**The object list does not count.** Answering "how many pods, how many secrets,
+how many events" for eighteen kinds would be eighteen list requests before the
+first frame, so `?` is what the sidebar says until something has been read; every
+select leaves its count behind and the sidebar picks it up from there. A count
+that would cost a fetch of every secret in the namespace is not a count worth
+having.
+
 ## Adding an engine`src/db/db.zig` is the interface. It is a tagged union dispatched with `inline
 else`, so a new engine is one union member and a struct with the same method
 names - anything missing is a compile error that names itself. No vtables.
@@ -672,6 +739,8 @@ permanent.
 | `src/db/rabbit/` | which endpoint each table is, where its columns live in the JSON, and the target |
 | `src/db/ssh.zig` | the little of libssh2 this needs, and the connecting and authenticating |
 | `src/db/sftp.zig` | SFTP: a directory as a table, with real renames |
+| `src/db/k8s.zig` | Kubernetes: resource kinds as tables, namespaces as schemas |
+| `src/db/k8s/` | the kubeconfig, its YAML, the credential plugin, the target and which kinds are tables |
 | `packaging/` | the `.deb` and the Homebrew formula |
 | `docs/index.html` | the landing page, which is also the APT repository |
 | `docs/krtek.1` | the man page, installed by both of them |
