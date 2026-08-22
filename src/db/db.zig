@@ -20,6 +20,7 @@ pub const s3 = @import("s3.zig");
 pub const azure = @import("azure.zig");
 pub const rabbit = @import("rabbit.zig");
 pub const sftp = @import("sftp.zig");
+pub const k8s_yaml = @import("k8s/yaml.zig");
 
 /// A socket that may have TLS on it, and HTTP over it: what the drivers that
 /// speak their own protocol share.
@@ -51,6 +52,7 @@ comptime {
 	_ = azure;
 	_ = rabbit;
 	_ = sftp;
+	_ = k8s_yaml;
 	_ = http;
 	_ = ssh;
 	_ = sigv4;
