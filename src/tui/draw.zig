@@ -830,7 +830,7 @@ fn messages(app: *App, size: Size, side: usize, rows: usize) void {
 	}
 }
 
-const HELP = [_][2][]const u8{
+pub const HELP = [_][2][]const u8{
 	.{ "", "EVERYTHING" },
 	.{ "ctrl+k ctrl+p", "command palette: search every action" },
 	.{ "", "MOVING" },
@@ -897,12 +897,22 @@ fn help(app: *App, size: Size, side: usize, rows: usize) void {
 	screen.style(.{ .fg = C.accent, .bold = true });
 	_ = write(app, " keys", width);
 	screen.clearToEol();
-	// Two columns: the list is longer than a terminal is tall.
+	// Two columns: the list is longer than a terminal is tall. And on a terminal
+	// short enough that two columns are not enough either, it scrolls - what used
+	// to happen was that the last few entries were quietly not drawn, which is a
+	// key map that hides keys.
 	const half = (HELP.len + 1) / 2;
 	const column_width = width / 2;
+	// The last body line is the strip that says where in the map this is; the
+	// entries have the rest.
+	const page = if (rows > 3) rows - 2 else 1;
+	app.help_page = page;
+	const scroll = @min(app.help_scroll, half -| page);
+	app.help_scroll = scroll;
+
 	var line: usize = 2;
-	var i: usize = 0;
-	while (i < half and line <= rows) : ({
+	var i: usize = scroll;
+	while (i < half and line < rows) : ({
 		i += 1;
 		line += 1;
 	}) {
@@ -927,18 +937,29 @@ fn help(app: *App, size: Size, side: usize, rows: usize) void {
 			_ = write(app, entry[1], if (column_width > 19) column_width - 19 else 0);
 		}
 	}
-	if (line <= rows) {
-		screen.moveTo(line, left);
-		screen.style(.{ .fg = C.faint });
-		_ = write(app, "  writes go straight to the file - there is nothing to save", width);
-		screen.clearToEol();
-		line += 1;
-	}
-	while (line <= rows) : (line += 1) {
+	while (line < rows) : (line += 1) {
 		screen.moveTo(line, left);
 		screen.reset();
 		screen.clearToEol();
 	}
+
+	// What is left of the map, or - when all of it is on screen - the one thing
+	// about this program that is worth saying on the way past.
+	screen.moveTo(rows, left);
+	screen.style(.{ .fg = C.faint });
+	if (half <= page) {
+		_ = write(app, "  writes go straight to the file - there is nothing to save", width);
+	} else {
+		var strip: [96]u8 = undefined;
+		const shown = @min(page, half - scroll);
+		const text = std.fmt.bufPrint(&strip, "  lines {d}-{d} of {d}   j k scroll, n p page, g G ends", .{
+			scroll + 1,
+			scroll + shown,
+			half,
+		}) catch "  j k scroll";
+		_ = write(app, text, width);
+	}
+	screen.clearToEol();
 }
 
 /// The full value under the cursor, in a box over the grid.

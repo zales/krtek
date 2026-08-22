@@ -205,6 +205,13 @@ pub const App = struct {
 	/// The last reload could not be answered, and has said why. Whoever asked for
 	/// it must not then report a count as though it had worked.
 	grid_failed: bool = false,
+	/// Where the key map is scrolled to, and how many of its lines a screen
+	/// holds. The map is longer than a terminal is tall, and what did not fit used
+	/// simply not to be drawn - no mark, no mention, just an end that was not the
+	/// end. The page size is worked out while drawing, because only the drawing
+	/// code knows how many lines it had.
+	help_scroll: usize = 0,
+	help_page: usize = 10,
 	text_limit: usize = 44, // widest column in the grid
 	history: std.ArrayListUnmanaged([]const u8) = .empty,
 	reports: std.ArrayListUnmanaged(Report) = .empty,

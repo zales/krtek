@@ -5,6 +5,7 @@ const std = @import("std");
 const app_mod = @import("app.zig");
 const fuzzy = @import("fuzzy.zig");
 const term = @import("term.zig");
+const draw = @import("draw.zig");
 
 const App = app_mod.App;
 const Key = term.Key;
@@ -52,6 +53,9 @@ pub fn handle(app: *App, key: Key, size: term.Size) !void {
 	}
 	if (app.view == .files) {
 		try onFiles(app, key);
+		return;
+	}
+	if (app.view == .help and scrollHelp(app, key)) {
 		return;
 	}
 	if (app.detail) {
@@ -423,7 +427,7 @@ fn onConnections(app: *App, key: Key) !void {
 			'k' => if (app.saved_at > 0) {
 				app.saved_at -= 1;
 			},
-			'?' => app.view = .help,
+			'?' => openHelp(app),
 			else => {},
 		},
 		.down => if (count != 0 and app.saved_at + 1 < count) {
@@ -514,16 +518,69 @@ fn click(app: *App, mouse: term.Mouse, size: term.Size) !void {
 	}
 }
 
+/// Open the key map at the top. It is scrolled, so coming back to it halfway
+/// down where it was left would be a puzzle rather than a memory.
+fn openHelp(app: *App) void {
+	app.view = .help;
+	app.help_scroll = 0;
+}
+
+/// Moving about the key map. It is longer than a terminal is tall, and what did
+/// not fit simply was not drawn before this - so these keys take precedence over
+/// what they do elsewhere, and everything else falls through to where it always
+/// went: ? still closes the map and ctrl+k still opens the palette.
+///
+/// The scroll is only ever moved here; it is clamped where it is drawn, which is
+/// the one place that knows how many lines there were.
+fn scrollHelp(app: *App, key: Key) bool {
+	const page: i32 = @intCast(@max(1, app.help_page));
+	const whole: i32 = @intCast(draw.HELP.len);
+	const by: i32 = switch (key) {
+		.char => |point| switch (point) {
+			'j' => 1,
+			'k' => -1,
+			'n' => page,
+			'p' => -page,
+			'g' => -whole,
+			'G' => whole,
+			' ' => page,
+			else => return false,
+		},
+		.down => 1,
+		.up => -1,
+		.page_down => page,
+		.page_up => -page,
+		.ctrl => |code| switch (code) {
+			'd' => page,
+			'u' => -page,
+			else => return false,
+		},
+		.mouse => |mouse| switch (mouse.button) {
+			.wheel_down => 3,
+			.wheel_up => -3,
+			else => return false,
+		},
+		else => return false,
+	};
+	if (by < 0) {
+		app.help_scroll -|= @intCast(-by);
+	} else {
+		app.help_scroll +|= @intCast(by);
+	}
+	return true;
+}
+
 fn letter(app: *App, point: u21, size: term.Size) !void {
 	_ = size;
 	switch (point) {
 		'q' => app.quit = true,
-		'?' => app.view = if (app.view == .help)
+		'?' => if (app.view == .help) {
 			// Back to wherever the question was asked from, which is the file
 			// manager when that is what is open.
-			(if (app.files != null) .files else .grid)
-		else
-			.help,
+			app.view = if (app.files != null) .files else .grid;
+		} else {
+			openHelp(app);
+		},
 		'j' => try move(app, 1),
 		'k' => try move(app, -1),
 		'h' => moveColumn(app, -1),
@@ -833,7 +890,7 @@ fn onFiles(app: *App, key: Key) !void {
 				manager.reload();
 				app.say("reloaded", .{});
 			},
-			'?' => app.view = .help,
+			'?' => openHelp(app),
 			else => {},
 		},
 		else => {},
