@@ -105,7 +105,9 @@ Kubernetes maps a resource kind to a table and a namespace to a schema:
 with the columns kubectl prints, ages and ready counts included. A target names a
 context and at most a namespace -
 .IR k8s://prod/payments ,
-or nothing at all for the kubeconfig's current context - because everything else
+or nothing at all for the kubeconfig's current context. Started with no argument
+at all, every context of the kubeconfig is offered in the list of connections,
+marked and never saved into it, because because everything else
 is in the kubeconfig, which is read the way kubectl reads it: its certificate
 authority and client certificate, and
 .B exec

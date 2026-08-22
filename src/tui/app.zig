@@ -286,13 +286,22 @@ pub const App = struct {
 			try self.saved_path.appendSlice(allocator, file);
 			conns.load(&self.saved, file) catch {};
 		}
+		self.offerFound();
 		self.view = .connections;
 		if (target.len != 0) {
 			self.connect(target, true) catch {};
 		} else if (self.saved.items.items.len == 0) {
 			self.say("no saved connections yet - press a to add one", .{});
 		} else {
-			self.say("{d} saved connection(s) - enter connects, a adds, d removes", .{self.saved.items.items.len});
+			const found = self.saved.items.items.len - self.saved.savedCount();
+			if (found != 0) {
+				self.say("{d} saved, {d} from the kubeconfig - enter connects, a adds, d removes", .{
+					self.saved.savedCount(),
+					found,
+				});
+			} else {
+				self.say("{d} saved connection(s) - enter connects, a adds, d removes", .{self.saved.items.items.len});
+			}
 		}
 		return self;
 	}
@@ -495,6 +504,18 @@ pub const App = struct {
 		self.screen.flush() catch {};
 	}
 
+	/// Connections this program can find rather than ones somebody saved. A
+	/// kubeconfig already says what a cluster is called and how to reach it, so
+	/// asking for that a second time is asking for a place for it to be wrong.
+	/// They go on the end of the list, marked, and are never written to the file.
+	fn offerFound(self: *App) void {
+		var scratch = std.heap.ArenaAllocator.init(self.allocator);
+		defer scratch.deinit();
+		for (database.k8s.contexts(scratch.allocator())) |context| {
+			self.saved.offer(context.name, context.target) catch return;
+		}
+	}
+
 	/// Keep a connection in the list, under a name derived from the target.
 	fn rememberConnection(self: *App, target: []const u8) !void {
 		if (self.saved_path.items.len == 0) {
@@ -532,9 +553,13 @@ pub const App = struct {
 			entry.target;
 		const target = try self.allocator.dupe(u8, with);
 		defer self.allocator.free(target);
-		self.saved.touch(self.saved_at);
-		self.saved_at = 0;
-		conns.save(&self.saved, self.saved_path.items) catch {};
+		// A found connection has no place in the file to be moved to the front of,
+		// and touching it would only shuffle it among the ones that do.
+		if (!entry.found) {
+			self.saved.touch(self.saved_at);
+			self.saved_at = 0;
+			conns.save(&self.saved, self.saved_path.items) catch {};
+		}
 		try self.connect(target, false);
 	}
 
@@ -582,6 +607,14 @@ pub const App = struct {
 		if (self.saved_at >= self.saved.items.items.len) {
 			return;
 		}
+		// Nothing here put it in the list, so nothing here takes it out: the file
+		// it came from is where it lives.
+		if (self.saved.items.items[self.saved_at].found) {
+			self.complain("{s} comes from the kubeconfig - remove the context there", .{
+				self.saved.items.items[self.saved_at].name,
+			});
+			return;
+		}
 		var name: [128]u8 = undefined;
 		const label = std.fmt.bufPrint(&name, "{s}", .{self.saved.items.items[self.saved_at].name}) catch "it";
 		const going = self.saved.items.items[self.saved_at];
@@ -598,6 +631,17 @@ pub const App = struct {
 
 	/// The form for adding or editing a connection.
 	pub fn openConnectionForm(self: *App, edit: bool) !void {
+		// Editing one would have to write it somewhere, and the only place it
+		// could go is this program's own file - which would leave two answers to
+		// what that cluster is called. `a` is how to make one of your own.
+		if (edit and self.saved_at < self.saved.items.items.len and
+			self.saved.items.items[self.saved_at].found)
+		{
+			self.complain("{s} comes from the kubeconfig - a adds one of your own, with its own name", .{
+				self.saved.items.items[self.saved_at].name,
+			});
+			return;
+		}
 		self.editing_saved = null;
 		_ = self.form_arena.reset(.retain_capacity);
 		var name: []const u8 = "";

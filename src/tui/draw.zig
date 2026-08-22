@@ -127,16 +127,24 @@ fn connections(app: *App, size: Size, rows: usize) void {
 			screen.moveTo(line, left);
 			screen.style(.{ .bg = if (on) C.selected else null, .fg = if (on) C.accent else C.text, .bold = on });
 			_ = write(app, if (on) "  > " else "    ", width);
-			pad(app, item.name, 22, false);
+			// One column narrower than the space it sits in, so a name long enough
+			// to be clipped still has air between it and the next column.
+			pad(app, item.name, 21, false);
+			_ = write(app, " ", 1);
 			screen.style(.{ .bg = if (on) C.selected else null, .fg = C.faint });
 			pad(app, item.engine(), 11, false);
 			// Where the password is kept says itself, rather than the file being the
-			// only place to find that out.
-			screen.style(.{ .bg = if (on) C.selected else null, .fg = if (item.keeps == .file) C.warn else C.ok });
-			pad(app, item.keeps.label(), 9, false);
+			// only place to find that out - and a connection that came from
+			// somewhere else says that in the same column, because both answer
+			// "where does this live".
+			screen.style(.{
+				.bg = if (on) C.selected else null,
+				.fg = if (item.found) C.faint else if (item.keeps == .file) C.warn else C.ok,
+			});
+			pad(app, if (item.found) "kubeconfig" else item.keeps.label(), 11, false);
 			screen.style(.{ .bg = if (on) C.selected else null, .fg = C.dim });
-			// 4 for the marker, 22 name, 11 engine, 9 for where the password is.
-			const room = if (width > 48) width - 48 else 0;
+			// 4 for the marker, 22 name, 11 engine, 11 for where the thing lives.
+			const room = if (width > 50) width - 50 else 0;
 			const shown = write(app, item.target, room);
 			// Filled to the panel's edge rather than the screen's: the row of the one
 			// selected is a band of colour, and clearing to the end of the line would

@@ -46,6 +46,12 @@ pub const Connection = struct {
 	keeps: Keeps = .ask,
 	/// The password, for `.file` only - the keychain holds its own.
 	secret: []const u8 = "",
+	/// Not from this file: found somewhere else that already describes it, which
+	/// today means a context in a kubeconfig. It is offered like any other
+	/// connection and is nobody's to save or remove from here - the file it came
+	/// from is where it lives, and writing a copy into this one would leave two
+	/// places to change a cluster's name.
+	found: bool = false,
 
 	/// Does this connection keep its password somewhere?
 	pub fn remembers(self: Connection) bool {
@@ -411,6 +417,34 @@ pub const List = struct {
 
 	/// Put a connection at the front. `keeps` null means "whatever the entry being
 	/// replaced said", which is what a plain reconnect wants.
+	/// Offer a connection this program found rather than one somebody saved. It
+	/// goes after the saved ones, because the list is theirs first, and a target
+	/// already in the list is left alone: somebody who saved a context under their
+	/// own name meant that name.
+	pub fn offer(self: *List, name: []const u8, target: []const u8) !void {
+		for (self.items.items) |item| {
+			if (std.mem.eql(u8, item.target, target)) {
+				return;
+			}
+		}
+		const a = self.arena.allocator();
+		try self.items.append(self.allocator, .{
+			.name = try a.dupe(u8, name),
+			.target = try a.dupe(u8, target),
+			.found = true,
+		});
+	}
+
+	/// How many of these are the user's own, which is what "nothing saved yet"
+	/// has to count.
+	pub fn savedCount(self: *List) usize {
+		var total: usize = 0;
+		for (self.items.items) |item| {
+			total += @intFromBool(!item.found);
+		}
+		return total;
+	}
+
 	pub fn add(self: *List, name: []const u8, target: []const u8, keeps: ?Keeps, secret: []const u8) !void {
 		const a = self.arena.allocator();
 		// Either the name or the target identifies an entry, so renaming a
@@ -540,6 +574,10 @@ pub fn save(list: *List, file_path: []const u8) !void {
 		"# 0600; `keychain` means the macOS keychain holds it instead.\n");
 	list.stripped = false;
 	for (list.items.items) |item| {
+		// What another file already describes stays described there.
+		if (item.found) {
+			continue;
+		}
 		var scratch = std.heap.ArenaAllocator.init(list.allocator);
 		defer scratch.deinit();
 		const safe = try withoutPassword(scratch.allocator(), item.target);
@@ -1037,4 +1075,49 @@ test "a cluster is a context and a namespace, and nothing else" {
 		.key = "/tmp/kc",
 		.insecure = true,
 	}));
+}
+
+test "a found connection is offered but never written to the file" {
+	var list = List.init(std.testing.allocator);
+	defer list.deinit();
+	try list.add("books", "/tmp/books.db", null, "");
+	try list.offer("work", "k8s://work");
+	try list.offer("staging", "k8s://staging");
+
+	// Saved first, found after: the list is the user's before it is anybody's.
+	try std.testing.expectEqual(@as(usize, 3), list.items.items.len);
+	try std.testing.expectEqualStrings("books", list.items.items[0].name);
+	try std.testing.expect(!list.items.items[0].found);
+	try std.testing.expect(list.items.items[1].found);
+	try std.testing.expectEqual(@as(usize, 1), list.savedCount());
+
+	// Offering the same target twice does not put it in twice.
+	try list.offer("work", "k8s://work");
+	try std.testing.expectEqual(@as(usize, 3), list.items.items.len);
+
+	// And one the user saved themselves is left alone: their name wins.
+	var mine = List.init(std.testing.allocator);
+	defer mine.deinit();
+	try mine.add("the live one", "k8s://work", null, "");
+	try mine.offer("work", "k8s://work");
+	try std.testing.expectEqual(@as(usize, 1), mine.items.items.len);
+	try std.testing.expectEqualStrings("the live one", mine.items.items[0].name);
+	try std.testing.expect(!mine.items.items[0].found);
+}
+
+test "saving writes the saved ones and leaves the found ones where they came from" {
+	var list = List.init(std.testing.allocator);
+	defer list.deinit();
+	try list.add("books", "/tmp/books.db", null, "");
+	try list.offer("work", "k8s://work");
+
+	var buffer: [std.fs.max_path_bytes]u8 = undefined;
+	const file = try std.fmt.bufPrint(&buffer, "/tmp/krtek-found-test-{d}", .{std.c.getpid()});
+	try save(&list, file);
+
+	var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+	defer arena.deinit();
+	const text = try read(arena.allocator(), file);
+	try std.testing.expect(std.mem.indexOf(u8, text, "books") != null);
+	try std.testing.expect(std.mem.indexOf(u8, text, "k8s://work") == null);
 }

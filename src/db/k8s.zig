@@ -59,6 +59,55 @@ comptime {
 pub const owns = address.owns;
 pub const Parts = address.Parts;
 
+/// What one context of the kubeconfig on this machine is called, and the target
+/// that opens it.
+pub const Context = struct {
+	name: []const u8,
+	target: []const u8,
+	current: bool,
+};
+
+/// The contexts of the kubeconfig on this machine, for a program that wants to
+/// offer them without being asked to. Nothing is connected to and no credential
+/// plugin is run: this reads one file and gives back names.
+///
+/// It never fails. A machine with no kubeconfig, or one this reader cannot make
+/// sense of, has no contexts to offer - which is not an error on a screen that
+/// was showing a list of databases.
+pub fn contexts(arena: std.mem.Allocator) []const Context {
+	const path = (config.find(arena, "") catch null) orelse return &.{};
+	const text = config.readFile(arena, path) catch return &.{};
+	var why: List = .empty;
+	const doc = yaml.parse(arena, text, &why) catch return &.{};
+	const current = (doc.get("current-context") orelse yaml.Value{ .scalar = "" }).text();
+	var out: std.ArrayListUnmanaged(Context) = .empty;
+	for (config.contexts(arena, doc) catch &.{}) |name| {
+		// A context name may hold a slash - an EKS one is an ARN and always does -
+		// and the last slash in a target is where the namespace begins. Escaped
+		// here, so what comes back out the other side is the name that went in.
+		const target = escapedTarget(arena, name) catch continue;
+		out.append(arena, .{
+			.name = name,
+			.target = target,
+			.current = std.mem.eql(u8, name, current),
+		}) catch continue;
+	}
+	return out.items;
+}
+
+fn escapedTarget(arena: std.mem.Allocator, name: []const u8) ![]const u8 {
+	var out: List = .empty;
+	try out.appendSlice(arena, "k8s://");
+	for (name) |char| {
+		switch (char) {
+			'/' => try out.appendSlice(arena, "%2F"),
+			'?', '%', '#' => try out.print(arena, "%{X:0>2}", .{char}),
+			else => try out.append(arena, char),
+		}
+	}
+	return out.items;
+}
+
 /// How much of a list this driver will hold. A namespace with more objects than
 /// this in it is one nobody browses; the message says what happened rather than
 /// the grid quietly ending early.
@@ -939,7 +988,7 @@ fn sortRows(resource: api.Resource, rows: [][]const Value, order: []const u8, de
 		}
 	}
 	const at = index orelse return;
-	const Context = struct {
+	const By = struct {
 		at: usize,
 		descending: bool,
 		fn less(self: @This(), a: []const Value, b: []const Value) bool {
@@ -955,7 +1004,7 @@ fn sortRows(resource: api.Resource, rows: [][]const Value, order: []const u8, de
 			return if (self.descending) order_of == .gt else order_of == .lt;
 		}
 	};
-	std.mem.sort([]const Value, rows, Context{ .at = at, .descending = descending }, Context.less);
+	std.mem.sort([]const Value, rows, By{ .at = at, .descending = descending }, By.less);
 }
 
 fn nowSeconds() i64 {
@@ -1126,6 +1175,42 @@ fn splitServer(url: []const u8) ?Server {
 // ------------------------------------------------------------------- tests
 
 const testing = std.testing;
+
+test "a context offered from the kubeconfig survives the round trip into a target" {
+	var arena = std.heap.ArenaAllocator.init(testing.allocator);
+	defer arena.deinit();
+	const a = arena.allocator();
+	// An EKS context is an ARN and always has a slash in it, and the last slash
+	// in a target is where the namespace begins - so a name that went out
+	// unescaped would come back as a different context and a namespace nobody
+	// asked for.
+	const every = [_][]const u8{
+		"work",
+		"arn:aws:eks:eu-west-1:1234:cluster/live",
+		"gke_project_europe-west1_cluster",
+		"one/two/three",
+		"odd?name",
+		"100%done",
+		"has#hash",
+	};
+	for (every) |name| {
+		const target = try escapedTarget(a, name);
+		try testing.expect(std.mem.startsWith(u8, target, "k8s://"));
+		const parts = try address.parse(a, target);
+		try testing.expectEqualStrings(name, parts.context);
+		// And nothing was read as a namespace, because none was asked for.
+		try testing.expectEqualStrings("", parts.namespace);
+	}
+}
+
+test "a machine with no kubeconfig has no contexts to offer, and does not mind" {
+	var arena = std.heap.ArenaAllocator.init(testing.allocator);
+	defer arena.deinit();
+	// `contexts` reads whatever this machine has; what is being checked is that
+	// it answers at all rather than failing, which is what a list of databases
+	// needs from it.
+	_ = contexts(arena.allocator());
+}
 
 test "a cluster's address comes apart into a host and a port" {
 	const cases = [_]struct { url: []const u8, host: []const u8, port: u16, tls: bool }{

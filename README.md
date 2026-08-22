@@ -514,6 +514,14 @@ A target names a context and at most a namespace, and nothing else. Everything
 about how to reach a cluster is already in the kubeconfig, and a second place for
 the same fact to be wrong is worse than a longer command line.
 
+**Which is why nothing has to be typed at all.** Started with no argument, krtek
+offers every context of the kubeconfig in the list of connections, marked
+`kubeconfig` and sitting after the ones that were saved. They are not saved and
+never written to the connection file: the kubeconfig is where a cluster is
+described, so `d` says to remove the context there and `e` says that `a` is how to
+make one of your own. Adding a cluster to a kubeconfig is enough to reach it from
+here.
+
 **The kubeconfig is read the way kubectl reads it**, which meant three things this
 program did not have. A YAML reader, written for the shape a kubeconfig actually
 is - block mappings, sequences and plain scalars - and refusing by name and line

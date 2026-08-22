@@ -5,6 +5,13 @@
 set -e
 cd "$(dirname "$0")/.."
 
+# A configuration of its own. The app remembers every connection it opens, and a
+# test that opened one into the user's own list would edit a file it was never
+# asked to touch - which is exactly what this did until somebody noticed.
+CONFIG=$(mktemp -d)
+trap 'rm -rf "$CONFIG"' EXIT
+export XDG_CONFIG_HOME="$CONFIG"
+
 python3 - <<'PY'
 import sqlite3, os
 if os.path.exists("smoke.db"):
