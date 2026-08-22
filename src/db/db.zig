@@ -563,6 +563,28 @@ pub const Db = union(enum) {
 	}
 
 	/// Split a batch the way this engine parses it.
+	/// Whether running this again would do the same thing rather than something
+	/// more. Asked before a grid full of a statement's rows is refreshed - by the
+	/// follow key, which repeats it on a clock - because a console with `PRODUCE`
+	/// and `SET` and `SCALE` in it has statements that must happen once.
+	///
+	/// An engine that speaks SQL is answered here: a statement that only reads
+	/// says so in its first word. Anything else has a console of its own and
+	/// answers for itself, and says no until it does - the safe way round.
+	pub fn repeatable(self: Db, statement: []const u8) bool {
+		switch (self) {
+			inline else => |driver| {
+				if (@hasDecl(@TypeOf(driver.*), "repeatable")) {
+					return driver.repeatable(statement);
+				}
+				if (!self.caps().speaks_sql) {
+					return false;
+				}
+				return readsOnly(statement);
+			},
+		}
+	}
+
 	pub fn split(self: Db, arena: std.mem.Allocator, sql: []const u8) Error![]Statement {
 		switch (self) {
 			inline else => |driver| return driver.split(arena, sql),
@@ -722,6 +744,70 @@ pub const AlterContext = struct {
 	keys: []const ForeignKey = &.{},
 	replay: []const []const u8 = &.{},
 };
+
+/// Whether a SQL statement is one that only reads. The first word decides it,
+/// and anything not on the list is taken to write - a `WITH … DELETE` exists and
+/// a wrong yes here repeats a deletion on a timer.
+pub fn readsOnly(statement: []const u8) bool {
+	const text = std.mem.trimStart(u8, statement, " \t\r\n(");
+	const reading = [_][]const u8{ "SELECT", "SHOW", "EXPLAIN", "PRAGMA", "DESCRIBE", "DESC", "VALUES", "TABLE" };
+	for (reading) |word| {
+		if (text.len < word.len or !std.ascii.eqlIgnoreCase(text[0..word.len], word)) {
+			continue;
+		}
+		// The whole word, so `SELECTED` is not a SELECT.
+		if (text.len == word.len or !isWordByte(text[word.len])) {
+			return true;
+		}
+	}
+	// A `WITH` may end in anything, and often ends in a write.
+	return false;
+}
+
+fn isWordByte(byte: u8) bool {
+	return std.ascii.isAlphanumeric(byte) or byte == '_';
+}
+
+test "a statement that only reads is the only one worth repeating" {
+	const reads = [_][]const u8{
+		"SELECT 1",
+		"  select * from books",
+		"\n\tSELECT\n  1",
+		"(SELECT 1)",
+		"show tables",
+		"EXPLAIN SELECT 1",
+		"pragma table_info(books)",
+		"DESCRIBE books",
+		"VALUES (1)",
+		"TABLE books",
+	};
+	for (reads) |statement| {
+		if (!readsOnly(statement)) {
+			std.debug.print("should read: {s}\n", .{statement});
+			return error.TestUnexpectedResult;
+		}
+	}
+	const writes = [_][]const u8{
+		"INSERT INTO books (title) VALUES ('x')",
+		"insert into authors (name) values ('x') returning id",
+		"UPDATE books SET year = 1 RETURNING id",
+		"DELETE FROM books RETURNING id",
+		"WITH gone AS (DELETE FROM books RETURNING id) SELECT * FROM gone",
+		"CREATE TABLE t (a int)",
+		"DROP TABLE books",
+		"VACUUM",
+		// A word that merely starts like one of them is not one of them.
+		"SELECTED",
+		"DESCRIBED",
+		"",
+	};
+	for (writes) |statement| {
+		if (readsOnly(statement)) {
+			std.debug.print("should not read: {s}\n", .{statement});
+			return error.TestUnexpectedResult;
+		}
+	}
+}
 
 pub const List = std.ArrayListUnmanaged(u8);
 

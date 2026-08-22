@@ -868,7 +868,7 @@ pub const HELP = [_][2][]const u8{
 	.{ "b L", "database info, relations" },
 	.{ "m", "report of the last batch" },
 	.{ "r", "reload" },
-	.{ "R", "follow: reload it, staying at the end" },
+	.{ "R", "follow: read it again, staying at the end" },
 	.{ "q ctrl+c", "quit" },
 	.{ "", "ROWS" },
 	.{ "enter", "edit the row in a form" },

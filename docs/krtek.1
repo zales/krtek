@@ -117,7 +117,17 @@ acting on it, and writing it back from a grid would lose every field the grid do
 not show.
 .B x
 asks before deleting, because nothing takes that back. The console is
-.BR GET ", " DESCRIBE ", " LOGS ", " SCALE ", " RESTART ", " USE ", " NAMESPACES ", " CONTEXTS " and " VERSION .
+.BR GET ", " WHY ", " LOGS ", " DESCRIBE ", " SCALE ", " RESTART ", " USE ", " NAMESPACES ", " CONTEXTS " and " VERSION .
+.B WHY
+answers why a pod is unhappy: what each container is doing, what the last one died
+of and with what exit code, and what the cluster has said about it lately.
+.B R
+follows a statement the same way it follows a table, so
+.B LOGS
+and then
+.B R
+is a tail - and only where the engine says running it again is the same as running
+it once.
 .PP
 SFTP is a filesystem rather than a store of keys: a directory is a table and a
 file is a row, a directory is also what a schema is - so

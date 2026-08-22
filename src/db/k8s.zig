@@ -554,6 +554,19 @@ pub const Db = struct {
 		return out.items;
 	}
 
+	/// The console verbs that only look. `SCALE`, `RESTART` and `USE` change
+	/// something and are left out, so a grid of theirs is not repeated on a clock.
+	pub fn repeatable(_: *Db, statement: []const u8) bool {
+		var words = std.mem.tokenizeAny(u8, statement, " \t\r\n;");
+		const verb = words.next() orelse return false;
+		for ([_][]const u8{ "GET", "DESCRIBE", "LOGS", "WHY", "CONTEXTS", "NAMESPACES", "NS", "VERSION" }) |reading| {
+			if (eq(verb, reading)) {
+				return true;
+			}
+		}
+		return false;
+	}
+
 	pub fn ddl(_: *Db) db.Ddl {
 		return .{ .k8s = Ddl{} };
 	}
@@ -733,6 +746,9 @@ pub const Db = struct {
 		if (eq(verb, "LOGS")) {
 			return .{ .k8s = try self.logs(arena, first, second) };
 		}
+		if (eq(verb, "WHY")) {
+			return .{ .k8s = try self.whyPod(arena, first) };
+		}
 		if (eq(verb, "SCALE")) {
 			try self.scale(arena, first, second, third);
 			return null;
@@ -742,7 +758,7 @@ pub const Db = struct {
 			return null;
 		}
 		self.complain(
-			"this is a cluster, not SQL - GET pods, DESCRIBE pod <name>, LOGS <pod>, SCALE deployments <name> <n>, RESTART deployments <name>, USE <namespace>, CONTEXTS, VERSION",
+			"this is a cluster, not SQL - GET pods, WHY <pod>, LOGS <pod>, DESCRIBE pod <name>, SCALE deployments <name> <n>, RESTART deployments <name>, USE <namespace>, CONTEXTS, VERSION",
 			.{},
 		);
 		return error.Driver;
@@ -809,6 +825,92 @@ pub const Db = struct {
 			return error.Driver;
 		};
 		return self.lines(arena, resource.singular, writer.written());
+	}
+
+	/// Why a pod is unhappy, in the order somebody asks it: what it is doing, what
+	/// each of its containers is doing, what the last one to die died of, and what
+	/// the cluster has said about it lately.
+	///
+	/// The restart reason is the part that is nowhere else. A count of seven
+	/// restarts does not say whether it ran out of memory or exited 1, and that is
+	/// in `lastState.terminated` - the state before the one it is in now, which is
+	/// the only record of a container that no longer exists.
+	fn whyPod(self: *Db, arena: std.mem.Allocator, name: []const u8) db.Error!Rows {
+		if (name.len == 0) {
+			self.remember("WHY <pod>");
+			return error.Driver;
+		}
+		const resource = api.find("pods").?;
+		const response = self.call(arena, "GET", try self.objectPath(arena, resource, "", name), "") catch return error.Driver;
+		if (!response.ok()) {
+			return self.fail(response, name);
+		}
+		const pod = std.json.parseFromSliceLeaky(Json, arena, response.body, .{}) catch {
+			self.remember("the cluster answered with something that is not JSON");
+			return error.Driver;
+		};
+
+		var rows = Rows{ .owner = self, .table = "" };
+		const heading = try arena.alloc([]const u8, 2);
+		heading[0] = "what";
+		heading[1] = "said";
+		rows.names = heading;
+		rows.numeric = try arena.alloc(bool, 2);
+		@memset(@constCast(rows.numeric), false);
+
+		try self.pair(arena, &rows, "status", try api.cell(arena, pod, .{ .name = "s", .from = .pod_status }, nowSeconds()));
+		try self.pair(arena, &rows, "phase", textAt(pod, "status.phase"));
+		try self.pair(arena, &rows, "node", textAt(pod, "spec.nodeName"));
+		try self.pair(arena, &rows, "started", textAt(pod, "status.startTime"));
+		if (textAt(pod, "status.message").len != 0) {
+			try self.pair(arena, &rows, "message", textAt(pod, "status.message"));
+		}
+
+		// What each container is doing, and what the one before it died of.
+		if (api.at(pod, "status.containerStatuses")) |statuses| {
+			if (statuses == .array) {
+				for (statuses.array.items) |one| {
+					const container = textAt(one, "name");
+					try self.pair(arena, &rows, "container", container);
+					try self.pair(arena, &rows, "  state", try state(arena, api.at(one, "state")));
+					const restarts = api.at(one, "restartCount");
+					const total: i64 = if (restarts) |value| (if (value == .integer) value.integer else 0) else 0;
+					if (total != 0) {
+						try self.pair(arena, &rows, "  restarts", try std.fmt.allocPrint(arena, "{d}", .{total}));
+						try self.pair(arena, &rows, "  last exit", try state(arena, api.at(one, "lastState")));
+						const said = textAt(api.at(one, "lastState") orelse Json{ .null = {} }, "terminated.message");
+						if (said.len != 0) {
+							try self.pair(arena, &rows, "  last said", said);
+						}
+					}
+				}
+			}
+		}
+
+		// And what the cluster has been saying about it, which is where a pull
+		// failure or a failed mount is written down and nowhere else.
+		const namespace = textAt(pod, "metadata.namespace");
+		const path = try std.fmt.allocPrint(arena, "/api/v1/namespaces/{s}/events?fieldSelector=involvedObject.name%3D{s}", .{
+			if (namespace.len != 0) namespace else self.namespace,
+			name,
+		});
+		const events = self.fetch(arena, path, "the events") catch &[_]Json{};
+        for (events) |event| {
+			const reason = textAt(event, "reason");
+			try self.pair(arena, &rows, try std.fmt.allocPrint(arena, "event {s}", .{reason}), textAt(event, "message"));
+		}
+		if (events.len == 0) {
+			try self.pair(arena, &rows, "events", "none the cluster still has");
+		}
+		return rows;
+	}
+
+	fn pair(self: *Db, arena: std.mem.Allocator, rows: *Rows, what: []const u8, said: []const u8) db.Error!void {
+		_ = self;
+		const cells = try arena.alloc(Value, 2);
+		cells[0] = .{ .text = what };
+		cells[1] = if (said.len == 0) .nil else .{ .text = said };
+		try rows.rows.append(arena, cells);
 	}
 
 	fn logs(self: *Db, arena: std.mem.Allocator, name: []const u8, howMany: []const u8) db.Error!Rows {
@@ -898,6 +1000,54 @@ pub const Db = struct {
 		}
 	}
 };
+
+fn textAt(object: Json, path: []const u8) []const u8 {
+	const found = api.at(object, path) orelse return "";
+	return if (found == .string) found.string else "";
+}
+
+/// A container state as one line: `running since …`, `waiting: ImagePullBackOff`,
+/// `terminated: OOMKilled (137) at …`. The exit code matters as much as the
+/// reason - `Error (1)` and `Error (137)` are different afternoons.
+fn state(arena: std.mem.Allocator, value: ?Json) ![]const u8 {
+	const found = value orelse return "";
+	if (found != .object) {
+		return "";
+	}
+	if (api.at(found, "running")) |running| {
+		return std.fmt.allocPrint(arena, "running since {s}", .{textAt(running, "startedAt")});
+	}
+	if (api.at(found, "waiting")) |waiting| {
+		const reason = textAt(waiting, "reason");
+		const said = textAt(waiting, "message");
+		return if (said.len != 0)
+			std.fmt.allocPrint(arena, "waiting: {s} - {s}", .{ reason, said })
+		else
+			std.fmt.allocPrint(arena, "waiting: {s}", .{reason});
+	}
+	if (api.at(found, "terminated")) |ended| {
+		const code = api.at(ended, "exitCode");
+		const signal = api.at(ended, "signal");
+		var out: List = .empty;
+		try out.print(arena, "terminated: {s}", .{textAt(ended, "reason")});
+		if (code) |value_of| {
+			if (value_of == .integer) {
+				try out.print(arena, " ({d})", .{value_of.integer});
+			}
+		}
+		if (signal) |value_of| {
+			if (value_of == .integer and value_of.integer != 0) {
+				try out.print(arena, " on signal {d}", .{value_of.integer});
+			}
+		}
+		const at_time = textAt(ended, "finishedAt");
+		if (at_time.len != 0) {
+			try out.print(arena, " at {s}", .{at_time});
+		}
+		return out.items;
+	}
+	return "";
+}
 
 fn eq(word: []const u8, name: []const u8) bool {
 	return std.ascii.eqlIgnoreCase(word, name);
@@ -1233,4 +1383,22 @@ test "a cluster's address comes apart into a host and a port" {
 	try testing.expect(splitServer("ftp://host") == null);
 	try testing.expect(splitServer("https://") == null);
 	try testing.expect(splitServer("https://host:not-a-port") == null);
+}
+
+test "only the console verbs that look are worth repeating" {
+	// A grid the follow key refreshes on a clock must not be one that changes
+	// the cluster every time it ticks.
+	var db_stub: Db = undefined;
+	for ([_][]const u8{ "GET pods", "get pods", "LOGS api-7c9", "WHY api-7c9", "DESCRIBE pod x", "CONTEXTS", "VERSION", "NAMESPACES" }) |reading| {
+		if (!Db.repeatable(&db_stub, reading)) {
+			std.debug.print("should repeat: {s}\n", .{reading});
+			return error.TestUnexpectedResult;
+		}
+	}
+	for ([_][]const u8{ "SCALE deployments api 5", "RESTART deployments api", "USE kube-system", "", "nonsense" }) |writing| {
+		if (Db.repeatable(&db_stub, writing)) {
+			std.debug.print("should not repeat: {s}\n", .{writing});
+			return error.TestUnexpectedResult;
+		}
+	}
 }

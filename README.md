@@ -558,13 +558,29 @@ that back, and the editor is a console for the cluster:
 
 ```
 GET pods                        the same as choosing pods on the left
-DESCRIBE pod api-7c9d4          one object, whole, as the cluster holds it
+WHY api-7c9d4                   what it is doing, what it died of, what was said
 LOGS api-7c9d4 500              the last lines of a pod's log
+DESCRIBE pod api-7c9d4          one object, whole, as the cluster holds it
 SCALE deployments api 5         replicas
 RESTART deployments api         a rolling restart, the annotation kubectl uses
 USE kube-system                 another namespace
 NAMESPACES / CONTEXTS / VERSION
 ```
+
+**`WHY` is the one that answers a question rather than a request.** A restart count
+of seven does not say whether the container ran out of memory or exited 1, and
+that is in the state *before* the one it is in now - the only record of a container
+that no longer exists. So it reads the phase, what each container is doing, what
+the last one died of with its exit code, and what the cluster has said about the
+pod lately, which is where a failed image pull or a failed mount is written down
+and nowhere else.
+
+**`R` follows a log the way it follows a table.** Anything the engine says is worth
+running again can be followed, so `LOGS api-7c9d4` and then `R` is a tail, and the
+newest line stays under the cursor. Anything else is refused rather than repeated:
+a console with `PRODUCE` and `SCALE` in it has statements that must happen exactly
+as often as they were typed, and `INSERT … RETURNING` produces rows without being
+a question.
 
 **A list is fetched whole and paged here**, because Kubernetes pages with a
 `continue` token that walks forwards only and cannot answer "the rows from 400",

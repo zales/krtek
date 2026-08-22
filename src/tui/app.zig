@@ -171,6 +171,11 @@ pub const App = struct {
 	limit: usize = 200,
 	order: ?[]const u8 = null,
 	descending: bool = false,
+	/// The statement whose rows are on the grid, where a statement put them there
+	/// rather than a table. Kept so the grid can be filled again - by `r`, and by
+	/// the follow key on a clock - and only ever re-run where the engine says
+	/// running it twice is the same as running it once.
+	last_statement: std.ArrayListUnmanaged(u8) = .empty,
 	/// How often the grid reads its table again, in milliseconds, or 0 when it
 	/// does not. Following is what makes a log readable: the page stays on the
 	/// end of the table and records appear under the cursor as they are written,
@@ -886,6 +891,7 @@ pub const App = struct {
 		self.rows.deinit(self.allocator);
 		self.title.deinit(self.allocator);
 		self.status.deinit(self.allocator);
+		self.last_statement.deinit(self.allocator);
 		self.reports.deinit(self.allocator);
 		self.marked.deinit(self.allocator);
 		self.pending.deinit(self.allocator);
@@ -935,6 +941,11 @@ pub const App = struct {
 			self.allocator.free(old);
 		}
 		self.table_name = if (name) |value| try self.allocator.dupe(u8, value) else null;
+		// A table on the grid is not a statement's rows any more, so nothing is
+		// left behind for `r` to run instead of reading the table.
+		if (name != null) {
+			self.last_statement.clearRetainingCapacity();
+		}
 	}
 
 	pub fn say(self: *App, comptime fmt: []const u8, args: anytype) void {
@@ -1082,7 +1093,7 @@ pub const App = struct {
 	}
 
 	pub fn reload(self: *App) !void {
-		const table = self.currentTable() orelse return;
+		const table = self.currentTable() orelse return self.reloadStatement();
 		const counted = if (!self.isFiltered())
 			self.conn.rowCount(table)
 		else
@@ -1141,6 +1152,34 @@ pub const App = struct {
 		self.setTitle("{s}", .{table.name});
 	}
 
+	/// Fill the grid again from the statement that filled it, where a statement
+	/// did. Only where the engine says running it twice is the same as running it
+	/// once: a console with `PRODUCE` and `SCALE` in it has statements that must
+	/// happen exactly as often as they were typed.
+	fn reloadStatement(self: *App) !void {
+		if (self.last_statement.items.len == 0) {
+			return;
+		}
+		if (!self.conn.repeatable(self.last_statement.items)) {
+			if (self.follow_ms != 0) {
+				self.setFollow(0);
+			}
+			self.complain("that is not something to run again on its own", .{});
+			return;
+		}
+		// Its own copy: running it fills the grid, and filling the grid is what
+		// owns the memory this was read from.
+		const again = try self.allocator.dupe(u8, self.last_statement.items);
+		defer self.allocator.free(again);
+		try self.runBatchStopping(again, true);
+	}
+
+	/// Whether there is anything for `r` and the follow key to read again.
+	pub fn hasRows(self: *App) bool {
+		return self.hasTable() or
+			(self.last_statement.items.len != 0 and self.conn.repeatable(self.last_statement.items));
+	}
+
 	/// Read the open table every `ms` milliseconds, or stop with 0. The timer
 	/// itself lives in the screen, because waking the key loop is the one thing
 	/// only the screen can do.
@@ -1158,7 +1197,7 @@ pub const App = struct {
 	/// whatever is already there - and anything modal is left alone, because a
 	/// grid that reloads under a half-typed form is worse than one that waits.
 	pub fn followTick(self: *App) void {
-		if (self.follow_ms == 0 or self.view != .grid or !self.hasTable()) {
+		if (self.follow_ms == 0 or self.view != .grid or !self.hasRows()) {
 			return;
 		}
 		if (self.prompt != null or self.form != null or self.editor != null or self.files != null or self.detail) {
@@ -1474,6 +1513,7 @@ pub const App = struct {
 		self.reports.clearRetainingCapacity();
 
 		var shown = false;
+		var last_shown: []const u8 = "";
 		var failures: usize = 0;
 		// The engine's own parser decides where one statement ends.
 		const statements = self.conn.split(arena, sql) catch &[_]database.Statement{};
@@ -1498,6 +1538,9 @@ pub const App = struct {
 						};
 						produced = @intCast(self.rows.items.len);
 						shown = failure == null;
+						if (shown) {
+							last_shown = statement.sql;
+						}
 					} else {
 						while (true) {
 							const more = rows.next() catch {
@@ -1565,6 +1608,9 @@ pub const App = struct {
 			self.col_scroll = 0;
 			self.clampCursor();
 			self.total = @intCast(self.rows.items.len);
+			// The last statement of the batch is the one that filled the grid.
+			self.last_statement.clearRetainingCapacity();
+			self.last_statement.appendSlice(self.allocator, last_shown) catch {};
 			self.setTitle("query result", .{});
 			self.view = .grid;
 			self.focus = .main;
@@ -1944,8 +1990,8 @@ pub const App = struct {
 	/// Turn the following on at the interval last asked for, and jump to the end
 	/// of the table straight away rather than after the first tick.
 	pub fn startFollowing(self: *App) !void {
-		if (!self.hasTable()) {
-			self.complain("open a table to follow", .{});
+		if (!self.hasRows()) {
+			self.complain("open a table, or run something worth watching, to follow it", .{});
 			return;
 		}
 		self.setFollow(self.follow_every);
@@ -1954,7 +2000,7 @@ pub const App = struct {
 		}
 		try self.reload();
 		self.say("following {s}, every {d:.1}s", .{
-			self.title.items,
+			if (self.hasTable()) self.title.items else "it",
 			@as(f64, @floatFromInt(self.follow_every)) / 1000.0,
 		});
 	}

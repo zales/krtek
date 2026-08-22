@@ -2063,6 +2063,20 @@ pub const Db = struct {
 		return list.items;
 	}
 
+	/// The console verbs that only look. `PRODUCE`, `CREATE`, `DROP` and
+	/// `TRUNCATE` change the cluster and are left out, so a grid of theirs is not
+	/// repeated on a clock.
+	pub fn repeatable(_: *Db, statement: []const u8) bool {
+		var words = std.mem.tokenizeAny(u8, statement, " \t\r\n;");
+		const verb = words.next() orelse return false;
+		for ([_][]const u8{ "TOPICS", "BROKERS", "GROUPS", "OFFSETS", "DESCRIBE" }) |reading| {
+			if (std.ascii.eqlIgnoreCase(verb, reading)) {
+				return true;
+			}
+		}
+		return false;
+	}
+
 	pub fn ddl(_: *Db) db.Ddl {
 		return .{ .kafka = .{} };
 	}
