@@ -17,8 +17,22 @@ cd "$(dirname "$0")/.."
 FORCE=$(mktemp /tmp/krtek-platforms-XXXXXX.zig)
 trap 'rm -f "$FORCE"' EXIT
 cat > "$FORCE" <<'EOF'
-const store = @import("store");
+// One module, because `db` already exports the file layer and naming it twice
+// makes two modules out of one file, which the compiler will not have.
+const db = @import("db");
+const store = db.store;
 comptime {
+    // The Kubernetes driver reaches for libc as directly as the file layer does -
+    // fork, execve, pipe, poll and waitpid to run a credential plugin, and a
+    // socket read that must not wait, for a shell - and musl and Darwin do not
+    // agree about all of it.
+    _ = &db.k8s_exec.run;
+    _ = &db.k8s_exec.which;
+    _ = &db.ws.connect;
+    _ = &db.net.startTls;
+    _ = &db.net.Stream.readNow;
+    _ = &db.k8s_config.find;
+    _ = &db.k8s_config.readFile;
     _ = &store.Local.list;
     _ = &store.Local.stat;
     _ = &store.Local.openRead;
@@ -37,8 +51,7 @@ for target in x86_64-linux-musl aarch64-linux-musl x86_64-macos aarch64-macos; d
 	# To a real file rather than /dev/null, which the compiler cannot write an
 	# object to and dies trying.
 	if zig build-obj -target "$target" -lc -femit-bin="/tmp/krtek-platforms-$target.o" \
-		--dep store -Mroot="$FORCE" \
-		--dep db -Mstore=src/db/store.zig \
+		--dep db -Mroot="$FORCE" \
 		-Mdb=src/db/db.zig 2>/tmp/krtek-platforms.err
 	then
 		echo ok
