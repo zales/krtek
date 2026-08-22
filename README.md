@@ -530,6 +530,12 @@ and the child of a fork has only the one that called it, and gives up after half
 minute, because a plugin that opens a browser and waits would otherwise hold the
 interface forever.
 
+The status column is kubectl's, not `status.phase`. A pod stuck in a crash loop is
+phase `Running` with a container waiting on `CrashLoopBackOff`, and a pod that has
+finished is phase `Succeeded` where kubectl says `Completed` - so a column that
+showed the phase would call the one broken pod in a namespace healthy, which is
+the single thing anybody scans a pod list for.
+
 **Reading, deleting and scaling, and not editing.** An object is a document with a
 controller acting on it; writing one back from a grid of flattened cells is a way
 to lose a field nobody displayed, and `e` says so instead of trying. What is
@@ -864,6 +870,21 @@ refused with its fingerprint, and only `insecure=1` lets it through.
 
 ```sh
 zig build && ./tests/sftp.sh
+```
+
+[tests/k8s.sh](tests/k8s.sh) brings up a k3s in a container, because that is a
+whole cluster in one image and it hands out a kubeconfig with a certificate
+authority of its own and a client certificate - the pair a driver has to get right
+and the pair no unit test can prove. It checks all three ways in: that client
+certificate, a service account's bearer token, and an exec credential plugin,
+since the last of those is how nearly every cloud cluster authenticates. Then it
+compares the pod list against `kubectl` name for name and state for state,
+including the two states that are not the phase - a crash-looping pod and a
+finished one - and checks that `SCALE` and `RESTART` reach the cluster and that
+`x` asks before it deletes.
+
+```sh
+zig build && ./tests/k8s.sh
 ```
 
 That is how everything described here was verified: against a real SQLite file

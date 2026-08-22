@@ -25,20 +25,32 @@ pub const From = union(enum) {
 	at: []const u8,
 	/// How long ago `metadata.creationTimestamp` was, as kubectl writes it.
 	age,
-	/// `2/3`: containers ready out of containers there.
+	/// `2/3`: containers ready out of containers the pod asked for.
 	ready,
+	/// What kubectl puts in a pod's STATUS, which is not `status.phase`: a pod
+	/// crash-looping is phase Running, and a pod that has finished is phase
+	/// Succeeded where kubectl says Completed.
+	pod_status,
 	/// How many times this pod's containers have been restarted, added up.
 	restarts,
 	/// `3/3` over a workload's replicas: ready out of wanted.
 	replicas,
 	/// The labels, as `k=v,k=v`.
 	labels,
+	/// A service's ports, as `80/TCP,443/TCP`.
+	ports,
 };
 
 pub const Column = struct {
 	name: []const u8,
 	from: From,
 	numeric: bool = false,
+	/// A counter the API leaves out when it is zero: `availableReplicas` is
+	/// absent on a deployment that has none, and an empty cell there would read as
+	/// "unknown" where kubectl says 0. Only for fields that really do count
+	/// something - a `spec.replicas` that is missing is not set, which is not the
+	/// same as none.
+	zero_when_missing: bool = false,
 };
 
 pub const Resource = struct {
@@ -72,7 +84,7 @@ pub const RESOURCES = [_]Resource{
 		.columns = &.{
 			NAME,
 			.{ .name = "ready", .from = .ready },
-			.{ .name = "status", .from = .{ .at = "status.phase" } },
+			.{ .name = "status", .from = .pod_status },
 			.{ .name = "restarts", .from = .restarts, .numeric = true },
 			AGE,
 			.{ .name = "ip", .from = .{ .at = "status.podIP" } },
@@ -88,8 +100,8 @@ pub const RESOURCES = [_]Resource{
 			NAME,
 			.{ .name = "ready", .from = .replicas },
 			.{ .name = "wanted", .from = .{ .at = "spec.replicas" }, .numeric = true },
-			.{ .name = "up-to-date", .from = .{ .at = "status.updatedReplicas" }, .numeric = true },
-			.{ .name = "available", .from = .{ .at = "status.availableReplicas" }, .numeric = true },
+			.{ .name = "up-to-date", .from = .{ .at = "status.updatedReplicas" }, .numeric = true, .zero_when_missing = true },
+			.{ .name = "available", .from = .{ .at = "status.availableReplicas" }, .numeric = true, .zero_when_missing = true },
 			AGE,
 		},
 	},
@@ -111,9 +123,9 @@ pub const RESOURCES = [_]Resource{
 		.singular = "daemonset",
 		.columns = &.{
 			NAME,
-			.{ .name = "desired", .from = .{ .at = "status.desiredNumberScheduled" }, .numeric = true },
-			.{ .name = "ready", .from = .{ .at = "status.numberReady" }, .numeric = true },
-			.{ .name = "available", .from = .{ .at = "status.numberAvailable" }, .numeric = true },
+			.{ .name = "desired", .from = .{ .at = "status.desiredNumberScheduled" }, .numeric = true, .zero_when_missing = true },
+			.{ .name = "ready", .from = .{ .at = "status.numberReady" }, .numeric = true, .zero_when_missing = true },
+			.{ .name = "available", .from = .{ .at = "status.numberAvailable" }, .numeric = true, .zero_when_missing = true },
 			AGE,
 		},
 	},
@@ -135,9 +147,9 @@ pub const RESOURCES = [_]Resource{
 		.singular = "job",
 		.columns = &.{
 			NAME,
-			.{ .name = "succeeded", .from = .{ .at = "status.succeeded" }, .numeric = true },
-			.{ .name = "failed", .from = .{ .at = "status.failed" }, .numeric = true },
-			.{ .name = "active", .from = .{ .at = "status.active" }, .numeric = true },
+			.{ .name = "succeeded", .from = .{ .at = "status.succeeded" }, .numeric = true, .zero_when_missing = true },
+			.{ .name = "failed", .from = .{ .at = "status.failed" }, .numeric = true, .zero_when_missing = true },
+			.{ .name = "active", .from = .{ .at = "status.active" }, .numeric = true, .zero_when_missing = true },
 			AGE,
 		},
 	},
@@ -161,6 +173,7 @@ pub const RESOURCES = [_]Resource{
 			NAME,
 			.{ .name = "type", .from = .{ .at = "spec.type" } },
 			.{ .name = "cluster-ip", .from = .{ .at = "spec.clusterIP" } },
+			.{ .name = "ports", .from = .ports },
 			AGE,
 		},
 	},
@@ -297,12 +310,20 @@ pub fn at(object: Json, path: []const u8) ?Json {
 /// since the epoch, so a whole page is aged from one reading of the clock.
 pub fn cell(arena: std.mem.Allocator, object: Json, column: Column, now: i64) ![]const u8 {
 	return switch (column.from) {
-		.at => |path| try flatten(arena, at(object, path)),
+		.at => |path| {
+			const found = at(object, path);
+			if (column.zero_when_missing and (found == null or found.? == .null)) {
+				return "0";
+			}
+			return try flatten(arena, found);
+		},
 		.age => try age(arena, object, now),
 		.ready => try readyContainers(arena, object),
+		.pod_status => try podStatus(arena, object),
 		.restarts => try restarts(arena, object),
 		.replicas => try replicaCount(arena, object),
 		.labels => try labels(arena, object),
+		.ports => try ports(arena, object),
 	};
 }
 
@@ -383,19 +404,77 @@ pub fn epochOf(text: []const u8) ?i64 {
 	return days * 86400 + hour * 3600 + minute * 60 + second;
 }
 
+/// Ready out of asked for. The denominator is `spec.containers`, not the
+/// statuses: a pod that has not been scheduled has containers and no statuses at
+/// all, and kubectl calls that `0/1` rather than nothing.
 fn readyContainers(arena: std.mem.Allocator, object: Json) ![]const u8 {
-	const statuses = at(object, "status.containerStatuses") orelse return "";
-	if (statuses != .array) {
+	const wanted = at(object, "spec.containers");
+	if (wanted == null or wanted.? != .array) {
 		return "";
 	}
 	var ready: usize = 0;
-	for (statuses.array.items) |one| {
-		const flag = at(one, "ready") orelse continue;
-		if (flag == .bool and flag.bool) {
-			ready += 1;
+	if (at(object, "status.containerStatuses")) |statuses| {
+		if (statuses == .array) {
+			for (statuses.array.items) |one| {
+				const flag = at(one, "ready") orelse continue;
+				if (flag == .bool and flag.bool) {
+					ready += 1;
+				}
+			}
 		}
 	}
-	return std.fmt.allocPrint(arena, "{d}/{d}", .{ ready, statuses.array.items.len });
+	return std.fmt.allocPrint(arena, "{d}/{d}", .{ ready, wanted.?.array.items.len });
+}
+
+/// What kubectl prints under STATUS, which is not the phase.
+///
+/// A pod whose container keeps dying is phase `Running` with a container waiting
+/// on `CrashLoopBackOff`, and a pod that has finished is phase `Succeeded` where
+/// kubectl says `Completed` - so a column that showed the phase would call the
+/// one broken pod in a namespace healthy, which is the single thing anybody scans
+/// a pod list for. The rule is kubectl's: the phase, then whatever a container is
+/// waiting on or died of, then `Terminating` over everything if the object is on
+/// its way out. Containers are walked backwards so the first one wins, as there.
+fn podStatus(arena: std.mem.Allocator, object: Json) ![]const u8 {
+	_ = arena;
+	var reason: []const u8 = "";
+	if (at(object, "status.phase")) |phase| {
+		if (phase == .string) {
+			reason = phase.string;
+		}
+	}
+	if (at(object, "status.reason")) |said| {
+		if (said == .string and said.string.len != 0) {
+			reason = said.string;
+		}
+	}
+	if (at(object, "status.containerStatuses")) |statuses| {
+		if (statuses == .array) {
+			var i = statuses.array.items.len;
+			while (i > 0) {
+				i -= 1;
+				const one = statuses.array.items[i];
+				if (at(one, "state.waiting.reason")) |waiting| {
+					if (waiting == .string and waiting.string.len != 0) {
+						reason = waiting.string;
+						continue;
+					}
+				}
+				if (at(one, "state.terminated.reason")) |ended| {
+					if (ended == .string and ended.string.len != 0) {
+						reason = ended.string;
+					}
+				}
+			}
+		}
+	}
+	// An object with a deletion timestamp is going, whatever it is doing.
+	if (at(object, "metadata.deletionTimestamp")) |going| {
+		if (going == .string and going.string.len != 0) {
+			reason = "Terminating";
+		}
+	}
+	return reason;
 }
 
 fn restarts(arena: std.mem.Allocator, object: Json) ![]const u8 {
@@ -425,6 +504,32 @@ fn replicaCount(arena: std.mem.Allocator, object: Json) ![]const u8 {
 		if (ready) |value| (if (value == .integer) value.integer else 0) else 0,
 		if (wanted.?  == .integer) wanted.?.integer else 0,
 	});
+}
+
+fn ports(arena: std.mem.Allocator, object: Json) ![]const u8 {
+	const found = at(object, "spec.ports") orelse return "";
+	if (found != .array) {
+		return "";
+	}
+	var out: List = .empty;
+	for (found.array.items) |one| {
+		if (out.items.len != 0) {
+			try out.append(arena, ',');
+		}
+		const number = at(one, "port") orelse continue;
+		const protocol = at(one, "protocol");
+		try out.print(arena, "{s}/{s}", .{
+			try flatten(arena, number),
+			if (protocol) |value| (if (value == .string) value.string else "TCP") else "TCP",
+		});
+		// A node port is the one somebody outside the cluster would dial.
+		if (at(one, "nodePort")) |node| {
+			if (node != .null) {
+				try out.print(arena, ":{s}", .{try flatten(arena, node)});
+			}
+		}
+	}
+	return out.items;
 }
 
 fn labels(arena: std.mem.Allocator, object: Json) ![]const u8 {
@@ -460,7 +565,7 @@ test "a pod's row is read and worked out from what the API answers" {
 	const pod = try parsed(a,
 		\\{"metadata": {"name": "api-7c9", "creationTimestamp": "2026-08-20T10:00:00Z",
 		\\              "labels": {"app": "api"}},
-		\\ "spec": {"nodeName": "node-1"},
+		\\ "spec": {"nodeName": "node-1", "containers": [{"name": "api"}, {"name": "sidecar"}]},
 		\\ "status": {"phase": "Running", "podIP": "10.1.2.3",
 		\\            "containerStatuses": [{"ready": true, "restartCount": 2},
 		\\                                  {"ready": false, "restartCount": 5}]}}
@@ -494,6 +599,94 @@ test "an object missing half of itself gives empty cells, not wrong ones" {
 			try testing.expectEqualStrings("", text);
 		}
 	}
+	// A pod that has containers and no statuses yet - one waiting to be
+	// scheduled - is 0 of however many it asked for, the way kubectl counts it.
+	const waiting = try parsed(a,
+		"{\"spec\": {\"containers\": [{\"name\": \"a\"}]}, \"status\": {\"phase\": \"Pending\"}}");
+	try testing.expectEqualStrings("0/1", try cell(a, waiting, .{ .name = "ready", .from = .ready }, now));
+	try testing.expectEqualStrings("Pending", try cell(a, waiting, .{ .name = "s", .from = .pod_status }, now));
+}
+
+test "a pod's status is what kubectl prints, which is not its phase" {
+	var arena = std.heap.ArenaAllocator.init(testing.allocator);
+	defer arena.deinit();
+	const a = arena.allocator();
+	const column: Column = .{ .name = "status", .from = .pod_status };
+	const cases = [_]struct { object: []const u8, says: []const u8 }{
+		// The one that matters: a pod stuck in a crash loop is phase Running.
+		.{
+			.object =
+			\\{"status": {"phase": "Running", "containerStatuses":
+			\\  [{"state": {"waiting": {"reason": "CrashLoopBackOff"}}}]}}
+			,
+			.says = "CrashLoopBackOff",
+		},
+		// And one that has finished is phase Succeeded, which kubectl calls done.
+		.{
+			.object =
+			\\{"status": {"phase": "Succeeded", "containerStatuses":
+			\\  [{"state": {"terminated": {"reason": "Completed"}}}]}}
+			,
+			.says = "Completed",
+		},
+		.{
+			.object =
+			\\{"status": {"phase": "Pending", "containerStatuses":
+			\\  [{"state": {"waiting": {"reason": "ImagePullBackOff"}}}]}}
+			,
+			.says = "ImagePullBackOff",
+		},
+		// On its way out, whatever it was doing.
+		.{
+			.object =
+			\\{"metadata": {"deletionTimestamp": "2026-08-22T12:00:00Z"},
+			\\ "status": {"phase": "Running", "containerStatuses": [{"state": {"running": {}}}]}}
+			,
+			.says = "Terminating",
+		},
+		// A pod the node evicted says why in status.reason.
+		.{
+			.object = "{\"status\": {\"phase\": \"Failed\", \"reason\": \"Evicted\"}}",
+			.says = "Evicted",
+		},
+		// Nothing interesting anywhere: the phase, as before.
+		.{
+			.object = "{\"status\": {\"phase\": \"Running\", \"containerStatuses\": [{\"state\": {\"running\": {}}}]}}",
+			.says = "Running",
+		},
+		.{ .object = "{}", .says = "" },
+	};
+	for (cases) |case| {
+		try testing.expectEqualStrings(case.says, try cell(a, try parsed(a, case.object), column, 0));
+	}
+}
+
+test "a counter the API leaves out at zero reads as zero, not as unknown" {
+	var arena = std.heap.ArenaAllocator.init(testing.allocator);
+	defer arena.deinit();
+	const a = arena.allocator();
+	const column: Column = .{ .name = "available", .from = .{ .at = "status.availableReplicas" }, .numeric = true, .zero_when_missing = true };
+	const none = try parsed(a, "{\"status\": {}}");
+	try testing.expectEqualStrings("0", try cell(a, none, column, 0));
+	const some = try parsed(a, "{\"status\": {\"availableReplicas\": 3}}");
+	try testing.expectEqualStrings("3", try cell(a, some, column, 0));
+	// Without the flag it is still empty, because a missing spec.replicas means
+	// nobody set one rather than none.
+	const plain: Column = .{ .name = "wanted", .from = .{ .at = "spec.replicas" }, .numeric = true };
+	try testing.expectEqualStrings("", try cell(a, none, plain, 0));
+}
+
+test "a service says its ports the way kubectl does" {
+	var arena = std.heap.ArenaAllocator.init(testing.allocator);
+	defer arena.deinit();
+	const a = arena.allocator();
+	const column: Column = .{ .name = "ports", .from = .ports };
+	const one = try parsed(a, "{\"spec\": {\"ports\": [{\"port\": 80, \"protocol\": \"TCP\"}]}}");
+	try testing.expectEqualStrings("80/TCP", try cell(a, one, column, 0));
+	const many = try parsed(a,
+		"{\"spec\": {\"ports\": [{\"port\": 80}, {\"port\": 443, \"protocol\": \"TCP\", \"nodePort\": 30443}]}}");
+	try testing.expectEqualStrings("80/TCP,443/TCP:30443", try cell(a, many, column, 0));
+	try testing.expectEqualStrings("", try cell(a, try parsed(a, "{\"spec\": {}}"), column, 0));
 }
 
 test "how old a thing is, the way kubectl says it" {

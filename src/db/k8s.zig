@@ -205,6 +205,8 @@ pub const Db = struct {
 			// Nothing takes a deleted object back, so x asks.
 			.final_deletes = true,
 			.row_noun = "object",
+			// kubectl apply makes an object; nothing here does.
+			.inserts_rows = false,
 		};
 	}
 

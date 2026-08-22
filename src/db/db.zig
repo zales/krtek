@@ -179,6 +179,10 @@ pub const Caps = struct {
 	final_deletes: bool = false,
 	/// What one row is called, where "row" is the wrong word for it.
 	row_noun: []const u8 = "row",
+	/// A row can be added. False where the rows are things this program can read
+	/// and remove but has no business making: a Kubernetes object is a document
+	/// with a controller behind it, and an empty grid there must not offer `i`.
+	inserts_rows: bool = true,
 };
 
 /// One statement out of a batch, with the text the user wrote.

@@ -480,7 +480,7 @@ fn grid(app: *App, size: Size, side: usize, rows: usize) void {
 		const filtered = app.isFiltered();
 		_ = write(app, if (filtered)
 			"nothing matches the filter - W changes it, esc clears it"
-		else if (app.editable)
+		else if (app.editable and app.conn.caps().inserts_rows)
 			"no rows yet - i inserts one"
 		else
 			"no rows", width);

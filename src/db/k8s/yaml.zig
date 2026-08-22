@@ -222,14 +222,13 @@ const Reader = struct {
 			if (rest[0] == '|' or rest[0] == '>') {
 				return .{ .scalar = try self.block(rest, indent) };
 			}
-			if (std.mem.eql(u8, rest, "{}")) {
-				return .{ .map = &.{} };
-			}
-			if (std.mem.eql(u8, rest, "[]")) {
-				return .{ .list = &.{} };
-			}
 			if (rest[0] == '{' or rest[0] == '[') {
-				return self.refuse(number, "is a flow collection, which this reader does not do");
+				var at: usize = 0;
+				const collection = try self.flow(rest, &at, number);
+				if (std.mem.trim(u8, rest[at..], " ").len != 0) {
+					return self.refuse(number, "has something after the end of its flow collection");
+				}
+				return collection;
 			}
 			return .{ .scalar = try self.scalar(rest, number) };
 		}
@@ -240,6 +239,86 @@ const Reader = struct {
 			return self.node(next.indent);
 		}
 		return .{ .scalar = "" };
+	}
+
+	/// `{a: b, c: [d, e]}` on one line. Kubeconfigs are written in block style by
+	/// every tool that writes one, and in flow style by a good many people who
+	/// write one by hand - `- context: {cluster: k3s, user: me}` is a perfectly
+	/// ordinary line that kubectl reads without blinking.
+	///
+	/// One line is the whole of it. A flow collection may be spread over several
+	/// in YAML proper, and one that is says so rather than being half read: the
+	/// reader here is line based, and the alternative to refusing is a map with
+	/// the first line's keys in it and no sign that the rest went missing.
+	fn flow(self: *Reader, text: []const u8, at: *usize, number: usize) Error!Value {
+		const opener = text[at.*];
+		const closer: u8 = if (opener == '{') '}' else ']';
+		at.* += 1;
+		var pairs: std.ArrayListUnmanaged(Pair) = .empty;
+		var values: std.ArrayListUnmanaged(Value) = .empty;
+		while (true) {
+			skipSpace(text, at);
+			if (at.* >= text.len) {
+				return self.refuse(number, "opens a flow collection it never closes on this line");
+			}
+			if (text[at.*] == closer) {
+				at.* += 1;
+				break;
+			}
+			if (text[at.*] == ',') {
+				at.* += 1;
+				continue;
+			}
+			const item = try self.flowItem(text, at, number);
+			if (opener == '{') {
+				skipSpace(text, at);
+				if (at.* >= text.len or text[at.*] != ':') {
+					return self.refuse(number, "has a flow mapping whose key has no value");
+				}
+				at.* += 1;
+				skipSpace(text, at);
+				try pairs.append(self.arena, .{ .key = item.text(), .value = try self.flowItem(text, at, number) });
+			} else {
+				try values.append(self.arena, item);
+			}
+		}
+		return if (opener == '{') .{ .map = pairs.items } else .{ .list = values.items };
+	}
+
+	/// One member of a flow collection: another collection, a quoted scalar, or a
+	/// plain one that ends at the first comma, colon or closing bracket.
+	fn flowItem(self: *Reader, text: []const u8, at: *usize, number: usize) Error!Value {
+		skipSpace(text, at);
+		if (at.* >= text.len) {
+			return self.refuse(number, "opens a flow collection it never closes on this line");
+		}
+		if (text[at.*] == '{' or text[at.*] == '[') {
+			return self.flow(text, at, number);
+		}
+		if (text[at.*] == '\'' or text[at.*] == '"') {
+			const quote = text[at.*];
+			var end = at.* + 1;
+			while (end < text.len) : (end += 1) {
+				if (text[end] == '\\' and quote == '"') {
+					end += 1;
+					continue;
+				}
+				if (text[end] == quote) {
+					break;
+				}
+			}
+			if (end >= text.len) {
+				return self.refuse(number, "opens a quote it never closes");
+			}
+			const raw = text[at.* .. end + 1];
+			at.* = end + 1;
+			return .{ .scalar = try self.scalar(raw, number) };
+		}
+		const start = at.*;
+		while (at.* < text.len and text[at.*] != ',' and text[at.*] != ':' and
+			text[at.*] != '}' and text[at.*] != ']') : (at.* += 1)
+		{}
+		return .{ .scalar = try self.scalar(std.mem.trim(u8, text[start..at.*], " "), number) };
 	}
 
 	/// `|`, `|-`, `>` and `>-`: the lines under it, joined with newlines or with
@@ -335,6 +414,10 @@ fn unquoteDouble(arena: std.mem.Allocator, raw: []const u8, reader: *Reader, num
 		});
 	}
 	return out.items;
+}
+
+fn skipSpace(text: []const u8, at: *usize) void {
+	while (at.* < text.len and (text[at.*] == ' ' or text[at.*] == '\t')) : (at.* += 1) {}
 }
 
 /// Whether a line begins a sequence item: a dash, then a space or the end of it.
@@ -489,7 +572,8 @@ test "what it does not understand it names, rather than reading it wrong" {
 		.{ .text = "a: 1\nb: *anchor\n", .says = "alias" },
 		.{ .text = "a: !!binary QUJD\n", .says = "tag" },
 		.{ .text = "a: 1\n\tb: 2\n", .says = "tab" },
-		.{ .text = "a: [1, 2]\n", .says = "flow collection" },
+		.{ .text = "a: {b: 1\n", .says = "never closes" },
+		.{ .text = "a: {b}\n", .says = "key has no value" },
 		.{ .text = "a: 'unclosed\n", .says = "quote" },
 		.{ .text = "a: 1\n    b: 2\n", .says = "indented further" },
 	};
@@ -509,4 +593,54 @@ test "an empty document is an empty map, not a failure" {
 		const doc = try read(arena.allocator(), text);
 		try testing.expect(doc.get("clusters") == null);
 	}
+}
+
+test "a kubeconfig written in flow style reads the same as one written in blocks" {
+	var arena = std.heap.ArenaAllocator.init(testing.allocator);
+	defer arena.deinit();
+	const doc = try read(arena.allocator(),
+		\\current-context: by-token
+		\\clusters:
+		\\- cluster: {server: "https://127.0.0.1:6443", insecure-skip-tls-verify: true}
+		\\  name: k3s
+		\\contexts:
+		\\- context: {cluster: k3s, namespace: payments, user: viewer}
+		\\  name: by-token
+		\\users:
+		\\- name: viewer
+		\\  user: {token: abc, exec: {command: aws, args: [eks, get-token, --region, eu-west-1]}}
+		\\preferences: {}
+		\\empty-list: []
+	);
+	const cluster = doc.get("clusters").?.items()[0];
+	try testing.expectEqualStrings("https://127.0.0.1:6443", cluster.at("cluster.server").?.text());
+	try testing.expectEqualStrings("true", cluster.at("cluster.insecure-skip-tls-verify").?.text());
+	try testing.expectEqualStrings("k3s", cluster.get("name").?.text());
+
+	const context = doc.get("contexts").?.items()[0];
+	try testing.expectEqualStrings("k3s", context.at("context.cluster").?.text());
+	try testing.expectEqualStrings("payments", context.at("context.namespace").?.text());
+
+	// Nested: a flow map inside a flow map, with a flow sequence inside that.
+	const user = doc.get("users").?.items()[0];
+	try testing.expectEqualStrings("abc", user.at("user.token").?.text());
+	try testing.expectEqualStrings("aws", user.at("user.exec.command").?.text());
+	const args = user.at("user.exec.args").?.items();
+	try testing.expectEqual(@as(usize, 4), args.len);
+	try testing.expectEqualStrings("eks", args[0].text());
+	try testing.expectEqualStrings("eu-west-1", args[3].text());
+
+	try testing.expectEqual(@as(usize, 0), doc.get("preferences").?.map.len);
+	try testing.expectEqual(@as(usize, 0), doc.get("empty-list").?.items().len);
+}
+
+test "a flow collection that runs off the end of its line says so" {
+	var arena = std.heap.ArenaAllocator.init(testing.allocator);
+	defer arena.deinit();
+	// Legal YAML, but this reader is line based: half of it read as all of it
+	// would be a context pointing at a cluster nobody named.
+	var why: List = .empty;
+	try testing.expectError(error.Yaml, parse(arena.allocator(),
+		"a: {b: 1,\n     c: 2}\n", &why));
+	try testing.expect(std.mem.indexOf(u8, why.items, "never closes on this line") != null);
 }
