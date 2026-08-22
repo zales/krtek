@@ -150,7 +150,7 @@ pub const Client = struct {
 		stream.setTimeout(net.READ_TIMEOUT_MS);
 		if (self.tls) {
 			self.trouble.clearRetainingCapacity();
-			net.startTls(self.allocator, &stream, self.host, self.verify, &self.trouble) catch {
+			net.startTls(self.allocator, &stream, self.host, .{ .verify = self.verify }, &self.trouble) catch {
 				return error.Gone;
 			};
 		}

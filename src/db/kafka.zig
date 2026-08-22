@@ -317,7 +317,7 @@ pub const Db = struct {
 		// Encryption first, then who is asking: everything after this, metadata
 		// included, goes through both.
 		if (self.tls) {
-			startTls(allocator, &self.stream, parts.host, parts.verify, report) catch {
+			startTls(allocator, &self.stream, parts.host, .{ .verify = parts.verify }, report) catch {
 				if (report.items.len == 0) {
 					try report.print(allocator, "TLS to {s}:{d} could not be set up", .{ parts.host, parts.port });
 				}
@@ -550,7 +550,7 @@ pub const Db = struct {
 		if (self.tls) {
 			var why: List = .empty;
 			defer why.deinit(self.allocator);
-			startTls(self.allocator, &stream, self.host.items, self.verify, &why) catch {
+			startTls(self.allocator, &stream, self.host.items, .{ .verify = self.verify }, &why) catch {
 				self.complain("TLS to {s}:{d} failed on reconnecting: {s}", .{
 					self.host.items, self.port,
 					if (why.items.len != 0) why.items else "no reason given",
@@ -608,7 +608,7 @@ pub const Db = struct {
 			if (self.tls) {
 				var why: List = .empty;
 				defer why.deinit(self.allocator);
-				startTls(self.allocator, &stream, broker.host, self.verify, &why) catch {
+				startTls(self.allocator, &stream, broker.host, .{ .verify = self.verify }, &why) catch {
 					self.complain("TLS to the broker at {s}:{d} failed: {s}", .{
 						broker.host, broker.port,
 						if (why.items.len != 0) why.items else "no reason given",

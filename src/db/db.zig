@@ -53,6 +53,7 @@ comptime {
 	_ = rabbit;
 	_ = sftp;
 	_ = k8s_yaml;
+	_ = net;
 	_ = http;
 	_ = ssh;
 	_ = sigv4;

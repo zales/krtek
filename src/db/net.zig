@@ -146,6 +146,21 @@ pub const ssl = struct {
 	pub extern fn SSL_CTX_free(ctx: ?*anyopaque) void;
 	pub extern fn SSL_CTX_set_default_verify_paths(ctx: ?*anyopaque) c_int;
 	pub extern fn SSL_CTX_set_verify(ctx: ?*anyopaque, mode: c_int, callback: ?*anyopaque) void;
+	// PEM in memory rather than on disk: a kubeconfig carries its certificate
+	// authority and its client certificate inside itself, base64 of the PEM, and
+	// writing them out to temporary files to hand OpenSSL a path would put a
+	// private key on somebody's disk for as long as the program ran.
+	pub extern fn BIO_new_mem_buf(buffer: [*]const u8, length: c_int) ?*anyopaque;
+	pub extern fn BIO_free(bio: ?*anyopaque) c_int;
+	pub extern fn PEM_read_bio_X509(bio: ?*anyopaque, out: ?*anyopaque, callback: ?*anyopaque, user: ?*anyopaque) ?*anyopaque;
+	pub extern fn PEM_read_bio_PrivateKey(bio: ?*anyopaque, out: ?*anyopaque, callback: ?*anyopaque, user: ?*anyopaque) ?*anyopaque;
+	pub extern fn X509_free(cert: ?*anyopaque) void;
+	pub extern fn EVP_PKEY_free(key: ?*anyopaque) void;
+	pub extern fn SSL_CTX_get_cert_store(ctx: ?*const anyopaque) ?*anyopaque;
+	pub extern fn X509_STORE_add_cert(store: ?*anyopaque, cert: ?*anyopaque) c_int;
+	pub extern fn SSL_CTX_use_certificate(ctx: ?*anyopaque, cert: ?*anyopaque) c_int;
+	pub extern fn SSL_CTX_use_PrivateKey(ctx: ?*anyopaque, key: ?*anyopaque) c_int;
+	pub extern fn SSL_CTX_check_private_key(ctx: ?*const anyopaque) c_int;
 	pub extern fn SSL_new(ctx: ?*anyopaque) ?*anyopaque;
 	pub extern fn SSL_free(session: ?*anyopaque) void;
 	pub extern fn SSL_set_fd(session: ?*anyopaque, fd: c_int) c_int;
@@ -178,22 +193,45 @@ pub const ssl = struct {
 	}
 };
 
+/// What a TLS session is to be made of, beyond the socket and the name.
+pub const Tls = struct {
+	/// Check the server's certificate at all.
+	verify: bool = true,
+	/// The certificate authority to trust, as PEM, *instead of* the machine's -
+	/// which is what kubectl does with the one a kubeconfig names, and the only
+	/// thing that makes sense: a cluster signed by a CA of its own making is not
+	/// made more trustworthy by also trusting the public web.
+	ca_pem: []const u8 = "",
+	/// A client certificate and its key, as PEM: how a kubeconfig with
+	/// `client-certificate-data` proves who it is. Both or neither.
+	cert_pem: []const u8 = "",
+	key_pem: []const u8 = "",
+};
+
 /// Wrap a connected socket in TLS. `host` is verified against the certificate
 /// unless the target said not to bother.
-pub fn startTls(allocator: std.mem.Allocator, stream: *Stream, host: []const u8, verify: bool, why: *List) !void {
+pub fn startTls(allocator: std.mem.Allocator, stream: *Stream, host: []const u8, options: Tls, why: *List) !void {
 	_ = ssl.OPENSSL_init_ssl(0, null);
 	const ctx = ssl.SSL_CTX_new(ssl.TLS_client_method()) orelse return error.Tls;
 	// The context is freed as soon as the session is made: the session holds a
 	// reference of its own.
 	defer ssl.SSL_CTX_free(ctx);
-	if (verify) {
-		if (ssl.SSL_CTX_set_default_verify_paths(ctx) != 1) {
+	if (options.verify) {
+		if (options.ca_pem.len != 0) {
+			const added = try trustPem(allocator, ctx, options.ca_pem, why);
+			if (added == 0) {
+				return error.Tls;
+			}
+		} else if (ssl.SSL_CTX_set_default_verify_paths(ctx) != 1) {
 			try why.appendSlice(allocator, "no trusted certificates on this machine to verify the server against");
 			return error.Tls;
 		}
 		ssl.SSL_CTX_set_verify(ctx, ssl.VERIFY_PEER, null);
 	} else {
 		ssl.SSL_CTX_set_verify(ctx, ssl.VERIFY_NONE, null);
+	}
+	if (options.cert_pem.len != 0) {
+		try useClientCertificate(allocator, ctx, options.cert_pem, options.key_pem, why);
 	}
 	const session = ssl.SSL_new(ctx) orelse return error.Tls;
 	errdefer ssl.SSL_free(session);
@@ -204,7 +242,7 @@ pub fn startTls(allocator: std.mem.Allocator, stream: *Stream, host: []const u8,
 	defer allocator.free(zero_host);
 	// The name to ask for, and - when verifying - the name to insist on.
 	_ = ssl.SSL_ctrl(session, ssl.CTRL_SET_TLSEXT_HOSTNAME, ssl.TLSEXT_NAMETYPE_host_name, @ptrCast(@constCast(zero_host.ptr)));
-	if (verify) {
+	if (options.verify) {
 		_ = ssl.SSL_set1_host(session, zero_host.ptr);
 	}
 	if (ssl.SSL_connect(session) != 1) {
@@ -217,6 +255,71 @@ pub fn startTls(allocator: std.mem.Allocator, stream: *Stream, host: []const u8,
 		return error.Tls;
 	}
 	stream.ssl = session;
+}
+
+/// Every certificate in a PEM bundle into the context's own store, and how many
+/// there were. A bundle may hold several and all of them count: an intermediate
+/// left out is a chain that does not reach the root.
+fn trustPem(allocator: std.mem.Allocator, ctx: ?*anyopaque, pem: []const u8, why: *List) !usize {
+	const bio = ssl.BIO_new_mem_buf(pem.ptr, @intCast(pem.len)) orelse return error.Tls;
+	defer _ = ssl.BIO_free(bio);
+	const store = ssl.SSL_CTX_get_cert_store(ctx) orelse return error.Tls;
+	var count: usize = 0;
+	while (ssl.PEM_read_bio_X509(bio, null, null, null)) |cert| {
+		defer ssl.X509_free(cert);
+		if (ssl.X509_STORE_add_cert(store, cert) != 1) {
+			break;
+		}
+		count += 1;
+	}
+	if (count == 0) {
+		var buffer: [256]u8 = undefined;
+		const text = ssl.lastError(&buffer);
+		try why.print(allocator, "the certificate authority is not a certificate{s}{s}", .{
+			if (text.len != 0) ": " else "",
+			text,
+		});
+	}
+	return count;
+}
+
+/// The client certificate and the key that goes with it, both PEM in memory. The
+/// pair is checked here rather than at the handshake, where OpenSSL reports a
+/// mismatched key as an unhelpfully generic failure on the far side of a network
+/// round trip.
+fn useClientCertificate(allocator: std.mem.Allocator, ctx: ?*anyopaque, cert_pem: []const u8, key_pem: []const u8, why: *List) !void {
+	if (key_pem.len == 0) {
+		try why.appendSlice(allocator, "a client certificate was given without its key");
+		return error.Tls;
+	}
+	const cert_bio = ssl.BIO_new_mem_buf(cert_pem.ptr, @intCast(cert_pem.len)) orelse return error.Tls;
+	defer _ = ssl.BIO_free(cert_bio);
+	const cert = ssl.PEM_read_bio_X509(cert_bio, null, null, null) orelse {
+		try why.appendSlice(allocator, "the client certificate is not a certificate");
+		return error.Tls;
+	};
+	defer ssl.X509_free(cert);
+	if (ssl.SSL_CTX_use_certificate(ctx, cert) != 1) {
+		try why.appendSlice(allocator, "the client certificate was refused");
+		return error.Tls;
+	}
+
+	const key_bio = ssl.BIO_new_mem_buf(key_pem.ptr, @intCast(key_pem.len)) orelse return error.Tls;
+	defer _ = ssl.BIO_free(key_bio);
+	const key = ssl.PEM_read_bio_PrivateKey(key_bio, null, null, null) orelse {
+		var buffer: [256]u8 = undefined;
+		const text = ssl.lastError(&buffer);
+		try why.print(allocator, "the client key is not a key{s}{s}", .{
+			if (text.len != 0) ": " else "",
+			text,
+		});
+		return error.Tls;
+	};
+	defer ssl.EVP_PKEY_free(key);
+	if (ssl.SSL_CTX_use_PrivateKey(ctx, key) != 1 or ssl.SSL_CTX_check_private_key(ctx) != 1) {
+		try why.appendSlice(allocator, "the client key does not go with the client certificate");
+		return error.Tls;
+	}
 }
 
 pub fn connect(allocator: std.mem.Allocator, host: []const u8, port: u16) !Stream {
@@ -244,4 +347,108 @@ pub fn connect(allocator: std.mem.Allocator, host: []const u8, port: u16) !Strea
 		_ = std.c.close(fd);
 	}
 	return error.Refused;
+}
+
+// ------------------------------------------------------------------- tests
+
+const testing = std.testing;
+
+// A throwaway authority, a client certificate it signed, that certificate's key,
+// and a key belonging to nothing - enough to check that PEM in memory is read,
+// that a bundle counts, and that a mismatched pair is caught here rather than at
+// the far end of a handshake. Test material: none of it guards anything.
+const CA_PEM =
+	\\-----BEGIN CERTIFICATE-----
+	\\MIIBhzCCAS2gAwIBAgIUO3JprpIG9tLOz1a+HhuDxtjv06AwCgYIKoZIzj0EAwIw
+	\\GDEWMBQGA1UEAwwNa3J0ZWsgdGVzdCBDQTAgFw0yNjA4MjIxNDAwMDlaGA8yMTI2
+	\\MDcyOTE0MDAwOVowGDEWMBQGA1UEAwwNa3J0ZWsgdGVzdCBDQTBZMBMGByqGSM49
+	\\AgEGCCqGSM49AwEHA0IABGAspCAhMpImIjIk4rqEnNkdGvuECuwhMW+ByR+PGqrw
+	\\kXLFA4wdQH4Y33EQ7bv/pX3pEce5nzB+VMsNDoCq2RmjUzBRMB0GA1UdDgQWBBRr
+	\\NONp6lPpgsM139jHqVqHDyfs9DAfBgNVHSMEGDAWgBRrNONp6lPpgsM139jHqVqH
+	\\Dyfs9DAPBgNVHRMBAf8EBTADAQH/MAoGCCqGSM49BAMCA0gAMEUCIQDmjM5Fhz2X
+	\\mk+Xq5JXaOvZjIrTM1iuXzU8pK1+ERfXmgIgEVnvo7ayK55tQXU9GZaOwSzPc1EU
+	\\yMa/YYorVu7JbGo=
+	\\-----END CERTIFICATE-----
+	;
+
+const CLIENT_PEM =
+	\\-----BEGIN CERTIFICATE-----
+	\\MIIBezCCASCgAwIBAgIUBv5hohX2X7uVGHM8+RsPskZ8RZ0wCgYIKoZIzj0EAwIw
+	\\GDEWMBQGA1UEAwwNa3J0ZWsgdGVzdCBDQTAgFw0yNjA4MjIxNDAwMDlaGA8yMTI2
+	\\MDcyOTE0MDAwOVowHDEaMBgGA1UEAwwRa3J0ZWsgdGVzdCBjbGllbnQwWTATBgcq
+	\\hkjOPQIBBggqhkjOPQMBBwNCAASbUyTBpINJPwtBlc16v88mvC7MKy/6lI99WeHI
+	\\o/hJC07WYFZKj9FRdAX3JqoqP5Kc1ktL0Df9OXLYaQuEgQmko0IwQDAdBgNVHQ4E
+	\\FgQUkx0cyMbqjA57fT+AhFOnX/DRXwswHwYDVR0jBBgwFoAUazTjaepT6YLDNd/Y
+	\\x6lahw8n7PQwCgYIKoZIzj0EAwIDSQAwRgIhAJg0fNc5hXvMlXS1+uXxsp1R+dkQ
+	\\b9rsObg+RlYV2LyeAiEA/F34juGvzC9QLEqey4gdjL+LxJeAaTuyUSLjWJFs/Mg=
+	\\-----END CERTIFICATE-----
+	;
+
+const CLIENT_KEY =
+	\\-----BEGIN PRIVATE KEY-----
+	\\MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgKFdUcyu3tHzntOOB
+	\\4c/VitOwbehLMp08SHqY+sgQj86hRANCAASbUyTBpINJPwtBlc16v88mvC7MKy/6
+	\\lI99WeHIo/hJC07WYFZKj9FRdAX3JqoqP5Kc1ktL0Df9OXLYaQuEgQmk
+	\\-----END PRIVATE KEY-----
+	;
+
+const OTHER_KEY =
+	\\-----BEGIN EC PRIVATE KEY-----
+	\\MHcCAQEEIEu4HMdB9Uwve4Zz5tpRqPGIYfTtQbomsCiPORYTIAUJoAoGCCqGSM49
+	\\AwEHoUQDQgAEHDlHTje5w+WVQOyx9aZmaVZyYUEx+bCfceV9tOPMXaLPjYQPgiu2
+	\\I4SlAXEHlZzdlmthVYeXXJipSSu80blCkQ==
+	\\-----END EC PRIVATE KEY-----
+	;
+
+test "a certificate authority is read out of memory, and rubbish is not" {
+	_ = ssl.OPENSSL_init_ssl(0, null);
+	const ctx = ssl.SSL_CTX_new(ssl.TLS_client_method()) orelse return error.SkipZigTest;
+	defer ssl.SSL_CTX_free(ctx);
+	var why: List = .empty;
+	defer why.deinit(testing.allocator);
+
+	try testing.expectEqual(@as(usize, 1), try trustPem(testing.allocator, ctx, CA_PEM, &why));
+	// Two of them in one bundle, which is what an intermediate makes.
+	const bundle = CA_PEM ++ "\n" ++ CA_PEM;
+	try testing.expectEqual(@as(usize, 2), try trustPem(testing.allocator, ctx, bundle, &why));
+	try testing.expectEqualStrings("", why.items);
+
+	try testing.expectEqual(@as(usize, 0), try trustPem(testing.allocator, ctx, "not a certificate at all", &why));
+	try testing.expect(std.mem.indexOf(u8, why.items, "not a certificate") != null);
+}
+
+test "a client certificate and its key go in together, or the pair is refused" {
+	_ = ssl.OPENSSL_init_ssl(0, null);
+	var why: List = .empty;
+	defer why.deinit(testing.allocator);
+
+	{
+		const ctx = ssl.SSL_CTX_new(ssl.TLS_client_method()) orelse return error.SkipZigTest;
+		defer ssl.SSL_CTX_free(ctx);
+		try useClientCertificate(testing.allocator, ctx, CLIENT_PEM, CLIENT_KEY, &why);
+		try testing.expectEqualStrings("", why.items);
+	}
+	// A key that belongs to another certificate is caught here, not three layers
+	// away in a handshake that says only that the server hung up.
+	{
+		const ctx = ssl.SSL_CTX_new(ssl.TLS_client_method()) orelse return error.SkipZigTest;
+		defer ssl.SSL_CTX_free(ctx);
+		try testing.expectError(error.Tls, useClientCertificate(testing.allocator, ctx, CLIENT_PEM, OTHER_KEY, &why));
+		try testing.expect(std.mem.indexOf(u8, why.items, "does not go with") != null);
+	}
+	// And a certificate with no key at all is a sentence rather than a crash.
+	{
+		const ctx = ssl.SSL_CTX_new(ssl.TLS_client_method()) orelse return error.SkipZigTest;
+		defer ssl.SSL_CTX_free(ctx);
+		why.clearRetainingCapacity();
+		try testing.expectError(error.Tls, useClientCertificate(testing.allocator, ctx, CLIENT_PEM, "", &why));
+		try testing.expect(std.mem.indexOf(u8, why.items, "without its key") != null);
+	}
+	{
+		const ctx = ssl.SSL_CTX_new(ssl.TLS_client_method()) orelse return error.SkipZigTest;
+		defer ssl.SSL_CTX_free(ctx);
+		why.clearRetainingCapacity();
+		try testing.expectError(error.Tls, useClientCertificate(testing.allocator, ctx, "nonsense", CLIENT_KEY, &why));
+		try testing.expect(std.mem.indexOf(u8, why.items, "not a certificate") != null);
+	}
 }
