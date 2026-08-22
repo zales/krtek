@@ -315,13 +315,17 @@ pub const Db = struct {
 	// --------------------------------------------------------------- the wire
 
 	fn call(self: *Db, arena: std.mem.Allocator, method: []const u8, path: []const u8, body: []const u8) !http.Response {
+		return self.callAs(arena, method, path, body, "application/merge-patch+json");
+	}
+
+	fn callAs(self: *Db, arena: std.mem.Allocator, method: []const u8, path: []const u8, body: []const u8, content_type: []const u8) !http.Response {
 		var headers: std.ArrayListUnmanaged(http.Header) = .empty;
 		try headers.append(arena, .{ .name = "Accept", .value = "application/json" });
 		if (self.authorization.len != 0) {
 			try headers.append(arena, .{ .name = "Authorization", .value = self.authorization });
 		}
 		if (body.len != 0) {
-			try headers.append(arena, .{ .name = "Content-Type", .value = "application/merge-patch+json" });
+			try headers.append(arena, .{ .name = "Content-Type", .value = content_type });
 		}
 		self.requests += 1;
 		const client = &(self.client orelse return error.Driver);
@@ -678,8 +682,15 @@ pub const Db = struct {
 		return false;
 	}
 
+	/// One command to a line - except `APPLY`, which takes everything under it.
+	/// A manifest is lines, and lines here are commands, so the two would eat each
+	/// other: `kind: Pod` is not a command and never was one.
 	pub fn split(_: *Db, arena: std.mem.Allocator, sql: []const u8) db.Error![]db.Statement {
 		var out: std.ArrayListUnmanaged(db.Statement) = .empty;
+		if (isApply(sql)) {
+			try out.append(arena, .{ .sql = sql });
+			return out.items;
+		}
 		var walk = std.mem.splitScalar(u8, sql, '\n');
 		while (walk.next()) |raw| {
 			const line = std.mem.trim(u8, raw, " \t\r;");
@@ -689,6 +700,16 @@ pub const Db = struct {
 			try out.append(arena, .{ .sql = line });
 		}
 		return out.items;
+	}
+
+	/// Whether running this needs asking about first, and what to call it. A
+	/// manifest can make and overwrite anything in it, which is not something to
+	/// find out about afterwards.
+	pub fn confirming(self: *Db, statement: []const u8) ?[]const u8 {
+		if (self.session != null or !isApply(statement)) {
+			return null;
+		}
+		return "apply this manifest";
 	}
 
 	/// The console verbs that only look. `SCALE`, `RESTART` and `USE` change
@@ -1116,6 +1137,9 @@ pub const Db = struct {
 				.{first},
 			)) };
 		}
+		if (eq(verb, "APPLY")) {
+			return .{ .k8s = try self.applyManifest(arena, line) };
+		}
 		if (eq(verb, "DELETE")) {
 			const resource = api.find(first) orelse api.find(plural(first)) orelse {
 				self.complain("there is nothing here called {s}", .{first});
@@ -1288,6 +1312,122 @@ pub const Db = struct {
 		return rows;
 	}
 
+	// ------------------------------------------------------------ applying YAML
+
+	/// `APPLY`, and the manifest written under it.
+	///
+	/// The document goes to the cluster as it stands. Kubernetes takes YAML for a
+	/// server-side apply - `application/apply-patch+yaml` - and does the merging
+	/// itself, which is both less code here and better behaved than a read, a
+	/// change and a write from this end: two people applying different fields of
+	/// the same object do not overwrite each other, and the server keeps track of
+	/// which of them owns what.
+	///
+	/// So what is read here is only enough to know where to send it: the
+	/// apiVersion, the kind and the name. Everything else is the server's to
+	/// understand, including every part of YAML this program's own reader does
+	/// not - a manifest is not a kubeconfig and there is no reason for it to be
+	/// limited to what one needs.
+	fn applyManifest(self: *Db, arena: std.mem.Allocator, line: []const u8) db.Error!Rows {
+		const body = afterVerb(line);
+		if (std.mem.trim(u8, body, " \t\r\n").len == 0) {
+			self.remember("APPLY, and the manifest under it - several documents separated by --- are all applied");
+			return error.Driver;
+		}
+
+		var rows = Rows{ .owner = self, .table = "" };
+		const heading = try arena.alloc([]const u8, 2);
+		heading[0] = "object";
+		heading[1] = "what happened";
+		rows.names = heading;
+		rows.numeric = try arena.alloc(bool, 2);
+		@memset(@constCast(rows.numeric), false);
+
+		var failures: usize = 0;
+		var documents = splitDocuments(body);
+		while (documents.next()) |document| {
+			if (std.mem.trim(u8, document, " \t\r\n-").len == 0) {
+				continue;
+			}
+			const said = self.applyOne(arena, document, &rows) catch {
+				failures += 1;
+				continue;
+			};
+			_ = said;
+		}
+		// A batch where nothing at all landed is a failure, not a report of one.
+		if (rows.rows.items.len == 0) {
+			if (self.last_error.items.len == 0) {
+				self.remember("there is no object in that - a manifest needs apiVersion, kind and metadata.name");
+			}
+			return error.Driver;
+		}
+		return rows;
+	}
+
+	fn applyOne(self: *Db, arena: std.mem.Allocator, document: []const u8, rows: *Rows) db.Error!void {
+		var why: List = .empty;
+		const parsed = yaml.parse(arena, document, &why) catch {
+			try self.note(arena, rows, "?", try std.fmt.allocPrint(arena, "not read: {s}", .{why.items}));
+			return error.Driver;
+		};
+		const api_version = (parsed.get("apiVersion") orelse yaml.Value{ .scalar = "" }).text();
+		const kind = (parsed.get("kind") orelse yaml.Value{ .scalar = "" }).text();
+		const name = (parsed.at("metadata.name") orelse yaml.Value{ .scalar = "" }).text();
+		if (api_version.len == 0 or kind.len == 0 or name.len == 0) {
+			try self.note(arena, rows, "?", "a document needs apiVersion, kind and metadata.name");
+			return error.Driver;
+		}
+		const label = try std.fmt.allocPrint(arena, "{s}/{s}", .{ kind, name });
+
+		// Where it lives: the table where this program knows the kind, and the
+		// ordinary pluralisation where it does not - a custom resource, mostly.
+		const known = api.findKind(kind);
+		const root = if (known) |resource| resource.root else try api.rootOf(arena, api_version);
+		const in_path = if (known) |resource| resource.name else try api.guessPlural(arena, kind);
+		const namespaced = if (known) |resource| resource.namespaced else true;
+		const namespace = blk: {
+			const said = (parsed.at("metadata.namespace") orelse yaml.Value{ .scalar = "" }).text();
+			break :blk if (said.len != 0) said else self.namespace;
+		};
+
+		const path = if (namespaced)
+			try std.fmt.allocPrint(arena, "{s}/namespaces/{s}/{s}/{s}?fieldManager=krtek&force=true", .{ root, namespace, in_path, name })
+		else
+			try std.fmt.allocPrint(arena, "{s}/{s}/{s}?fieldManager=krtek&force=true", .{ root, in_path, name });
+
+		const response = self.callAs(arena, "PATCH", path, document, "application/apply-patch+yaml") catch {
+			try self.note(arena, rows, label, self.message());
+			return error.Driver;
+		};
+		if (!response.ok()) {
+			self.fail(response, label) catch {};
+			// A kind this program does not know was sent to a path guessed from
+			// its name, so a 404 is as likely to be the guess as the cluster.
+			if (response.status == 404 and known == null) {
+				try self.note(arena, rows, label, try std.fmt.allocPrint(
+					arena,
+					"{s} - nothing is served at {s}/{s}, so either the kind is not installed or it is not called that",
+					.{ self.message(), root, in_path },
+				));
+			} else {
+				try self.note(arena, rows, label, self.message());
+			}
+			return error.Driver;
+		}
+		// The server says 201 where it made one and 200 where it did not.
+		try self.note(arena, rows, label, if (response.status == 201) "created" else "configured");
+		self.forgetCount(.{ .name = in_path, .schema = namespace });
+	}
+
+	fn note(self: *Db, arena: std.mem.Allocator, rows: *Rows, what: []const u8, said: []const u8) db.Error!void {
+		_ = self;
+		const cells = try arena.alloc(Value, 2);
+		cells[0] = .{ .text = what };
+		cells[1] = .{ .text = try arena.dupe(u8, said) };
+		try rows.rows.append(arena, cells);
+	}
+
 	fn pair(self: *Db, arena: std.mem.Allocator, rows: *Rows, what: []const u8, said: []const u8) db.Error!void {
 		_ = self;
 		const cells = try arena.alloc(Value, 2);
@@ -1423,6 +1563,57 @@ fn escapedQuery(arena: std.mem.Allocator, word: []const u8) ![]const u8 {
 	}
 	return out.items;
 }
+
+/// Whether this is an `APPLY` and its manifest rather than a line of commands.
+fn isApply(text: []const u8) bool {
+	var words = std.mem.tokenizeAny(u8, text, " \t\r\n;");
+	const verb = words.next() orelse return false;
+	return eq(verb, "APPLY");
+}
+
+/// Everything after the first word, which for `APPLY` is the manifest.
+fn afterVerb(line: []const u8) []const u8 {
+	const text = std.mem.trimStart(u8, line, " \t\r\n");
+    const space = std.mem.indexOfAny(u8, text, " \t\r\n") orelse return "";
+	return text[space..];
+}
+
+/// The documents of a manifest. YAML separates them with a line that is exactly
+/// `---`, and this program's own reader stops at the second one on purpose - a
+/// kubeconfig is one document and half of two would be worse than none - so a
+/// manifest is cut up here and each piece read on its own.
+pub fn splitDocuments(text: []const u8) DocumentIterator {
+	return .{ .text = text };
+}
+
+pub const DocumentIterator = struct {
+	text: []const u8,
+	at: usize = 0,
+
+	pub fn next(self: *DocumentIterator) ?[]const u8 {
+		if (self.at >= self.text.len) {
+			return null;
+		}
+		const start = self.at;
+		var walk = self.at;
+		while (walk < self.text.len) {
+			const end = std.mem.indexOfScalarPos(u8, self.text, walk, '\n') orelse self.text.len;
+			const line = std.mem.trim(u8, self.text[walk..end], " \t\r");
+			// A separator, and only one: `---` inside a block scalar is indented,
+			// and a line of dashes that is longer is not a separator at all.
+			if (std.mem.eql(u8, line, "---") and self.text[walk..end].len == line.len) {
+				self.at = @min(end + 1, self.text.len);
+				return self.text[start..walk];
+			}
+			walk = @min(end + 1, self.text.len);
+			if (end >= self.text.len) {
+				break;
+			}
+		}
+		self.at = self.text.len;
+		return self.text[start..];
+	}
+};
 
 fn textAt(object: Json, path: []const u8) []const u8 {
 	const found = api.at(object, path) orelse return "";
@@ -1924,4 +2115,55 @@ test "only the console verbs that look are worth repeating" {
 			return error.TestUnexpectedResult;
 		}
 	}
+}
+
+test "a manifest comes apart at its document separators" {
+	const text =
+		\\apiVersion: v1
+		\\kind: ConfigMap
+		\\---
+		\\apiVersion: apps/v1
+		\\kind: Deployment
+		\\---
+		\\apiVersion: v1
+		\\kind: Service
+	;
+	var found: usize = 0;
+	var walk = splitDocuments(text);
+	while (walk.next()) |document| : (found += 1) {
+		try testing.expect(std.mem.indexOf(u8, document, "apiVersion") != null);
+		// A separator belongs to neither side of it.
+		try testing.expect(std.mem.indexOf(u8, document, "---") == null);
+	}
+	try testing.expectEqual(@as(usize, 3), found);
+
+	// A document is not cut at a `---` that is indented - inside a block scalar,
+	// where it is content - nor at a longer row of dashes, which is not one.
+	const tricky =
+		\\kind: ConfigMap
+		\\data:
+		\\  note: |
+		\\    ---
+		\\    still the same document
+		\\  line: ----
+	;
+	var one = splitDocuments(tricky);
+	const whole = one.next().?;
+    try testing.expect(std.mem.indexOf(u8, whole, "still the same document") != null);
+	try testing.expect(one.next() == null);
+
+	// One document with no separator at all is one document.
+	var plain = splitDocuments("kind: Pod\n");
+	try testing.expect(plain.next() != null);
+	try testing.expect(plain.next() == null);
+}
+
+test "APPLY takes the manifest under it, and nothing else does" {
+	try testing.expect(isApply("APPLY\nkind: Pod\n"));
+	try testing.expect(isApply("  apply\nkind: Pod\n"));
+	try testing.expect(!isApply("GET pods"));
+	try testing.expect(!isApply(""));
+	// And what it takes is everything after the word.
+	try testing.expectEqualStrings("\nkind: Pod\n", afterVerb("APPLY\nkind: Pod\n"));
+	try testing.expectEqualStrings("", afterVerb("APPLY"));
 }

@@ -691,6 +691,21 @@ pub const Db = union(enum) {
 		}
 	}
 
+	/// Whether running this needs asking about first, and what to call it when
+	/// asking - or null where it does not. An engine answers for its own console:
+	/// this program cannot know that one line of it makes things and another
+	/// only looks.
+	pub fn confirming(self: Db, statement: []const u8) ?[]const u8 {
+		switch (self) {
+			inline else => |driver| {
+				if (@hasDecl(@TypeOf(driver.*), "confirming")) {
+					return driver.confirming(statement);
+				}
+				return null;
+			},
+		}
+	}
+
 	/// Whether this statement wants the terminal rather than the grid. Only one
 	/// engine has anything to say here, and the rest say no by not answering.
 	pub fn wantsTerminal(self: Db, statement: []const u8) bool {

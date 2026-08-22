@@ -575,6 +575,7 @@ there instead is exact: `x` deletes an object and asks first, because nothing ta
 that back, and the editor is a console for the cluster:
 
 ```
+APPLY                           and the manifest under it, documents and all
 GET pods                        the same as choosing pods on the left
 WHY api-7c9d4                   what it is doing, what it died of, what was said
 LOGS api-7c9d4 500              the last lines of a pod's log
@@ -597,6 +598,26 @@ and nowhere else.
 
 `s` on that screen is the same as `EXEC` below, aimed at the pod already under
 the cursor.
+
+**`APPLY` takes a manifest written under it**, several documents and all, and asks
+before it runs because a manifest can make and overwrite anything in it. Each
+document goes to the cluster *as it stands*: Kubernetes accepts YAML for a
+server-side apply and does the merging itself, which is both less code here and
+better behaved than a read, a change and a write from this end - two people
+applying different fields of one object do not overwrite each other, and the
+server keeps track of which of them owns what. `kubectl` shows krtek as the field
+manager afterwards.
+
+So what is read here is only enough to know where to send it: the `apiVersion`,
+the `kind` and the name. Everything else is the server's to understand, including
+every part of YAML this program's own reader does not - a manifest is not a
+kubeconfig and has no reason to be limited to what one needs. A kind krtek knows
+goes to the path it knows; anything else - a custom resource - is pluralised the
+way Kubernetes pluralises, and a 404 says so rather than pretending the kind does
+not exist.
+
+What comes back is what happened to each document, `created` or `configured`, one
+to a row.
 
 **`EXEC` opens one shell and keeps it.** What is typed goes to that shell and what
 it says comes back as rows, so the session is the point: `cd /var/log` and then

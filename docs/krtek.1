@@ -121,7 +121,11 @@ asks before deleting, because nothing takes that back.
 on a row opens a screen about that one object - its containers, what the last one
 died of, its events - with what can be done to it along the bottom:
 .BR l " logs, " s " a shell, " t " the terminal, " y " it as JSON, " x " delete. The console is
-.BR GET ", " WHY ", " LOGS ", " EXEC ", " DESCRIBE ", " SCALE ", " RESTART ", " USE ", " NAMESPACES ", " CONTEXTS " and " VERSION .
+.BR APPLY ", " GET ", " WHY ", " LOGS ", " EXEC ", " DESCRIBE ", " SCALE ", " RESTART ", " USE ", " NAMESPACES ", " CONTEXTS " and " VERSION .
+.B APPLY
+takes a manifest written under it, several documents and all, and asks first; each
+one goes to the cluster as it stands, as a server-side apply, so the server does
+the merging and records that krtek owns those fields.
 .B EXEC
 opens one shell in a container and keeps it: what is typed goes there and what it
 says comes back as rows, so a

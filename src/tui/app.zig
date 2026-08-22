@@ -467,6 +467,14 @@ pub const App = struct {
 		}
 		const owned = try self.allocator.dupe(u8, sql);
 		defer self.allocator.free(owned);
+		// Something that makes or overwrites is asked about here, where a person
+		// just typed it, rather than anywhere further in - and only here, so that
+		// saying yes runs it rather than asking again.
+		if (self.conn.confirming(sql)) |what| {
+			self.closeEditor();
+			try self.confirm(owned, what);
+			return;
+		}
 		const talking = self.conn.sessionIn().len != 0;
 		if (talking) {
 			editor.clear();

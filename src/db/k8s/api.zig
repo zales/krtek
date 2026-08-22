@@ -56,6 +56,9 @@ pub const Column = struct {
 pub const Resource = struct {
 	/// What the table is called, which is what the API calls it.
 	name: []const u8,
+	/// What a manifest calls it. The `kind:` of a YAML document names this and
+	/// nothing else, so applying one has to come back the other way.
+	kind: []const u8,
 	/// The API root it lives under: `/api/v1` for the core group, `/apis/<group>/<version>`
 	/// for everything else.
 	root: []const u8,
@@ -78,6 +81,7 @@ const AGE: Column = .{ .name = "age", .from = .age };
 pub const RESOURCES = [_]Resource{
 	.{
 		.name = "pods",
+		.kind = "Pod",
 		.root = "/api/v1",
 		.singular = "pod",
 		.loggable = true,
@@ -93,6 +97,7 @@ pub const RESOURCES = [_]Resource{
 	},
 	.{
 		.name = "deployments",
+		.kind = "Deployment",
 		.root = "/apis/apps/v1",
 		.singular = "deployment",
 		.scalable = true,
@@ -107,6 +112,7 @@ pub const RESOURCES = [_]Resource{
 	},
 	.{
 		.name = "statefulsets",
+		.kind = "StatefulSet",
 		.root = "/apis/apps/v1",
 		.singular = "statefulset",
 		.scalable = true,
@@ -119,6 +125,7 @@ pub const RESOURCES = [_]Resource{
 	},
 	.{
 		.name = "daemonsets",
+		.kind = "DaemonSet",
 		.root = "/apis/apps/v1",
 		.singular = "daemonset",
 		.columns = &.{
@@ -131,6 +138,7 @@ pub const RESOURCES = [_]Resource{
 	},
 	.{
 		.name = "replicasets",
+		.kind = "ReplicaSet",
 		.root = "/apis/apps/v1",
 		.singular = "replicaset",
 		.scalable = true,
@@ -143,6 +151,7 @@ pub const RESOURCES = [_]Resource{
 	},
 	.{
 		.name = "jobs",
+		.kind = "Job",
 		.root = "/apis/batch/v1",
 		.singular = "job",
 		.columns = &.{
@@ -155,6 +164,7 @@ pub const RESOURCES = [_]Resource{
 	},
 	.{
 		.name = "cronjobs",
+		.kind = "CronJob",
 		.root = "/apis/batch/v1",
 		.singular = "cronjob",
 		.columns = &.{
@@ -167,6 +177,7 @@ pub const RESOURCES = [_]Resource{
 	},
 	.{
 		.name = "services",
+		.kind = "Service",
 		.root = "/api/v1",
 		.singular = "service",
 		.columns = &.{
@@ -179,6 +190,7 @@ pub const RESOURCES = [_]Resource{
 	},
 	.{
 		.name = "ingresses",
+		.kind = "Ingress",
 		.root = "/apis/networking.k8s.io/v1",
 		.singular = "ingress",
 		.columns = &.{
@@ -189,12 +201,14 @@ pub const RESOURCES = [_]Resource{
 	},
 	.{
 		.name = "configmaps",
+		.kind = "ConfigMap",
 		.root = "/api/v1",
 		.singular = "configmap",
 		.columns = &.{ NAME, AGE, .{ .name = "labels", .from = .labels } },
 	},
 	.{
 		.name = "secrets",
+		.kind = "Secret",
 		.root = "/api/v1",
 		.singular = "secret",
 		.columns = &.{
@@ -205,6 +219,7 @@ pub const RESOURCES = [_]Resource{
 	},
 	.{
 		.name = "persistentvolumeclaims",
+		.kind = "PersistentVolumeClaim",
 		.root = "/api/v1",
 		.singular = "claim",
 		.columns = &.{
@@ -217,12 +232,14 @@ pub const RESOURCES = [_]Resource{
 	},
 	.{
 		.name = "serviceaccounts",
+		.kind = "ServiceAccount",
 		.root = "/api/v1",
 		.singular = "service account",
 		.columns = &.{ NAME, AGE },
 	},
 	.{
 		.name = "events",
+		.kind = "Event",
 		.root = "/api/v1",
 		.singular = "event",
 		.remove = false,
@@ -236,6 +253,7 @@ pub const RESOURCES = [_]Resource{
 	},
 	.{
 		.name = "nodes",
+		.kind = "Node",
 		.root = "/api/v1",
 		.singular = "node",
 		.namespaced = false,
@@ -250,6 +268,7 @@ pub const RESOURCES = [_]Resource{
 	},
 	.{
 		.name = "namespaces",
+		.kind = "Namespace",
 		.root = "/api/v1",
 		.singular = "namespace",
 		.namespaced = false,
@@ -261,6 +280,7 @@ pub const RESOURCES = [_]Resource{
 	},
 	.{
 		.name = "persistentvolumes",
+		.kind = "PersistentVolume",
 		.root = "/api/v1",
 		.singular = "volume",
 		.namespaced = false,
@@ -273,6 +293,7 @@ pub const RESOURCES = [_]Resource{
 	},
 	.{
 		.name = "storageclasses",
+		.kind = "StorageClass",
 		.root = "/apis/storage.k8s.io/v1",
 		.singular = "storage class",
 		.namespaced = false,
@@ -283,6 +304,55 @@ pub const RESOURCES = [_]Resource{
 		},
 	},
 };
+
+/// The resource a manifest's `kind:` names, where this program knows it.
+pub fn findKind(kind: []const u8) ?Resource {
+	for (RESOURCES) |resource| {
+		if (std.mem.eql(u8, resource.kind, kind)) {
+			return resource;
+		}
+	}
+	return null;
+}
+
+/// What a kind is called in a path, for one this program does not know - a custom
+/// resource, mostly. Kubernetes lower-cases the kind and pluralises it by the
+/// ordinary English rules, which is a guess and is treated as one: a path built
+/// from it that the cluster does not have comes back as a 404 that says so.
+pub fn guessPlural(arena: std.mem.Allocator, kind: []const u8) ![]const u8 {
+	var lower = try arena.alloc(u8, kind.len);
+	for (kind, 0..) |char, i| {
+		lower[i] = std.ascii.toLower(char);
+	}
+	if (lower.len == 0) {
+		return lower;
+	}
+	const last = lower[lower.len - 1];
+	// ...y after a consonant becomes ...ies: NetworkPolicy, Gateway is not one.
+	if (last == 'y' and lower.len > 1 and !isVowel(lower[lower.len - 2])) {
+		return std.fmt.allocPrint(arena, "{s}ies", .{lower[0 .. lower.len - 1]});
+	}
+	// ...s, ...x, ...ch and ...sh take es: Ingress becomes ingresses.
+	if (last == 's' or last == 'x' or
+		(lower.len > 1 and (std.mem.endsWith(u8, lower, "ch") or std.mem.endsWith(u8, lower, "sh"))))
+	{
+		return std.fmt.allocPrint(arena, "{s}es", .{lower});
+	}
+	return std.fmt.allocPrint(arena, "{s}s", .{lower});
+}
+
+fn isVowel(char: u8) bool {
+	return char == 'a' or char == 'e' or char == 'i' or char == 'o' or char == 'u';
+}
+
+/// Where an `apiVersion:` lives. The core group is `v1` and is under `/api`;
+/// everything else is `group/version` and is under `/apis`.
+pub fn rootOf(arena: std.mem.Allocator, api_version: []const u8) ![]const u8 {
+	if (std.mem.indexOfScalar(u8, api_version, '/') == null) {
+		return std.fmt.allocPrint(arena, "/api/{s}", .{api_version});
+	}
+	return std.fmt.allocPrint(arena, "/apis/{s}", .{api_version});
+}
 
 pub fn find(name: []const u8) ?Resource {
 	for (RESOURCES) |resource| {
@@ -762,4 +832,52 @@ test "every resource is namespaced or not, and none of them is nameless" {
 	// The one that is not in a namespace really is not.
 	try testing.expect(!find("nodes").?.namespaced);
 	try testing.expect(find("pods").?.namespaced);
+}
+
+test "a manifest's kind comes back as the path it lives under" {
+	try testing.expectEqualStrings("deployments", findKind("Deployment").?.name);
+	try testing.expectEqualStrings("/apis/apps/v1", findKind("Deployment").?.root);
+	try testing.expectEqualStrings("pods", findKind("Pod").?.name);
+	try testing.expectEqualStrings("ingresses", findKind("Ingress").?.name);
+	// Case matters in a manifest and it matters here.
+	try testing.expect(findKind("deployment") == null);
+	try testing.expect(findKind("Widget") == null);
+}
+
+test "a kind nobody knows is pluralised the way Kubernetes does it" {
+	var arena = std.heap.ArenaAllocator.init(testing.allocator);
+	defer arena.deinit();
+	const a = arena.allocator();
+	const cases = [_][2][]const u8{
+		.{ "Widget", "widgets" },
+		.{ "Certificate", "certificates" },
+		// ...y after a consonant is ...ies, and after a vowel is not.
+		.{ "NetworkPolicy", "networkpolicies" },
+		.{ "Gateway", "gateways" },
+		// ...s, ...x, ...ch and ...sh take es.
+		.{ "Ingress", "ingresses" },
+		.{ "Netbox", "netboxes" },
+		.{ "Switch", "switches" },
+		.{ "Brush", "brushes" },
+		.{ "", "" },
+	};
+	for (cases) |case| {
+		try testing.expectEqualStrings(case[1], try guessPlural(a, case[0]));
+	}
+	// And the ones this program does know come from the table, not the guess:
+	// the guess would have said "endpointses" for a few of them.
+	for (RESOURCES) |resource| {
+		try testing.expectEqualStrings(resource.name, findKind(resource.kind).?.name);
+	}
+}
+
+test "an apiVersion says which root it is under" {
+	var arena = std.heap.ArenaAllocator.init(testing.allocator);
+	defer arena.deinit();
+	const a = arena.allocator();
+	// The core group is the one without a slash, and it is /api rather than /apis.
+	try testing.expectEqualStrings("/api/v1", try rootOf(a, "v1"));
+	try testing.expectEqualStrings("/apis/apps/v1", try rootOf(a, "apps/v1"));
+	try testing.expectEqualStrings("/apis/batch/v1", try rootOf(a, "batch/v1"));
+	try testing.expectEqualStrings("/apis/networking.k8s.io/v1", try rootOf(a, "networking.k8s.io/v1"));
 }

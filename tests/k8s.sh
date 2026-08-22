@@ -279,4 +279,44 @@ missing=$(python3 tests/screen.py "$ROOT" 's' 'EXEC nosuchpod' '{ctrl-s}' '{slee
 printf '%s' "$missing" | grep -qi "nosuchpod" || fail "EXEC on a missing pod should name it"
 echo "ok: EXEC on a pod that is not there says so"
 
+# A manifest applied from the editor. Typed rather than pasted, so the newlines
+# are the carriage returns a terminal really sends.
+made=$(python3 tests/screen.py "$ROOT" 's' \
+	'APPLY' '{enter}' \
+	'apiVersion: v1' '{enter}' \
+	'kind: ConfigMap' '{enter}' \
+	'metadata:' '{enter}' \
+	'  name: made-by-krtek' '{enter}' \
+	'data:' '{enter}' \
+	'  greeting: hello' '{enter}' \
+	'{ctrl-s}' '{sleep}' 'y' '{enter}' '{sleep}' '{keep}' 2>&1)
+printf '%s' "$made" | grep -q "created" || fail "APPLY did not create the object"
+kubectl -n payments get configmap made-by-krtek >/dev/null 2>&1 ||
+	fail "APPLY said it created it and the cluster disagrees"
+echo "ok: APPLY makes what the manifest says, and asks first"
+
+# The same one again is a change, not a second one - which is what server-side
+# apply is for, and the field manager says who owns it.
+again=$(python3 tests/screen.py "$ROOT" 's' \
+	'APPLY' '{enter}' \
+	'apiVersion: v1' '{enter}' \
+	'kind: ConfigMap' '{enter}' \
+	'metadata:' '{enter}' \
+	'  name: made-by-krtek' '{enter}' \
+	'data:' '{enter}' \
+	'  greeting: changed' '{enter}' \
+	'{ctrl-s}' '{sleep}' 'y' '{enter}' '{sleep}' '{keep}' 2>&1)
+printf '%s' "$again" | grep -q "configured" || fail "applying it again should configure, not create"
+[ "$(kubectl -n payments get configmap made-by-krtek -o jsonpath='{.data.greeting}')" = "changed" ] ||
+	fail "the change did not reach the cluster"
+[ "$(kubectl -n payments get configmap made-by-krtek -o jsonpath='{.metadata.managedFields[0].manager}')" = "krtek" ] ||
+	fail "the apply was not a server-side apply"
+echo "ok: applying it again changes it, and the cluster knows who owns the field"
+
+# And a manifest that is not one says which line it gave up on.
+bad=$(python3 tests/screen.py "$ROOT" 's' 'APPLY' '{enter}' 'kind: ConfigMap' '{enter}' \
+	'{ctrl-s}' '{sleep}' 'y' '{enter}' '{sleep}' '{keep}' 2>&1)
+printf '%s' "$bad" | grep -q "apiVersion" || fail "a document with no apiVersion should say so"
+echo "ok: a document that is not a manifest is named rather than sent"
+
 echo "all good"
