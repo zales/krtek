@@ -10,60 +10,60 @@
 <rect x="14.0" y="284.0" width="487.7" height="18.0" fill="#26262c"/>
 <rect x="501.2" y="284.0" width="353.3" height="18.0" fill="#26262c"/>
 <text x="14.0" y="27.3" fill="#e0e0e6" font-weight="600" xml:space="preserve" textLength="58.8" lengthAdjust="spacing"> krtek </text>
-<text x="72.8" y="27.3" fill="#8a8a94" xml:space="preserve" textLength="781.2" lengthAdjust="spacing">                                                                               no connection </text>
+<text x="72.8" y="27.3" fill="#9a9aa6" xml:space="preserve" textLength="781.2" lengthAdjust="spacing">                                                                               no connection </text>
 <text x="123.2" y="63.3" fill="#8aa7f0" xml:space="preserve" textLength="16.8" lengthAdjust="spacing">╭─</text>
 <text x="140.0" y="63.3" fill="#8aa7f0" font-weight="600" xml:space="preserve" textLength="193.2" lengthAdjust="spacing"> connect to a database </text>
 <text x="333.2" y="63.3" fill="#8aa7f0" xml:space="preserve" textLength="411.6" lengthAdjust="spacing">────────────────────────────────────────────────╮</text>
 <text x="123.2" y="81.3" fill="#8aa7f0" xml:space="preserve" textLength="8.4" lengthAdjust="spacing">│</text>
 <text x="131.6" y="81.3" fill="#8aa7f0" font-weight="600" xml:space="preserve" textLength="210.0" lengthAdjust="spacing"> &gt; books                 </text>
-<text x="341.6" y="81.3" fill="#50505a" xml:space="preserve" textLength="92.4" lengthAdjust="spacing">SQLite     </text>
-<text x="509.6" y="81.3" fill="#8a8a94" xml:space="preserve" textLength="109.2" lengthAdjust="spacing">/tmp/books.db</text>
+<text x="341.6" y="81.3" fill="#7c7c88" xml:space="preserve" textLength="92.4" lengthAdjust="spacing">SQLite     </text>
+<text x="509.6" y="81.3" fill="#9a9aa6" xml:space="preserve" textLength="109.2" lengthAdjust="spacing">/tmp/books.db</text>
 <text x="736.4" y="81.3" fill="#8aa7f0" xml:space="preserve" textLength="8.4" lengthAdjust="spacing">│</text>
 <text x="123.2" y="99.3" fill="#8aa7f0" xml:space="preserve" textLength="8.4" lengthAdjust="spacing">│</text>
 <text x="131.6" y="99.3" fill="#e0e0e6" xml:space="preserve" textLength="210.0" lengthAdjust="spacing">   shop (docker)         </text>
-<text x="341.6" y="99.3" fill="#50505a" xml:space="preserve" textLength="92.4" lengthAdjust="spacing">PostgreSQL </text>
-<text x="509.6" y="99.3" fill="#8a8a94" xml:space="preserve" textLength="218.4" lengthAdjust="spacing">postgres://postgres@127.0.</text>
+<text x="341.6" y="99.3" fill="#7c7c88" xml:space="preserve" textLength="92.4" lengthAdjust="spacing">PostgreSQL </text>
+<text x="509.6" y="99.3" fill="#9a9aa6" xml:space="preserve" textLength="218.4" lengthAdjust="spacing">postgres://postgres@127.0…</text>
 <text x="736.4" y="99.3" fill="#8aa7f0" xml:space="preserve" textLength="8.4" lengthAdjust="spacing">│</text>
 <text x="123.2" y="117.3" fill="#8aa7f0" xml:space="preserve" textLength="8.4" lengthAdjust="spacing">│</text>
 <text x="131.6" y="117.3" fill="#e0e0e6" xml:space="preserve" textLength="210.0" lengthAdjust="spacing">   orders                </text>
-<text x="341.6" y="117.3" fill="#50505a" xml:space="preserve" textLength="92.4" lengthAdjust="spacing">MySQL      </text>
+<text x="341.6" y="117.3" fill="#7c7c88" xml:space="preserve" textLength="92.4" lengthAdjust="spacing">MySQL      </text>
 <text x="434.0" y="117.3" fill="#71c68f" xml:space="preserve" textLength="75.6" lengthAdjust="spacing">keychain </text>
-<text x="509.6" y="117.3" fill="#8a8a94" xml:space="preserve" textLength="218.4" lengthAdjust="spacing">mysql://root@127.0.0.1:330</text>
+<text x="509.6" y="117.3" fill="#9a9aa6" xml:space="preserve" textLength="218.4" lengthAdjust="spacing">mysql://root@127.0.0.1:33…</text>
 <text x="736.4" y="117.3" fill="#8aa7f0" xml:space="preserve" textLength="8.4" lengthAdjust="spacing">│</text>
 <text x="123.2" y="135.3" fill="#8aa7f0" xml:space="preserve" textLength="8.4" lengthAdjust="spacing">│</text>
 <text x="131.6" y="135.3" fill="#e0e0e6" xml:space="preserve" textLength="210.0" lengthAdjust="spacing">   cache                 </text>
-<text x="341.6" y="135.3" fill="#50505a" xml:space="preserve" textLength="92.4" lengthAdjust="spacing">Redis      </text>
-<text x="509.6" y="135.3" fill="#8a8a94" xml:space="preserve" textLength="201.6" lengthAdjust="spacing">redis://127.0.0.1:6379/0</text>
+<text x="341.6" y="135.3" fill="#7c7c88" xml:space="preserve" textLength="92.4" lengthAdjust="spacing">Redis      </text>
+<text x="509.6" y="135.3" fill="#9a9aa6" xml:space="preserve" textLength="201.6" lengthAdjust="spacing">redis://127.0.0.1:6379/0</text>
 <text x="736.4" y="135.3" fill="#8aa7f0" xml:space="preserve" textLength="8.4" lengthAdjust="spacing">│</text>
 <text x="123.2" y="153.3" fill="#8aa7f0" xml:space="preserve" textLength="8.4" lengthAdjust="spacing">│</text>
 <text x="131.6" y="153.3" fill="#e0e0e6" xml:space="preserve" textLength="210.0" lengthAdjust="spacing">   events                </text>
-<text x="341.6" y="153.3" fill="#50505a" xml:space="preserve" textLength="92.4" lengthAdjust="spacing">Kafka      </text>
-<text x="509.6" y="153.3" fill="#8a8a94" xml:space="preserve" textLength="218.4" lengthAdjust="spacing">kafka+ssl://alice@broker.e</text>
+<text x="341.6" y="153.3" fill="#7c7c88" xml:space="preserve" textLength="92.4" lengthAdjust="spacing">Kafka      </text>
+<text x="509.6" y="153.3" fill="#9a9aa6" xml:space="preserve" textLength="218.4" lengthAdjust="spacing">kafka+ssl://alice@broker.…</text>
 <text x="736.4" y="153.3" fill="#8aa7f0" xml:space="preserve" textLength="8.4" lengthAdjust="spacing">│</text>
 <text x="123.2" y="171.3" fill="#8aa7f0" xml:space="preserve" textLength="8.4" lengthAdjust="spacing">│</text>
 <text x="131.6" y="171.3" fill="#e0e0e6" xml:space="preserve" textLength="210.0" lengthAdjust="spacing">   photos                </text>
-<text x="341.6" y="171.3" fill="#50505a" xml:space="preserve" textLength="92.4" lengthAdjust="spacing">S3         </text>
-<text x="509.6" y="171.3" fill="#8a8a94" xml:space="preserve" textLength="218.4" lengthAdjust="spacing">s3://photos?region=eu-cent</text>
+<text x="341.6" y="171.3" fill="#7c7c88" xml:space="preserve" textLength="92.4" lengthAdjust="spacing">S3         </text>
+<text x="509.6" y="171.3" fill="#9a9aa6" xml:space="preserve" textLength="218.4" lengthAdjust="spacing">s3://photos?region=eu-cen…</text>
 <text x="736.4" y="171.3" fill="#8aa7f0" xml:space="preserve" textLength="8.4" lengthAdjust="spacing">│</text>
 <text x="123.2" y="189.3" fill="#8aa7f0" xml:space="preserve" textLength="8.4" lengthAdjust="spacing">│</text>
 <text x="131.6" y="189.3" fill="#e0e0e6" xml:space="preserve" textLength="210.0" lengthAdjust="spacing">   broker                </text>
-<text x="341.6" y="189.3" fill="#50505a" xml:space="preserve" textLength="92.4" lengthAdjust="spacing">RabbitMQ   </text>
-<text x="509.6" y="189.3" fill="#8a8a94" xml:space="preserve" textLength="218.4" lengthAdjust="spacing">rabbit://guest@127.0.0.1:1</text>
+<text x="341.6" y="189.3" fill="#7c7c88" xml:space="preserve" textLength="92.4" lengthAdjust="spacing">RabbitMQ   </text>
+<text x="509.6" y="189.3" fill="#9a9aa6" xml:space="preserve" textLength="218.4" lengthAdjust="spacing">rabbit://guest@127.0.0.1:…</text>
 <text x="736.4" y="189.3" fill="#8aa7f0" xml:space="preserve" textLength="8.4" lengthAdjust="spacing">│</text>
 <text x="123.2" y="207.3" fill="#8aa7f0" xml:space="preserve" textLength="8.4" lengthAdjust="spacing">│</text>
 <text x="736.4" y="207.3" fill="#8aa7f0" xml:space="preserve" textLength="8.4" lengthAdjust="spacing">│</text>
 <text x="123.2" y="225.3" fill="#8aa7f0" xml:space="preserve" textLength="117.6" lengthAdjust="spacing">│   enter     </text>
-<text x="240.8" y="225.3" fill="#8a8a94" xml:space="preserve" textLength="495.6" lengthAdjust="spacing">connect to the one selected                                </text>
+<text x="240.8" y="225.3" fill="#9a9aa6" xml:space="preserve" textLength="495.6" lengthAdjust="spacing">connect to the one selected                                </text>
 <text x="736.4" y="225.3" fill="#8aa7f0" xml:space="preserve" textLength="8.4" lengthAdjust="spacing">│</text>
 <text x="123.2" y="243.3" fill="#8aa7f0" xml:space="preserve" textLength="117.6" lengthAdjust="spacing">│   a         </text>
-<text x="240.8" y="243.3" fill="#8a8a94" xml:space="preserve" textLength="495.6" lengthAdjust="spacing">add a connection                                           </text>
+<text x="240.8" y="243.3" fill="#9a9aa6" xml:space="preserve" textLength="495.6" lengthAdjust="spacing">add a connection                                           </text>
 <text x="736.4" y="243.3" fill="#8aa7f0" xml:space="preserve" textLength="8.4" lengthAdjust="spacing">│</text>
 <text x="123.2" y="261.3" fill="#8aa7f0" xml:space="preserve" textLength="117.6" lengthAdjust="spacing">│   e / d     </text>
-<text x="240.8" y="261.3" fill="#8a8a94" xml:space="preserve" textLength="495.6" lengthAdjust="spacing">edit, remove                                               </text>
+<text x="240.8" y="261.3" fill="#9a9aa6" xml:space="preserve" textLength="495.6" lengthAdjust="spacing">edit, remove                                               </text>
 <text x="736.4" y="261.3" fill="#8aa7f0" xml:space="preserve" textLength="8.4" lengthAdjust="spacing">│</text>
 <text x="123.2" y="279.3" fill="#8aa7f0" xml:space="preserve" textLength="117.6" lengthAdjust="spacing">│   up down   </text>
-<text x="240.8" y="279.3" fill="#8a8a94" xml:space="preserve" textLength="495.6" lengthAdjust="spacing">move in the list                                           </text>
+<text x="240.8" y="279.3" fill="#9a9aa6" xml:space="preserve" textLength="495.6" lengthAdjust="spacing">move in the list                                           </text>
 <text x="736.4" y="279.3" fill="#8aa7f0" xml:space="preserve" textLength="8.4" lengthAdjust="spacing">│</text>
 <text x="14.0" y="297.3" fill="#71c68f" xml:space="preserve" textLength="487.2" lengthAdjust="spacing"> 7 saved connection(s) - enter connects, a adds, d removes</text>
-<text x="14.0" y="315.3" fill="#50505a" xml:space="preserve" textLength="840.0" lengthAdjust="spacing"> enter connect   a add   e edit   d remove   ctrl+k commands   q quit                               </text>
+<text x="14.0" y="315.3" fill="#7c7c88" xml:space="preserve" textLength="840.0" lengthAdjust="spacing"> enter connect   a add   e edit   d remove   ctrl+k commands   q quit                               </text>
 </svg>

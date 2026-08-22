@@ -94,7 +94,7 @@ def runs(row, styles):
 	for column, char in enumerate(row):
 		style = styles[column]
 		fg, bg = colours(style)
-		key = (fg, bg, style.bold, style.italic, style.underline)
+		key = (fg, bg, style.bold, style.italic, style.underline, style.ul or fg)
 		if out and out[-1][0] == key and out[-1][2] + len(out[-1][1]) == column:
 			out[-1][1] += char
 		else:
@@ -115,7 +115,7 @@ def svg(screen):
 	# The paper first, all of it, then the ink: fewer, larger shapes.
 	for r in range(rows):
 		for (key, text, column) in runs(screen.grid[r], screen.styles[r]):
-			_, bg, _, _, _ = key[0], key[1], key[2], key[3], key[4]
+			bg = key[1]
 			if bg == BACKGROUND:
 				continue
 			parts.append(
@@ -125,16 +125,22 @@ def svg(screen):
 	for r in range(rows):
 		baseline = PADDING + r * CELL_H + CELL_H * 0.74
 		for (key, text, column) in runs(screen.grid[r], screen.styles[r]):
+			fg, _, bold, italic, underline, ul = key
+			# An underline drawn as a rule of its own, because a form field is a
+			# line under the spaces where nothing has been typed yet - and a text
+			# element with nothing but spaces in it draws no underline at all.
+			if underline:
+				parts.append(
+					'<rect x="%.1f" y="%.1f" width="%.1f" height="1.1" fill="%s"/>'
+					% (PADDING + column * CELL_W, baseline + 2.4, len(text) * CELL_W, ul)
+				)
 			if not text.strip():
 				continue
-			fg, _, bold, italic, underline = key
 			attributes = ['x="%.1f"' % (PADDING + column * CELL_W), 'y="%.1f"' % baseline, 'fill="%s"' % fg]
 			if bold:
 				attributes.append('font-weight="600"')
 			if italic:
 				attributes.append('font-style="italic"')
-			if underline:
-				attributes.append('text-decoration="underline"')
 			# Every glyph on the grid, or a proportional fallback font would drift.
 			attributes.append('xml:space="preserve"')
 			attributes.append('textLength="%.1f"' % (len(text) * CELL_W))

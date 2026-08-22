@@ -23,6 +23,11 @@ pub const Style = struct {
 	italic: bool = false,
 	reverse: bool = false,
 	underline: bool = false,
+	/// The underline in a colour of its own, where the terminal can do it. A form
+	/// field is a quiet line under text that has to stay bright, and the two
+	/// cannot be the same colour; a terminal that does not know SGR 58 draws the
+	/// line in the text colour, which is still a field somebody can see.
+	underline_colour: ?u8 = null,
 };
 
 pub const Mouse = struct {
@@ -83,6 +88,15 @@ pub const Scheme = enum { dark, light };
 /// names are palette indexes, so a whole theme is one table here. Index 16 is
 /// the odd one out: it is the text drawn *on* an accent background, so it has to
 /// go the other way from everything else.
+///
+/// **Every one of these is text somebody has to read**, so each carries at least
+/// 4.5:1 against the background it is drawn on - the point at which grey stops
+/// being decoration. `faint` used to be 2.4:1 against the page and 1.7:1 inside a
+/// form, which is what the footer hints, the headings of the key map and the
+/// explanation under the connection list were written in: the parts that teach
+/// the app, in the one colour nobody could read. The ramp is text, dim, faint -
+/// roughly 14:1, 7:1, 4.5:1 against the page - and it is a ramp of emphasis now
+/// rather than a ramp towards invisible.
 fn colour(index: u8, scheme: Scheme) vaxis.Color {
 	return switch (scheme) {
 		.dark => switch (index) {
@@ -95,9 +109,9 @@ fn colour(index: u8, scheme: Scheme) vaxis.Color {
 			203 => .{ .rgb = .{ 0xe8, 0x6b, 0x72 } }, // danger
 			236 => .{ .rgb = .{ 0x26, 0x26, 0x2c } }, // bars
 			238 => .{ .rgb = .{ 0x2e, 0x2e, 0x36 } }, // selection
-			240 => .{ .rgb = .{ 0x50, 0x50, 0x5a } }, // faint
-			242 => .{ .rgb = .{ 0x62, 0x62, 0x6c } }, // null
-			245 => .{ .rgb = .{ 0x8a, 0x8a, 0x94 } }, // dim
+			240 => .{ .rgb = .{ 0x7c, 0x7c, 0x88 } }, // faint
+			242 => .{ .rgb = .{ 0x82, 0x82, 0x8e } }, // null
+			245 => .{ .rgb = .{ 0x9a, 0x9a, 0xa6 } }, // dim
 			252 => .{ .rgb = .{ 0xe0, 0xe0, 0xe6 } }, // text
 			else => .{ .index = index },
 		},
@@ -112,8 +126,8 @@ fn colour(index: u8, scheme: Scheme) vaxis.Color {
 			203 => .{ .rgb = .{ 0xb4, 0x20, 0x28 } }, // danger
 			236 => .{ .rgb = .{ 0xe8, 0xe8, 0xef } }, // bars
 			238 => .{ .rgb = .{ 0xd6, 0xdb, 0xec } }, // selection
-			240 => .{ .rgb = .{ 0x9a, 0x9a, 0xa4 } }, // faint
-			242 => .{ .rgb = .{ 0x88, 0x88, 0x92 } }, // null
+			240 => .{ .rgb = .{ 0x72, 0x72, 0x80 } }, // faint
+			242 => .{ .rgb = .{ 0x75, 0x75, 0x7f } }, // null
 			245 => .{ .rgb = .{ 0x5c, 0x5c, 0x66 } }, // dim
 			252 => .{ .rgb = .{ 0x1c, 0x1c, 0x24 } }, // text
 			else => .{ .index = index },
@@ -287,6 +301,7 @@ pub const Term = struct {
 			.italic = s.italic,
 			.reverse = s.reverse,
 			.ul_style = if (s.underline) .single else .off,
+			.ul = if (s.underline_colour) |index| colour(index, self.scheme) else .default,
 		};
 	}
 

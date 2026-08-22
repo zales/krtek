@@ -46,14 +46,14 @@ NAMED = {
 class Style:
 	"""What a cell looks like: colours as #rrggbb or None for the default."""
 
-	__slots__ = ("fg", "bg", "bold", "dim", "italic", "underline", "reverse")
+	__slots__ = ("fg", "bg", "ul", "bold", "dim", "italic", "underline", "reverse")
 
-	def __init__(self, fg=None, bg=None, bold=False, dim=False, italic=False, underline=False, reverse=False):
-		self.fg, self.bg = fg, bg
+	def __init__(self, fg=None, bg=None, ul=None, bold=False, dim=False, italic=False, underline=False, reverse=False):
+		self.fg, self.bg, self.ul = fg, bg, ul
 		self.bold, self.dim, self.italic, self.underline, self.reverse = bold, dim, italic, underline, reverse
 
 	def copy(self):
-		return Style(self.fg, self.bg, self.bold, self.dim, self.italic, self.underline, self.reverse)
+		return Style(self.fg, self.bg, self.ul, self.bold, self.dim, self.italic, self.underline, self.reverse)
 
 	def after(self, params):
 		"""This style with an SGR sequence applied. Truecolour arrives as
@@ -65,21 +65,20 @@ class Style:
 			field = fields[i]
 			parts = field.split(":")
 			code = parts[0]
-			if code in ("38", "48") and len(parts) >= 5 and parts[1] == "2":
-				colour = "#%02x%02x%02x" % tuple(int(p or 0) for p in parts[2:5])
-				if code == "38":
-					out.fg = colour
-				else:
-					out.bg = colour
+			# 58 is the underline's own colour, which a form field uses to draw a
+			# quiet line under text that stays bright.
+			if code in ("38", "48", "58") and len(parts) >= 5 and parts[1] == "2":
+				# 38:2:r:g:b, and also 58:2::r:g:b - the colour space the ITU form
+				# puts between the 2 and the red is empty and has to be dropped.
+				numbers = [p for p in parts[2:] if p != ""][:3]
+				colour = "#%02x%02x%02x" % tuple(int(n) for n in numbers)
+				setattr(out, {"38": "fg", "48": "bg", "58": "ul"}[code], colour)
 				i += 1
 				continue
 			# The same, spelled with semicolons: 38;2;r;g;b
-			if code in ("38", "48") and i + 4 < len(fields) and fields[i + 1] == "2":
+			if code in ("38", "48", "58") and i + 4 < len(fields) and fields[i + 1] == "2":
 				colour = "#%02x%02x%02x" % tuple(int(fields[i + n] or 0) for n in (2, 3, 4))
-				if code == "38":
-					out.fg = colour
-				else:
-					out.bg = colour
+				setattr(out, {"38": "fg", "48": "bg", "58": "ul"}[code], colour)
 				i += 5
 				continue
 			if code in ("", "0"):
@@ -106,6 +105,8 @@ class Style:
 				out.fg = None
 			elif code == "49":
 				out.bg = None
+			elif code == "59":
+				out.ul = None
 			i += 1
 		return out
 

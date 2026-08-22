@@ -360,7 +360,15 @@ pub const App = struct {
 			return;
 		}
 		self.editor = Editor.init(self.allocator);
-		self.say("ctrl+s runs it, tab completes a name, ctrl+p brings back the last one", .{});
+		// Not a list of keys: the footer has one, and saying it twice on one screen
+		// teaches nobody anything the second time. What is worth saying here is what
+		// this panel *is*, which is not the same thing on every engine.
+		const caps = self.conn.caps();
+		if (caps.speaks_sql) {
+			self.say("several statements at once - each one is reported on its own", .{});
+		} else {
+			self.say("{s} commands here, not SQL", .{if (caps.label.len != 0) caps.label else "engine"});
+		}
 	}
 
 	pub fn closeEditor(self: *App) void {
@@ -620,7 +628,7 @@ pub const App = struct {
 		const form = try self.newForm(
 			.connection,
 			if (self.editing_saved != null) "edit connection" else "add connection",
-			"pick the engine, fill in what it needs - ctrl+s saves and connects",
+			"pick the engine, fill in what it needs",
 		);
 		self.built_engine = shape.engine;
 		try form.text("name", name, 24);
@@ -2494,7 +2502,7 @@ pub const App = struct {
 			.insert => "new row",
 			.edit => "edit row",
 			.clone => "clone row",
-		}, "ctrl+s saves, esc cancels, an empty value with a DEFAULT is left to the engine");
+		}, "an empty value with a DEFAULT is left to the engine");
 		form.table = try form.arena.allocator().dupe(u8, table.name);
 		if (mode == .edit) {
 			form.key = if (self.rows.items[self.cursor_row].key) |key|
@@ -2516,21 +2524,23 @@ pub const App = struct {
 					initial = if (is_null) "" else cell.text;
 				}
 			}
-			var label: std.ArrayListUnmanaged(u8) = .empty;
-			try label.appendSlice(form.arena.allocator(), column.name);
-			try label.appendSlice(form.arena.allocator(), " ");
-			try label.appendSlice(form.arena.allocator(), column.type);
+			// The label is what the column is *called*; what it is - the type, the
+			// NOT NULL, the default - goes after the field, where it reads as a note
+			// about the value rather than as part of the name.
+			var about: std.ArrayListUnmanaged(u8) = .empty;
+			try about.appendSlice(form.arena.allocator(), column.type);
 			if (column.notnull) {
-				try label.appendSlice(form.arena.allocator(), " NOT NULL");
+				try about.appendSlice(form.arena.allocator(), " NOT NULL");
 			}
 			if (column.dflt) |value| {
-				try label.print(form.arena.allocator(), " = {s}", .{value});
+				try about.print(form.arena.allocator(), " = {s}", .{value});
 			}
-			try form.text(label.items, initial, 46);
+			try form.text(column.name, initial, 34);
 			try form.wasNamed(column.name);
 			try form.toggle("null", is_null);
 			form.sameLine();
 			try form.wasNamed(column.name);
+			try form.describe(about.items);
 		}
 		if (mode == .clone) {
 			// A cloned row cannot keep the key of the row it came from.
@@ -2554,7 +2564,7 @@ pub const App = struct {
 		const form = try self.newForm(
 			if (alter) .alter_table else .create_table,
 			if (alter) "alter table" else "create table",
-			"ctrl+n adds a column, ctrl+k removes one, ctrl+s saves",
+			"ctrl+n adds a column, ctrl+k removes one",
 		);
 		form.row_size = 5;
 		form.table = try form.arena.allocator().dupe(u8, table_label);
@@ -2642,7 +2652,7 @@ pub const App = struct {
 			self.complain("open a table first", .{});
 			return;
 		};
-		const form = try self.newForm(.index, "create index", "columns are comma separated; ctrl+s creates");
+		const form = try self.newForm(.index, "create index", "columns are comma separated");
 		form.table = try form.arena.allocator().dupe(u8, table.name);
 		var suggested: std.ArrayListUnmanaged(u8) = .empty;
 		try suggested.print(form.arena.allocator(), "{s}_idx", .{table.name});
@@ -2657,7 +2667,7 @@ pub const App = struct {
 			self.complain("open a table first", .{});
 			return;
 		};
-		const form = try self.newForm(.foreign_key, "add foreign key", "the table is rebuilt; ctrl+s applies");
+		const form = try self.newForm(.foreign_key, "add foreign key", "the table is rebuilt");
 		form.table = try form.arena.allocator().dupe(u8, table.name);
 		const targets = try self.tableNames(form.arena.allocator(), table.name);
 		try form.text("column", if (self.cols.items.len > 0) self.cols.items[self.cursor_col] else "", 24);
@@ -2668,14 +2678,14 @@ pub const App = struct {
 	}
 
 	pub fn openViewForm(self: *App) !void {
-		const form = try self.newForm(.view, "create view", "ctrl+s creates the view");
+		const form = try self.newForm(.view, "create view", "");
 		try form.text("view name", "", 30);
 		try form.text("select", "SELECT ", 60);
 	}
 
 	pub fn openTriggerForm(self: *App) !void {
 		const table_label = self.table_name orelse "";
-		const form = try self.newForm(.trigger, "create trigger", "ctrl+s creates the trigger");
+		const form = try self.newForm(.trigger, "create trigger", "");
 		form.table = try form.arena.allocator().dupe(u8, table_label);
 		try form.text("trigger name", "", 30);
 		try form.choice("when", &[_][]const u8{ "BEFORE", "AFTER", "INSTEAD OF" }, 1);
@@ -2690,7 +2700,7 @@ pub const App = struct {
 			self.complain("open a table first", .{});
 			return;
 		};
-		const form = try self.newForm(.rename_table, "rename table", "ctrl+s renames");
+		const form = try self.newForm(.rename_table, "rename table", "");
 		form.table = try form.arena.allocator().dupe(u8, table.name);
 		try form.text("new name", table.name, 30);
 	}
@@ -2700,7 +2710,7 @@ pub const App = struct {
 			self.complain("open a table first", .{});
 			return;
 		};
-		const form = try self.newForm(.copy_table, "copy table", "ctrl+s copies");
+		const form = try self.newForm(.copy_table, "copy table", "");
 		form.table = try form.arena.allocator().dupe(u8, table.name);
 		var suggested: std.ArrayListUnmanaged(u8) = .empty;
 		try suggested.print(form.arena.allocator(), "{s}_copy", .{table.name});
@@ -2709,7 +2719,7 @@ pub const App = struct {
 	}
 
 	pub fn openSearchForm(self: *App) !void {
-		const form = try self.newForm(.search_all, "search every table", "ctrl+s searches all text columns");
+		const form = try self.newForm(.search_all, "search every table", "every text column of every table");
 		try form.text("contains", "", 40);
 	}
 
@@ -2718,7 +2728,7 @@ pub const App = struct {
 			self.complain("open a table first", .{});
 			return;
 		};
-		const form = try self.newForm(.filter, "filter rows", "empty values are ignored; ctrl+s applies");
+		const form = try self.newForm(.filter, "filter rows", "empty values are ignored");
 		form.table = try form.arena.allocator().dupe(u8, table.name);
 		const columns = try self.columnDefs(form.arena.allocator(), table.name);
 		var names: std.ArrayListUnmanaged([]const u8) = .empty;
@@ -2743,14 +2753,14 @@ pub const App = struct {
 		if (self.cols.items.len == 0) {
 			return;
 		}
-		const form = try self.newForm(.columns, "visible columns", "space toggles, ctrl+s applies");
+		const form = try self.newForm(.columns, "visible columns", "space toggles one, ctrl+s applies them");
 		for (self.cols.items, 0..) |name, i| {
 			try form.toggle(name, !self.isHidden(i));
 		}
 	}
 
 	pub fn openExportForm(self: *App) !void {
-		const form = try self.newForm(.export_data, "export", "ctrl+s writes the file");
+		const form = try self.newForm(.export_data, "export", "");
 		try form.choice("what", &[_][]const u8{ "whole database", "this table", "the grid" }, if (!self.hasTable()) 2 else 1);
 		try form.choice("format", &[_][]const u8{ "sql", "csv", "tsv" }, 0);
 		try form.toggle("structure", true);
@@ -2759,7 +2769,7 @@ pub const App = struct {
 	}
 
 	pub fn openImportForm(self: *App) !void {
-		const form = try self.newForm(.import_data, "import", "ctrl+s runs the import");
+		const form = try self.newForm(.import_data, "import", "");
 		try form.choice("kind", &[_][]const u8{ "sql script", "csv into a table" }, 0);
 		try form.text("file", "", 40);
 		try form.text("into table", self.table_name orelse "", 30);
@@ -2773,7 +2783,7 @@ pub const App = struct {
 			self.complain("{s} has no schemas", .{self.conn.caps().label});
 			return;
 		}
-		const form = try self.newForm(.schema, "schema", "ctrl+s switches");
+		const form = try self.newForm(.schema, "schema", "");
 		const list = try self.conn.schemas(form.arena.allocator());
 		if (list.len == 0) {
 			self.complain("no schema to switch to", .{});
@@ -2789,7 +2799,7 @@ pub const App = struct {
 	}
 
 	pub fn openOpenForm(self: *App) !void {
-		const form = try self.newForm(.open_file, "open a database", "ctrl+s opens the file");
+		const form = try self.newForm(.open_file, "open a database", "");
 		try form.text("path", self.path, 60);
 	}
 

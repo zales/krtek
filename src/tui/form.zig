@@ -33,6 +33,11 @@ pub const Field = struct {
 	/// Drawn as dots. What is typed still goes into `text`; only the screen is
 	/// spared.
 	masked: bool = false,
+	/// Drawn quietly after the value: what the value *is* rather than what it is
+	/// called. A column's type and its NOT NULL belong beside the field, not
+	/// crammed into the name of it - a label that says four things at once is
+	/// four things and no label.
+	after: []const u8 = "",
 
 	pub fn value(self: Field) []const u8 {
 		return switch (self.kind) {
@@ -122,16 +127,30 @@ pub const Form = struct {
 	}
 
 	pub fn choice(self: *Form, label: []const u8, options: []const []const u8, pick: usize) !void {
+		// As wide as the widest thing it can say. A fixed width clipped "this
+		// table" to "this ta…", which is a control that hides its own answer.
+		var widest: usize = 4;
+		for (options) |option| {
+			widest = @max(widest, term.width(option));
+		}
 		try self.fields.append(self.gpa(), .{
 			.label = try self.gpa().dupe(u8, label),
 			.kind = .{ .choice = options },
 			.pick = pick,
-			.width = 8,
+			.width = @min(widest, 28),
 		});
 	}
 
 	pub fn note(self: *Form, line: []const u8) !void {
 		try self.fields.append(self.gpa(), .{ .label = try self.gpa().dupe(u8, line), .kind = .label });
+	}
+
+	/// What the last added field is, drawn after its value: a type, a default, a
+	/// unit. Not part of the label, because the label is what it is called.
+	pub fn describe(self: *Form, text_after: []const u8) !void {
+		if (self.fields.items.len > 0) {
+			self.fields.items[self.fields.items.len - 1].after = try self.gpa().dupe(u8, text_after);
+		}
 	}
 
 	/// Mark the last added field as continuing the previous line.

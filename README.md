@@ -151,6 +151,19 @@ a table or column name, `ctrl+s` running it.
 
 ![the SQL editor](docs/editor.svg)
 
+Forms have one shape everywhere: labels right-aligned against their fields, the
+field itself underlined for its whole width so an empty one is still visibly
+somewhere to type, and the frame drawn around what is in it rather than around the
+pane. What a value *is* - a column's type, its `NOT NULL`, its default - sits after
+the field in grey, because that is a note about the value and not part of its name.
+Where a row of fields is too narrow to carry its labels, each label moves inside its
+own empty field and steps aside as soon as something is typed there.
+
+Every grey in the interface is text somebody has to read, so each carries at least
+4.5:1 against what it is drawn on. The three levels are text, dim and faint, and
+faint is the floor rather than the vanishing point: the footer hints, the headings
+of the key map and the explanation under the connection list are all written in it.
+
 `ctrl+k` is the command palette. Type a few letters of what you want; the letters
 that matched are underlined, and the key that does it is on the right, so using it
 teaches the key map.

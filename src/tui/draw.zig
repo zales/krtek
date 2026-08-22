@@ -27,7 +27,11 @@ pub fn frame(app: *App, size: Size) !void {
 	const body_rows = if (size.rows > 3) size.rows - 3 else 1;
 	// The file manager takes the whole width: two panes and a sidebar on eighty
 	// columns would leave neither pane a name to show.
-	const side = if (size.cols > SIDEBAR + 20 and app.view != .connections and app.view != .files) SIDEBAR else 0;
+	// The key map is a reference, not a place to be while browsing: it gets the
+	// whole width, the way the connection list and the two panes do, because a
+	// sidebar there costs a quarter of every description.
+	const side = if (size.cols > SIDEBAR + 20 and
+		app.view != .connections and app.view != .files and app.view != .help) SIDEBAR else 0;
 
 	header(app, size);
 	if (app.view == .connections) {
@@ -170,18 +174,20 @@ fn connections(app: *App, size: Size, rows: usize) void {
 		line += 1;
 		screen.moveTo(line, left);
 		screen.style(.{ .fg = C.faint });
-		_ = write(app, "    A file path opens SQLite; postgres://, mysql://, redis://, kafka://, s3://, azure://, rabbit:// and sftp:// the rest.", width);
+		// Inside the frame, not up to it: these ran into the right-hand border and
+		// lost their last few words to it.
+		_ = write(app, "    a file path opens SQLite; a URL opens the engine it names", width -| 2);
 		line += 1;
 		screen.moveTo(line, left);
 		screen.style(.{ .fg = C.faint });
-		_ = write(app, "    in file: the password is in plain text below; keychain: macOS keeps it.", width);
+		_ = write(app, "    file keeps the password in plain text; keychain lets macOS guard it", width -| 2);
 		line += 1;
 	}
 	if (line <= rows and app.saved_path.items.len != 0) {
 		screen.moveTo(line, left);
 		screen.style(.{ .fg = C.faint });
-		_ = write(app, "    saved in ", width);
-		_ = write(app, app.saved_path.items, if (width > 17) width - 17 else 0);
+		_ = write(app, "    saved in ", width -| 2);
+		_ = write(app, app.saved_path.items, if (width > 19) width - 19 else 0);
 		line += 1;
 	}
 	screen.reset();
@@ -838,7 +844,7 @@ const HELP = [_][2][]const u8{
 	.{ "b L", "database info, relations" },
 	.{ "m", "report of the last batch" },
 	.{ "r", "reload" },
-	.{ "R", "follow: reload every couple of seconds, staying at the end" },
+	.{ "R", "follow: reload it, staying at the end" },
 	.{ "q ctrl+c", "quit" },
 	.{ "", "ROWS" },
 	.{ "enter", "edit the row in a form" },
@@ -856,19 +862,19 @@ const HELP = [_][2][]const u8{
 	.{ "N Y", "rename, copy a table" },
 	.{ "D X", "drop, empty" },
 	.{ "", "DATA" },
-	.{ "s", "SQL editor: colours, tab completes a name, ctrl+s runs" },
+	.{ "s", "SQL editor: colours, completion" },
 	.{ "F", "search every table" },
 	.{ "E M", "export, import" },
-	.{ "C c r p s", "copy the value, the row, the page, the last SQL" },
+	.{ "C c r p s", "copy value, row, page, last SQL" },
 	.{ "O #", "connections, schema" },
-	.{ ":", "export dump limit text follow open check analyze vacuum q" },
+	.{ ":", "export dump limit text follow open check" },
 	.{ "", "FILES: SFTP, S3, AZURE" },
-	.{ "f", "the two panes: this machine on one side, the connection on the other" },
-	.{ "tab", "the other pane, which is where a copy goes" },
+	.{ "f", "the two panes: here and the connection" },
+	.{ "tab", "the other pane: where a copy goes" },
 	.{ "enter h l", "into a directory, out of it" },
 	.{ "/", "go to a path" },
 	.{ "space", "mark, and unmark" },
-	.{ "c", "copy to the other pane, directories and all" },
+	.{ "c", "copy over, directories and all" },
 	.{ "n r x", "new directory, rename, remove" },
 	.{ "", "IN THE SQL EDITOR" },
 	.{ "ctrl+s", "run it" },
@@ -1297,9 +1303,10 @@ fn editorPanel(app: *App, size: Size, side: usize, rows: usize) void {
 	// The gutter holds the line number, right aligned, and a space.
 	const gutter: usize = 5;
 
-	// Tall enough that a completion list has room inside the panel.
-	const height: usize = @min(rows, @max(10, editor.lineCount() + 4));
-	const shown = height -| 3;
+	// Tall enough that a completion list has room inside the panel, and one line
+	// taller than what is written, so there is visibly somewhere to keep typing.
+	const height: usize = @min(rows, @max(9, editor.lineCount() + 3));
+	const shown = height -| 2;
 	const at = editor.position();
 	// Keep the line the cursor is on inside the panel.
 	if (at.line < editor.scroll) {
@@ -1348,13 +1355,8 @@ fn editorPanel(app: *App, size: Size, side: usize, rows: usize) void {
 		}
 	}
 
-	// The line under the panel says what the keys do; the frame carries the rest.
-	screen.moveTo(top + height - 2, left);
-	screen.style(.{ .bg = C.bar, .fg = C.faint });
-	const hint: usize = write(app, "  ctrl+s runs   tab completes   ctrl+p earlier   ctrl+u clears   esc closes", width);
-	if (width > hint) {
-		fill(app, ' ', width - hint);
-	}
+	// No key list inside the panel: the footer already carries one, and the same
+	// sentence written twice on one screen teaches nobody anything the second time.
 	screen.reset();
 	// An engine without SQL gets its own name on the panel, because what is typed
 	// there is its command line and calling that SQL would be a lie.
@@ -1446,25 +1448,46 @@ fn box(app: *App, top: usize, left: usize, width: usize, height: usize, title: [
 
 // --- primitives ---
 
-/// Write `text` clipped to `max` columns; returns the columns used.
+/// Write as much of `text` as fits in `max` columns, and say so with an ellipsis
+/// where it did not all fit. A sentence that stops mid-word without a mark is
+/// worse than no sentence: the reader cannot tell whether something was lost.
 fn write(app: *App, text: []const u8, max: usize) usize {
 	if (max == 0) {
 		return 0;
 	}
 	const piece = term.fit(text, max);
-	app.screen.put(piece.text);
-	return piece.cols;
+	if (piece.text.len == text.len) {
+		app.screen.put(piece.text);
+		return piece.cols;
+	}
+	// One column for the ellipsis, taken off the end of what is shown.
+	const room = term.fit(text, max -| 1);
+	app.screen.put(room.text);
+	app.screen.put("…");
+	return room.cols + 1;
 }
 
 /// Write `text` in a field of exactly `width` columns.
 fn pad(app: *App, text: []const u8, width: usize, right_align: bool) void {
-	const piece = term.fit(text, width);
-	const space = width - piece.cols;
+	if (width == 0) {
+		return;
+	}
+	const cut = term.fit(text, width);
+	// One column of the field goes to the ellipsis when the text did not all fit.
+	const ellipsis = cut.text.len != text.len;
+	const piece = if (ellipsis) term.fit(text, width - 1) else cut;
+	const space = width - piece.cols - @intFromBool(ellipsis);
 	if (right_align) {
 		fill(app, ' ', space);
 		app.screen.put(piece.text);
+		if (ellipsis) {
+			app.screen.put("…");
+		}
 	} else {
 		app.screen.put(piece.text);
+		if (ellipsis) {
+			app.screen.put("…");
+		}
 		fill(app, ' ', space);
 	}
 }
@@ -1480,6 +1503,19 @@ fn fill(app: *App, char: u8, count: usize) void {
 
 /// A form is drawn over the main area, one field per line unless a field says
 /// it continues the previous one.
+/// The form: a column of labels, a column of controls, and a frame drawn around
+/// what is in it rather than around the pane.
+///
+/// Three things were wrong with the old one and all three were geometry. The
+/// label sat left-aligned in a fixed column of 28, so `id` was two dozen spaces
+/// away from the field it named and the eye had nothing to join them with; the
+/// labels are right-aligned against their controls now, and the column is as wide
+/// as the labels really are, so a form of short names is tight and one of long
+/// names still lines up. A text field was drawn in a background one step from the
+/// panel's - 1.1:1, which is no step at all - so an empty field was not on the
+/// screen; it is underlined for its whole width now, which is the one affordance
+/// a terminal can draw that does not depend on having colours to spare. And the
+/// frame was the height of the pane, which made every form nine tenths empty box.
 fn formPanel(app: *App, size: Size, side: usize, rows: usize) !void {
 	const form = &app.form.?;
 	const screen = app.screen;
@@ -1490,30 +1526,78 @@ fn formPanel(app: *App, size: Size, side: usize, rows: usize) !void {
 	const left = outer_left + 1;
 	const width = outer_width -| 2;
 
-	// Walk the fields, packing the inline ones onto the same line.
-	var line: usize = 2;
-	var index: usize = 0;
-	// Keep the field under the cursor visible.
-	var cursor_line: usize = 2;
-	{
-		var probe: usize = 2;
-		for (form.fields.items, 0..) |field, i| {
-			if (i != 0 and !field.inline_with_previous) {
-				probe += 1;
-			}
-			if (i == form.cursor) {
-				cursor_line = probe;
-				break;
-			}
+	// How many lines the fields need, and which of them the cursor is on. Inline
+	// fields share the line of the field before them.
+	var lines: usize = 1;
+	var cursor_line: usize = 0;
+	for (form.fields.items, 0..) |field, i| {
+		if (i != 0 and !field.inline_with_previous) {
+			lines += 1;
+		}
+		if (i == form.cursor) {
+			cursor_line = lines - 1;
 		}
 	}
-	const visible = if (rows > 3) rows - 2 else 1;
-	if (cursor_line - 2 >= form.scroll + visible) {
-		form.scroll = cursor_line - 2 - visible + 1;
+	const room_for_lines = if (rows > 2) rows - 2 else 1;
+	const visible = @min(lines, room_for_lines);
+	if (cursor_line >= form.scroll + visible) {
+		form.scroll = cursor_line + 1 - visible;
 	}
-	if (cursor_line - 2 < form.scroll) {
-		form.scroll = cursor_line - 2;
+	if (cursor_line < form.scroll) {
+		form.scroll = cursor_line;
 	}
+
+	// The label column is as wide as the labels are. A repeatable row is a table,
+	// not a list of labelled fields, so its own narrow labels stay out of this.
+	var label_width: usize = 0;
+	for (form.fields.items) |field| {
+		if (field.inline_with_previous or field.group != 0) {
+			continue;
+		}
+		if (field.kind == .label or field.kind == .toggle) {
+			continue;
+		}
+		label_width = @max(label_width, term.width(field.label));
+	}
+	// Nothing to line up against means no column at all: a form of nothing but
+	// checkboxes is a list, and a list does not start a third of the way in.
+	if (label_width != 0) {
+		label_width = @min(label_width, @max(10, width / 3));
+	}
+	const gutter: usize = 2;
+	// A column of air inside the frame on each side: a label hard against the
+	// border reads as part of it.
+	const indent = left + 1;
+	const inner = width -| 2;
+	const value_left = indent + label_width + gutter;
+	// A repeatable row carries a label on each of its fields, which is what makes
+	// it readable - but five labelled fields need more line than a pane has, and
+	// the old form answered that by running off the right-hand edge. So the labels
+	// are there when they fit and gone when they do not: the fields of a row are
+	// a name, a type, two checkboxes that say what they are, and a default, and a
+	// row that fits is worth more than a row that explains itself and is cut in
+	// half.
+	const packed_label: usize = label: {
+		const slot: usize = 8;
+		var needed: usize = 0;
+		var widest: usize = 0;
+		for (form.fields.items) |field| {
+			if (field.group == 0) {
+				continue;
+			}
+			if (!field.inline_with_previous) {
+				widest = @max(widest, needed);
+				needed = 0;
+			}
+			needed += switch (field.kind) {
+				.toggle => term.width(field.label) + 6,
+				.choice => slot + 1 + field.width + 4,
+				else => slot + 1 + field.width + 2,
+			};
+		}
+		widest = @max(widest, needed);
+		break :label if (widest <= width -| 2) slot else 0;
+	};
 
 	// Room left on the current line; a wide field must not underflow it.
 	const room = struct {
@@ -1522,11 +1606,13 @@ fn formPanel(app: *App, size: Size, side: usize, rows: usize) !void {
 		}
 	}.left_over;
 
+	var line: usize = 2;
 	var row_on_screen: usize = 0;
+	var at: usize = indent;
+	var index: usize = 0;
 	screen.moveTo(line, left);
 	screen.style(.{ .bg = C.selected });
 	fill(app, ' ', width);
-	var column: usize = left + 1;
 	while (index < form.fields.items.len) : (index += 1) {
 		const field = &form.fields.items[index];
 		if (index != 0 and !field.inline_with_previous) {
@@ -1535,82 +1621,165 @@ fn formPanel(app: *App, size: Size, side: usize, rows: usize) !void {
 				continue;
 			}
 			line += 1;
-			if (line >= rows) {
+			if (line >= 2 + visible) {
 				break;
 			}
-			column = left + 1;
 			screen.moveTo(line, left);
 			screen.style(.{ .bg = C.selected });
 			fill(app, ' ', width);
-			screen.moveTo(line, column);
+			at = indent;
 		} else if (row_on_screen < form.scroll) {
 			continue;
-		} else {
-			screen.moveTo(line, column);
 		}
 		const focused = index == form.cursor;
+		const packed_row = field.inline_with_previous or field.group != 0;
+
+		// The label, and where its control begins. A note and a toggle have no
+		// label column of their own: a note explains the field above it and a
+		// checkbox says what it is next to its own box, so both start where the
+		// values start.
+		if (!field.inline_with_previous) {
+			at = indent;
+			switch (field.kind) {
+				// A note is prose about the field above it, so it starts at the
+				// margin and has the whole line; a checkbox says what it is beside
+				// its own box, so it starts where the values do.
+				.label => screen.moveTo(line, at),
+				.toggle => {
+					screen.moveTo(line, at);
+					screen.style(.{ .bg = C.selected });
+					fill(app, ' ', @min(label_width + gutter, room(inner, at, indent)));
+					at = @min(value_left, indent + inner);
+				},
+				else => {
+					screen.moveTo(line, at);
+					screen.style(.{ .bg = C.selected, .fg = if (focused) C.accent else C.dim, .bold = focused });
+					if (packed_row) {
+						pad(app, field.label, packed_label, false);
+						at += packed_label;
+					} else {
+						pad(app, field.label, label_width, true);
+						at += label_width;
+					}
+					screen.style(.{ .bg = C.selected });
+					fill(app, ' ', gutter);
+					at += gutter;
+				},
+			}
+		} else if (field.kind != .toggle) {
+			// Packed onto the line already in progress, with its own short label.
+			screen.moveTo(line, at);
+			screen.style(.{ .bg = C.selected, .fg = if (focused) C.accent else C.dim, .bold = focused });
+			const slot = @min(packed_label, room(inner, at, indent));
+			pad(app, field.label, slot, false);
+			at += slot;
+			screen.style(.{ .bg = C.selected });
+			at += write(app, " ", room(inner, at, indent));
+		} else {
+			screen.moveTo(line, at);
+		}
+
 		switch (field.kind) {
 			.label => {
 				screen.style(.{ .bg = C.selected, .fg = C.faint, .italic = true });
-				column += write(app, field.label, room(width, column, left));
+				at += write(app, field.label, room(inner, at, indent));
 			},
 			.toggle => {
-				screen.style(.{ .bg = C.selected, .fg = if (focused) C.accent else C.dim, .bold = focused });
-				column += write(app, if (field.on) "[x] " else "[ ] ", room(width, column, left));
-				column += write(app, field.label, room(width, column, left));
-				column += write(app, "  ", room(width, column, left));
+				screen.style(.{
+					.bg = C.selected,
+					.fg = if (focused) C.accent else if (field.on) C.text else C.faint,
+					.bold = focused,
+					.underline = focused,
+					.underline_colour = C.accent,
+				});
+				at += write(app, if (field.on) "[x] " else "[ ] ", room(inner, at, indent));
+				screen.style(.{
+					.bg = C.selected,
+					.fg = if (focused) C.accent else C.text,
+					.bold = focused,
+					.underline = focused,
+					.underline_colour = C.accent,
+				});
+				at += write(app, field.label, room(inner, at, indent));
+				screen.style(.{ .bg = C.selected });
+				at += write(app, "  ", room(inner, at, indent));
 			},
 			.choice => {
-				screen.style(.{ .bg = C.selected, .fg = C.dim });
-				const label_width: usize = if (field.inline_with_previous) 5 else 28;
-				pad(app, field.label, label_width, false);
-				column += label_width;
-				column += write(app, " ", width);
+				const span = @min(field.width + 2, room(inner, at, indent));
 				screen.style(.{
-					.bg = if (focused) C.accent else C.bar,
-					.fg = if (focused) 16 else C.text,
+					.bg = C.selected,
+					.fg = if (focused) C.accent else C.text,
+					.bold = focused,
+					.underline = focused,
+					.underline_colour = C.accent,
 				});
-				column += write(app, "<", room(width, column, left));
-				pad(app, field.value(), field.width, false);
-				column += field.width;
-				column += write(app, ">", room(width, column, left));
+				if (span > 2) {
+					at += write(app, "‹", room(inner, at, indent));
+					pad(app, field.value(), span - 2, false);
+					at += span - 2;
+					at += write(app, "›", room(inner, at, indent));
+				}
 				screen.style(.{ .bg = C.selected });
-				column += write(app, "  ", room(width, column, left));
+				at += write(app, "  ", room(inner, at, indent));
 			},
 			.text => {
-				screen.style(.{ .bg = C.selected, .fg = if (focused) C.accent else C.dim, .bold = focused });
-				// A fixed label column keeps the values lined up; a repeatable row
-				// is tighter, because five fields share the line.
-				const label_width: usize = if (field.inline_with_previous) 8 else if (field.group != 0) 8 else 28;
-				pad(app, field.label, label_width, false);
-				column += label_width;
-				column += write(app, " ", room(width, column, left));
-				screen.style(.{ .bg = if (focused) C.bar else C.selected, .fg = C.text });
+				// Underlined for the whole width of the field, so an empty one is
+				// still somewhere to type: on this panel no background is far enough
+				// from the panel to be seen.
+				const span = @min(field.width, room(inner, at, indent));
+				screen.style(.{
+					.bg = C.selected,
+					.fg = C.text,
+					.underline = true,
+					.underline_colour = if (focused) C.accent else C.faint,
+				});
 				// Show the tail of a long value, which is what is being typed - or
 				// dots, where the value is a password.
 				var dots: [64]u8 = undefined;
 				const shown = if (field.masked)
-					mask(&dots, field.text.items, field.width)
+					mask(&dots, field.text.items, span)
 				else
-					tail(field.text.items, field.width);
+					tail(field.text.items, span);
 				if (focused) {
 					// After the last character, where the next one will go.
-					app.type_cursor = .{ .row = line, .col = column + @min(term.width(shown), field.width -| 1) };
+					app.type_cursor = .{ .row = line, .col = at + @min(term.width(shown), span -| 1) };
 				}
-				pad(app, shown, field.width, false);
-				column += field.width;
+				// A row too narrow for its labels puts the label inside the empty
+				// field instead of dropping it: five fields in a line still say what
+				// they are, and the moment one is filled in it speaks for itself.
+				if (shown.len == 0 and packed_row and packed_label == 0) {
+					screen.style(.{
+						.bg = C.selected,
+						.fg = C.faint,
+						.italic = true,
+						.underline = true,
+						.underline_colour = if (focused) C.accent else C.faint,
+					});
+					pad(app, field.label, span, false);
+				} else {
+					pad(app, shown, span, false);
+				}
+				at += span;
 				screen.style(.{ .bg = C.selected });
-				column += write(app, "  ", room(width, column, left));
+				at += write(app, "  ", room(inner, at, indent));
 			},
 		}
+		// What the value is, rather than what it is called: a column's type belongs
+		// beside the field and not inside the name of it.
+		if (field.after.len != 0) {
+			screen.style(.{ .bg = C.selected, .fg = C.faint });
+			at += write(app, field.after, room(inner, at, indent));
+			screen.style(.{ .bg = C.selected });
+			at += write(app, "  ", room(inner, at, indent));
+		}
 	}
-	while (line + 1 < rows) : (line += 1) {
+	while (line + 1 < 2 + visible) : (line += 1) {
 		screen.moveTo(line + 1, left);
 		screen.style(.{ .bg = C.selected });
 		fill(app, ' ', width);
 	}
 	screen.reset();
-	box(app, 1, outer_left, outer_width, rows, form.title, form.hint, C.accent);
+	box(app, 1, outer_left, outer_width, visible + 2, form.title, form.hint, C.accent);
 }
 
 /// A password as dots, one per character, up to what the field can show.
