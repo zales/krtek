@@ -185,11 +185,14 @@ jobs:
           # a backslash ends up in a release nobody can edit afterwards.
           cat > notes.md <<'NOTES'
           A database manager for the terminal: SQLite, PostgreSQL, MySQL/MariaDB,
-          Redis and Kafka, behind one interface.
+          Redis, Kafka, S3, Azure Blob, RabbitMQ, SFTP and Kubernetes, behind one
+          interface.
 
           Every archive holds one binary that **needs nothing installed**. SQLite,
-          libpq, the MariaDB connector and OpenSSL are linked into it; Redis and Kafka
-          are spoken directly, protocol and all.
+          libpq, the MariaDB connector, libssh2 and OpenSSL are linked into it; Redis,
+          Kafka, S3, Azure Blob, RabbitMQ and the Kubernetes API are spoken directly,
+          protocol and all - down to the WebSocket a shell in a container needs, so no
+          kubectl either.
 
           The Linux binaries are static against musl and run on any distribution. The
           macOS ones leave only Apple's own libraries dynamic. Both are built for a
@@ -222,7 +225,103 @@ jobs:
             artifacts/krtek.rb
 
       # The tap picks the formula up from this release on its own - see the
-      # comment in packaging/formula.sh.
+      # comment in packaging/formula.sh. It is written a second time by the
+      # `formula` job below, once there are bottles to name in it.
+
+  # Bottles, and not for speed. Homebrew runs its build-from-source checks on any
+  # formula it cannot pour, and one of those refuses to install anything at all
+  # when the machine's Xcode is older than its macOS - which happens to everybody
+  # running a beta macOS before the matching Xcode ships. This formula compiles
+  # nothing, so that check is answering a question nobody asked, and a bottle is
+  # the only way left to say so: `bottle :unneeded` was removed from Homebrew.
+  #
+  # One bottle per architecture is enough, because Homebrew falls back to a bottle
+  # built for an older macOS when there is none for the running one -
+  # `find_older_compatible_tag`. So these do not need rebuilding every September.
+  #
+  # macOS only, deliberately. The check being answered here is a macOS one, and
+  # Homebrew on Linux would rather build from source than be handed a bottle from
+  # a runner image nobody controls. Linux has the APT repository anyway.
+  bottles:
+    name: bottle-${{ matrix.runner }}
+    needs: release
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-15, macos-15-intel]
+    steps:
+      - name: the formula this release just published
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="${{ inputs.tag || github.ref_name }}"
+          gh release download "$version" --repo "$GITHUB_REPOSITORY" --pattern krtek.rb --dir .
+
+      - name: build the bottle
+        run: |
+          version="${{ inputs.tag || github.ref_name }}"
+          # Homebrew will not load a formula that is not in a tap, so it gets one
+          # of its own. Which tap it is built in has nothing to do with the tap it
+          # will be poured from: a bottle is named for the formula and its
+          # version, and nothing else.
+          brew tap-new krtek/bottling
+          cp krtek.rb "$(brew --repository krtek/bottling)/Formula/krtek.rb"
+          # Newer Homebrew will not load a formula from a tap nobody has vouched
+          # for; older Homebrew has no such command and does not need one.
+          brew trust --tap krtek/bottling || true
+          brew install --build-bottle krtek/bottling/krtek
+          brew bottle --json --no-rebuild \
+            --root-url="https://github.com/$GITHUB_REPOSITORY/releases/download/$version" \
+            krtek/bottling/krtek
+          ls -l ./*.bottle.*
+
+      - name: attach it to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="${{ inputs.tag || github.ref_name }}"
+          gh release upload "$version" --repo "$GITHUB_REPOSITORY" --clobber ./*.bottle.tar.gz
+
+      # The JSON says which tag and which checksum, which is what the formula has
+      # to name; the tarball is already on the release for Homebrew to fetch.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bottle-${{ matrix.runner }}
+          path: "*.bottle.json"
+
+  # And the formula again, this time naming the bottles. Written over the one the
+  # release already has, because the tap fetches whatever is attached: until this
+  # runs, an install still works and simply builds from source.
+  formula:
+    needs: bottles
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: bottles
+          pattern: bottle-*
+          merge-multiple: true
+
+      - name: the formula, with the bottles in it
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="${{ inputs.tag || github.ref_name }}"
+          # The archive checksums it also names, from the release itself.
+          gh release download "$version" --repo "$GITHUB_REPOSITORY" \
+            --pattern '*.tar.gz.sha256' --dir bottles
+          ./packaging/formula.sh "$version" bottles > krtek.rb
+          cat krtek.rb
+          gh release upload "$version" --repo "$GITHUB_REPOSITORY" --clobber krtek.rb
 
   # And the APT repository on GitHub Pages, from the .deb files the release just
   # attached. Called, not triggered: see the comment at the top of apt.yml.
