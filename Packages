@@ -1,0 +1,398 @@
+Package: krtek
+Version: 0.4.1-1
+Architecture: amd64
+Maintainer: Ondrej Zalesky <o.zalesky@gmail.com>
+Installed-Size: 8580
+Filename: ./krtek_0.4.1-1_amd64.deb
+Size: 3168346
+MD5sum: ef5e1c9934e8d8ec280d61a60a130dc6
+SHA1: 95a77e4f5b9cc42be94eabc61a2a0d815c88c352
+SHA256: a29412659365aaf9655446ab93320c672997664112775f30d0e4f3057c00522a
+Section: database
+Priority: optional
+Homepage: https://github.com/zales/krtek
+Description: database manager for the terminal
+ krtek browses, edits, alters, dumps and imports a database on a text screen,
+ with SQLite, PostgreSQL, MySQL/MariaDB and Redis behind one interface.
+ .
+ It needs nothing installed: the client libraries are linked into the binary,
+ which is static all the way down, and Redis is spoken directly.
+ .
+ A statement that takes too long can be given up on, a password is kept only
+ where the connection says, and ctrl+k finds any command by a few letters of
+ its name.
+
+Package: krtek
+Version: 0.4.1-1
+Architecture: arm64
+Maintainer: Ondrej Zalesky <o.zalesky@gmail.com>
+Installed-Size: 7908
+Filename: ./krtek_0.4.1-1_arm64.deb
+Size: 3505384
+MD5sum: e43dbe0bd981b1230996a9160bb39224
+SHA1: 2a08d3cd6d3ea25365ef19916f3550adfa9ef4de
+SHA256: b5d5e62ffd1568fde1fc666d26e460f6c8915a862a9c1734e0925e0c34e53478
+Section: database
+Priority: optional
+Homepage: https://github.com/zales/krtek
+Description: database manager for the terminal
+ krtek browses, edits, alters, dumps and imports a database on a text screen,
+ with SQLite, PostgreSQL, MySQL/MariaDB and Redis behind one interface.
+ .
+ It needs nothing installed: the client libraries are linked into the binary,
+ which is static all the way down, and Redis is spoken directly.
+ .
+ A statement that takes too long can be given up on, a password is kept only
+ where the connection says, and ctrl+k finds any command by a few letters of
+ its name.
+
+Package: krtek
+Version: 0.5.0-1
+Architecture: arm64
+Maintainer: Ondrej Zalesky <o.zalesky@gmail.com>
+Installed-Size: 8188
+Filename: ./krtek_0.5.0-1_arm64.deb
+Size: 3605248
+MD5sum: dadfa0c9c4ce052a896f3358a9bdd66a
+SHA1: 2431c4eb6e49d5ba237fbfd7ef8172dce837ff57
+SHA256: 438240556cfb1ba1542adf4122e281be3a4e5be20407b3c780144f7358a5ec00
+Section: database
+Priority: optional
+Homepage: https://github.com/zales/krtek
+Description: database manager for the terminal
+ krtek browses, edits, alters, dumps and imports a database on a text screen,
+ with SQLite, PostgreSQL, MySQL/MariaDB and Redis behind one interface.
+ .
+ It needs nothing installed: the client libraries are linked into the binary,
+ which is static all the way down, and Redis is spoken directly.
+ .
+ A statement that takes too long can be given up on, a password is kept only
+ where the connection says, and ctrl+k finds any command by a few letters of
+ its name.
+
+Package: krtek
+Version: 0.5.0-1
+Architecture: amd64
+Maintainer: Ondrej Zalesky <o.zalesky@gmail.com>
+Installed-Size: 8904
+Filename: ./krtek_0.5.0-1_amd64.deb
+Size: 3285914
+MD5sum: 1884a6a1ddd971148438ec63a894bead
+SHA1: 56cf7b2276dd2ee67d3b48a8f4209d0775321a8a
+SHA256: 3c208013a49eee722af32c69c80c81d9ebdfa4204cbff64a876f0d394cdb2b3d
+Section: database
+Priority: optional
+Homepage: https://github.com/zales/krtek
+Description: database manager for the terminal
+ krtek browses, edits, alters, dumps and imports a database on a text screen,
+ with SQLite, PostgreSQL, MySQL/MariaDB and Redis behind one interface.
+ .
+ It needs nothing installed: the client libraries are linked into the binary,
+ which is static all the way down, and Redis is spoken directly.
+ .
+ A statement that takes too long can be given up on, a password is kept only
+ where the connection says, and ctrl+k finds any command by a few letters of
+ its name.
+
+Package: krtek
+Version: 0.6.0-1
+Architecture: arm64
+Maintainer: Ondrej Zalesky <o.zalesky@gmail.com>
+Installed-Size: 8468
+Filename: ./krtek_0.6.0-1_arm64.deb
+Size: 3726480
+MD5sum: da76344e48fc3abb6fc0fdcda8b7027a
+SHA1: 2eb60a5cfa8bd0db75b36979e230d4cf7c685945
+SHA256: 1aac674c00c40728bfc6469fdefaed262cd9d255fd09f7f1c0ca00d811afdc37
+Section: database
+Priority: optional
+Homepage: https://github.com/zales/krtek
+Description: database manager for the terminal
+ krtek browses, edits, alters, dumps and imports a database on a text screen,
+ with SQLite, PostgreSQL, MySQL/MariaDB, Redis, Kafka, S3 and RabbitMQ behind
+ one interface.
+ .
+ It needs nothing installed: the client libraries are linked into the binary,
+ which is static all the way down, and Redis, Kafka, S3 and RabbitMQ are spoken
+ directly.
+ .
+ A statement that takes too long can be given up on, a password is kept only
+ where the connection says, and ctrl+k finds any command by a few letters of
+ its name.
+
+Package: krtek
+Version: 0.6.0-1
+Architecture: amd64
+Maintainer: Ondrej Zalesky <o.zalesky@gmail.com>
+Installed-Size: 9240
+Filename: ./krtek_0.6.0-1_amd64.deb
+Size: 3408684
+MD5sum: e896217f39b8951280e68f2ccaaac33b
+SHA1: 597f9953b85b2fe95ee9e113bfbdfdee3c3e16b3
+SHA256: fba3949420bf4000d78099f1498180e6f9e874bfa61613477004f1043d44c1f7
+Section: database
+Priority: optional
+Homepage: https://github.com/zales/krtek
+Description: database manager for the terminal
+ krtek browses, edits, alters, dumps and imports a database on a text screen,
+ with SQLite, PostgreSQL, MySQL/MariaDB, Redis, Kafka, S3 and RabbitMQ behind
+ one interface.
+ .
+ It needs nothing installed: the client libraries are linked into the binary,
+ which is static all the way down, and Redis, Kafka, S3 and RabbitMQ are spoken
+ directly.
+ .
+ A statement that takes too long can be given up on, a password is kept only
+ where the connection says, and ctrl+k finds any command by a few letters of
+ its name.
+
+Package: krtek
+Version: 0.7.0-1
+Architecture: amd64
+Maintainer: Ondrej Zalesky <o.zalesky@gmail.com>
+Installed-Size: 9656
+Filename: ./krtek_0.7.0-1_amd64.deb
+Size: 3556702
+MD5sum: 042423336fe7d77335317cfb89554d19
+SHA1: f55fee6684a07300feaa19e68446119226690d02
+SHA256: 4aaa7eea368fcdf494f07b1d111a9b5522015a6ec80f522e1266578953fcd39d
+Section: database
+Priority: optional
+Homepage: https://github.com/zales/krtek
+Description: database manager for the terminal
+ krtek browses, edits, alters, dumps and imports a database on a text screen,
+ with SQLite, PostgreSQL, MySQL/MariaDB, Redis, Kafka, S3, Azure Blob,
+ RabbitMQ and SFTP behind one interface.
+ .
+ It needs nothing installed: the client libraries are linked into the binary,
+ which is static all the way down, and the rest are spoken directly.
+ .
+ A statement that takes too long can be given up on, a password is kept only
+ where the connection says, and ctrl+k finds any command by a few letters of
+ its name.
+
+Package: krtek
+Version: 0.7.0-1
+Architecture: arm64
+Maintainer: Ondrej Zalesky <o.zalesky@gmail.com>
+Installed-Size: 8856
+Filename: ./krtek_0.7.0-1_arm64.deb
+Size: 3864776
+MD5sum: f202c6a0d16331518cbb8730d356ed51
+SHA1: 9efcdd58d25fa4b760aa90f2de6fa6a928aec517
+SHA256: c779634c8742ef6461d0a9023d997c640506a57b17b0a8c409231f523138d2cd
+Section: database
+Priority: optional
+Homepage: https://github.com/zales/krtek
+Description: database manager for the terminal
+ krtek browses, edits, alters, dumps and imports a database on a text screen,
+ with SQLite, PostgreSQL, MySQL/MariaDB, Redis, Kafka, S3, Azure Blob,
+ RabbitMQ and SFTP behind one interface.
+ .
+ It needs nothing installed: the client libraries are linked into the binary,
+ which is static all the way down, and the rest are spoken directly.
+ .
+ A statement that takes too long can be given up on, a password is kept only
+ where the connection says, and ctrl+k finds any command by a few letters of
+ its name.
+
+Package: krtek
+Version: 0.7.1-1
+Architecture: amd64
+Maintainer: Ondrej Zalesky <o.zalesky@gmail.com>
+Installed-Size: 9656
+Filename: ./krtek_0.7.1-1_amd64.deb
+Size: 3556722
+MD5sum: 2df8496c31a24ec4399910c9530bb9d8
+SHA1: e948cfc000063e2e49535f3546bc7374f97a49d4
+SHA256: 6e2133bf99bb697999346b731411790a190e70c93d530bf169ef183169a58c1f
+Section: database
+Priority: optional
+Homepage: https://github.com/zales/krtek
+Description: database manager for the terminal
+ krtek browses, edits, alters, dumps and imports a database on a text screen,
+ with SQLite, PostgreSQL, MySQL/MariaDB, Redis, Kafka, S3, Azure Blob,
+ RabbitMQ and SFTP behind one interface.
+ .
+ It needs nothing installed: the client libraries are linked into the binary,
+ which is static all the way down, and the rest are spoken directly.
+ .
+ A statement that takes too long can be given up on, a password is kept only
+ where the connection says, and ctrl+k finds any command by a few letters of
+ its name.
+
+Package: krtek
+Version: 0.7.1-1
+Architecture: arm64
+Maintainer: Ondrej Zalesky <o.zalesky@gmail.com>
+Installed-Size: 8856
+Filename: ./krtek_0.7.1-1_arm64.deb
+Size: 3864792
+MD5sum: 39b6cbceb9dc11f6c3621e75db3effc2
+SHA1: 489cbaad1be49b7acb023f451abf8c1d9d4ef82c
+SHA256: c0f0eef842f26686111403914d48b03b5518a6afc80def94067129f0c587b979
+Section: database
+Priority: optional
+Homepage: https://github.com/zales/krtek
+Description: database manager for the terminal
+ krtek browses, edits, alters, dumps and imports a database on a text screen,
+ with SQLite, PostgreSQL, MySQL/MariaDB, Redis, Kafka, S3, Azure Blob,
+ RabbitMQ and SFTP behind one interface.
+ .
+ It needs nothing installed: the client libraries are linked into the binary,
+ which is static all the way down, and the rest are spoken directly.
+ .
+ A statement that takes too long can be given up on, a password is kept only
+ where the connection says, and ctrl+k finds any command by a few letters of
+ its name.
+
+Package: krtek
+Version: 0.7.2-1
+Architecture: arm64
+Maintainer: Ondrej Zalesky <o.zalesky@gmail.com>
+Installed-Size: 8856
+Filename: ./krtek_0.7.2-1_arm64.deb
+Size: 3864768
+MD5sum: 84bc63cc64be6142be6a1bd0a2a965ab
+SHA1: 23b8e95a4cd3f0a96ef267ea21417af875c06fd8
+SHA256: d1e96cecb6d960158fda8f66f75ddcfeb2426dd4319298f0171965aeca84d435
+Section: database
+Priority: optional
+Homepage: https://github.com/zales/krtek
+Description: database manager for the terminal
+ krtek browses, edits, alters, dumps and imports a database on a text screen,
+ with SQLite, PostgreSQL, MySQL/MariaDB, Redis, Kafka, S3, Azure Blob,
+ RabbitMQ and SFTP behind one interface.
+ .
+ It needs nothing installed: the client libraries are linked into the binary,
+ which is static all the way down, and the rest are spoken directly.
+ .
+ A statement that takes too long can be given up on, a password is kept only
+ where the connection says, and ctrl+k finds any command by a few letters of
+ its name.
+
+Package: krtek
+Version: 0.7.2-1
+Architecture: amd64
+Maintainer: Ondrej Zalesky <o.zalesky@gmail.com>
+Installed-Size: 9656
+Filename: ./krtek_0.7.2-1_amd64.deb
+Size: 3556092
+MD5sum: 4499c875791061c5c905114ac53ccda1
+SHA1: 947c5c362d5bd66afef2aaaed138de642d867389
+SHA256: 13a51cddc76695b05a996b6f7cda801c9c0edd8e9f54b0bb77eeceff256961c5
+Section: database
+Priority: optional
+Homepage: https://github.com/zales/krtek
+Description: database manager for the terminal
+ krtek browses, edits, alters, dumps and imports a database on a text screen,
+ with SQLite, PostgreSQL, MySQL/MariaDB, Redis, Kafka, S3, Azure Blob,
+ RabbitMQ and SFTP behind one interface.
+ .
+ It needs nothing installed: the client libraries are linked into the binary,
+ which is static all the way down, and the rest are spoken directly.
+ .
+ A statement that takes too long can be given up on, a password is kept only
+ where the connection says, and ctrl+k finds any command by a few letters of
+ its name.
+
+Package: krtek
+Version: 0.8.0-1
+Architecture: amd64
+Maintainer: Ondrej Zalesky <o.zalesky@gmail.com>
+Installed-Size: 9772
+Filename: ./krtek_0.8.0-1_amd64.deb
+Size: 3597812
+MD5sum: 86d7e5f6d438f4cd3f3417011b0e7f01
+SHA1: b852c3dd6341aee2b21fa81437e13509eee0b693
+SHA256: 87d585d3279496643d15967bb2fb92161b61ce70a6f18700fbd60656c98e2644
+Section: database
+Priority: optional
+Homepage: https://github.com/zales/krtek
+Description: database manager for the terminal
+ krtek browses, edits, alters, dumps and imports a database on a text screen,
+ with SQLite, PostgreSQL, MySQL/MariaDB, Redis, Kafka, S3, Azure Blob,
+ RabbitMQ and SFTP behind one interface.
+ .
+ It needs nothing installed: the client libraries are linked into the binary,
+ which is static all the way down, and the rest are spoken directly.
+ .
+ A statement that takes too long can be given up on, a password is kept only
+ where the connection says, and ctrl+k finds any command by a few letters of
+ its name.
+
+Package: krtek
+Version: 0.8.0-1
+Architecture: arm64
+Maintainer: Ondrej Zalesky <o.zalesky@gmail.com>
+Installed-Size: 8952
+Filename: ./krtek_0.8.0-1_arm64.deb
+Size: 3904014
+MD5sum: 8929356b839e2fb118d01c5cb490d125
+SHA1: 6752380097e1f30ef428861414f7baa6d26cd884
+SHA256: fc3473acfa025a40b0b60d8475ffc6ccfd0d3dfab8789af1644c40763a24a06a
+Section: database
+Priority: optional
+Homepage: https://github.com/zales/krtek
+Description: database manager for the terminal
+ krtek browses, edits, alters, dumps and imports a database on a text screen,
+ with SQLite, PostgreSQL, MySQL/MariaDB, Redis, Kafka, S3, Azure Blob,
+ RabbitMQ and SFTP behind one interface.
+ .
+ It needs nothing installed: the client libraries are linked into the binary,
+ which is static all the way down, and the rest are spoken directly.
+ .
+ A statement that takes too long can be given up on, a password is kept only
+ where the connection says, and ctrl+k finds any command by a few letters of
+ its name.
+
+Package: krtek
+Version: 0.9.0-1
+Architecture: arm64
+Maintainer: Ondrej Zalesky <o.zalesky@gmail.com>
+Installed-Size: 9180
+Filename: ./krtek_0.9.0-1_arm64.deb
+Size: 3975496
+MD5sum: a731c1f3e1642902c331e84ed7852f9c
+SHA1: 3013c6c27d9ec41ada3d63e4446a84c61f701676
+SHA256: cab7d41f19789ddbc2f45b21248b5d26b4108658c551a59a9c8688dcd7955864
+Section: database
+Priority: optional
+Homepage: https://github.com/zales/krtek
+Description: database manager for the terminal
+ krtek browses, edits, alters, dumps and imports a database on a text screen,
+ with SQLite, PostgreSQL, MySQL/MariaDB, Redis, Kafka, S3, Azure Blob,
+ RabbitMQ and SFTP behind one interface.
+ .
+ It needs nothing installed: the client libraries are linked into the binary,
+ which is static all the way down, and the rest are spoken directly.
+ .
+ A statement that takes too long can be given up on, a password is kept only
+ where the connection says, and ctrl+k finds any command by a few letters of
+ its name.
+
+Package: krtek
+Version: 0.9.0-1
+Architecture: amd64
+Maintainer: Ondrej Zalesky <o.zalesky@gmail.com>
+Installed-Size: 10088
+Filename: ./krtek_0.9.0-1_amd64.deb
+Size: 3708312
+MD5sum: 71992a15c68c42d60989ede5d472f9cb
+SHA1: 7c7e293353988409a7167758fc046dcf476b35d2
+SHA256: 7c46e8177604280e11a4141865940495a22866e382491f41ab49e4237b9a3754
+Section: database
+Priority: optional
+Homepage: https://github.com/zales/krtek
+Description: database manager for the terminal
+ krtek browses, edits, alters, dumps and imports a database on a text screen,
+ with SQLite, PostgreSQL, MySQL/MariaDB, Redis, Kafka, S3, Azure Blob,
+ RabbitMQ and SFTP behind one interface.
+ .
+ It needs nothing installed: the client libraries are linked into the binary,
+ which is static all the way down, and the rest are spoken directly.
+ .
+ A statement that takes too long can be given up on, a password is kept only
+ where the connection says, and ctrl+k finds any command by a few letters of
+ its name.
+

@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>krtek - a database manager for the terminal</title>
+<!-- The colours are the ones the program itself draws with, taken from the
+     screenshots below, which are drawn by the program. -->
+<style>
+:root {
+	--bg: #111114;
+	--panel: #191920;
+	--line: #2e2e36;
+	--ink: #e0e0e6;
+	--quiet: #8a8a94;
+	--blue: #8aa7f0;
+	--cyan: #63a8d8;
+	--green: #71c68f;
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+	background: var(--bg);
+	color: var(--ink);
+	font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans", Helvetica, Arial, sans-serif;
+	line-height: 1.65;
+}
+.page { max-width: 60rem; margin: 0 auto; padding: 0 1.25rem 5rem; }
+header { padding: 4rem 0 2.5rem; border-bottom: 1px solid var(--line); }
+h1 { font-size: 3rem; letter-spacing: -0.02em; }
+h1 span { color: var(--blue); }
+.tagline { font-size: 1.2rem; color: var(--quiet); margin-top: 0.35rem; }
+.engines { margin-top: 1.25rem; display: flex; gap: 0.5rem; flex-wrap: wrap; }
+.engine {
+	border: 1px solid var(--line);
+	background: var(--panel);
+	border-radius: 999px;
+	padding: 0.2rem 0.8rem;
+	font-size: 0.85rem;
+	color: var(--quiet);
+}
+h2 { font-size: 1.35rem; margin: 3rem 0 0.75rem; }
+h2::before { content: "# "; color: var(--blue); }
+p { margin: 0.75rem 0; }
+a { color: var(--cyan); }
+code, pre {
+	font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+	font-size: 0.9rem;
+}
+code { color: var(--green); }
+pre {
+	background: var(--panel);
+	border: 1px solid var(--line);
+	border-radius: 10px;
+	padding: 0.9rem 1.1rem;
+	overflow-x: auto;
+	color: var(--ink);
+}
+pre .c { color: var(--quiet); }
+img { display: block; width: 100%; height: auto; margin: 1rem 0 0; border-radius: 10px; }
+figure { margin: 1.5rem 0; }
+figcaption { color: var(--quiet); font-size: 0.9rem; }
+ul { margin: 0.75rem 0 0.75rem 1.25rem; }
+li { margin: 0.25rem 0; }
+footer { margin-top: 3.5rem; padding-top: 1.5rem; border-top: 1px solid var(--line); color: var(--quiet); font-size: 0.9rem; }
+.note { border-left: 2px solid var(--blue); padding-left: 0.9rem; color: var(--quiet); }
+</style>
+</head>
+<body>
+<div class="page">
+
+<header>
+	<h1><span>krtek</span></h1>
+	<p class="tagline">A database manager for the terminal. Browse, edit, alter, dump, import - every one of them a key press.</p>
+	<div class="engines">
+		<span class="engine">SQLite</span>
+		<span class="engine">PostgreSQL</span>
+		<span class="engine">MySQL / MariaDB</span>
+		<span class="engine">Redis</span>
+		<span class="engine">Kafka</span>
+		<span class="engine">S3</span>
+		<span class="engine">Azure Blob</span>
+		<span class="engine">RabbitMQ</span>
+		<span class="engine">SFTP</span>
+		<span class="engine">Kubernetes</span>
+		<span class="engine">one static binary</span>
+	</div>
+	<img src="grid.svg" alt="krtek browsing a table">
+</header>
+
+<h2>apt</h2>
+
+<p>This page is also the APT repository, so Debian and Ubuntu can install and
+upgrade krtek the ordinary way:</p>
+
+<pre><code>sudo install -d /etc/apt/keyrings
+sudo curl -fsSLo /etc/apt/keyrings/krtek.gpg \
+  https://zales.github.io/krtek/krtek-archive-keyring.gpg
+echo "deb [signed-by=/etc/apt/keyrings/krtek.gpg] https://zales.github.io/krtek ./" \
+  | sudo tee /etc/apt/sources.list.d/krtek.list
+sudo apt update
+sudo apt install krtek</code></pre>
+
+<p class="note">The metadata is signed, so apt checks it the way it checks Debian's
+own repositories - no <code>trusted=yes</code> anywhere. The key above is the one
+that signs it, and the build verifies its own signature before publishing, because a
+repository whose signature does not check out breaks <code>apt update</code> for
+everyone who already trusts it.</p>
+
+<h2>Homebrew</h2>
+
+<pre><code>brew install zales/krtek/krtek</code></pre>
+
+<p>macOS and Linux, Apple silicon and Intel, arm64 and x86_64.</p>
+
+<h2>Or just the binary</h2>
+
+<pre><code>tar xzf krtek-*.tar.gz &amp;&amp; ./krtek-*/krtek</code></pre>
+
+<p><strong>It needs nothing installed.</strong> SQLite, libpq, the MariaDB
+connector, libssh2 and OpenSSL are linked into the binary, and Redis, Kafka, S3,
+Azure Blob, RabbitMQ and the Kubernetes API are spoken directly - down to the
+WebSocket a shell in a container needs, so no <code>kubectl</code> either.
+The Linux builds are static against musl and run on any distribution; the macOS
+builds leave only Apple's own libraries dynamic.</p>
+
+<h2>What it is like</h2>
+
+<figure>
+	<img src="editor.svg" alt="the SQL editor with syntax highlighting">
+	<figcaption>SQL with highlighting, <code>tab</code> completing table and column
+	names, <code>ctrl+s</code> running it - and <code>ctrl+c</code> giving up on a
+	statement that takes too long, on every engine.</figcaption>
+</figure>
+
+<figure>
+	<img src="palette.svg" alt="the command palette">
+	<figcaption><code>ctrl+k</code> finds any command by a few letters of its name
+	and shows the key that runs it, so using it teaches the key map.</figcaption>
+</figure>
+
+<figure>
+	<img src="connections.svg" alt="the saved connections">
+	<figcaption>Connections are saved, and each one says where its password may be
+	kept: nowhere, the config file, or the macOS keychain. Every context of your
+	kubeconfig is offered here too, without being saved into anything.</figcaption>
+</figure>
+
+<h2>And a cluster is a database too</h2>
+
+<figure>
+	<img src="kubernetes.svg" alt="pods listed as a table">
+	<figcaption>A resource kind is a table and a namespace is a schema. The columns
+	are the ones <code>kubectl</code> prints, including the ones that have to be
+	worked out - an age, a ready count, and the status that says
+	<code>CrashLoopBackOff</code> where the phase would have said
+	<code>Running</code>.</figcaption>
+</figure>
+
+<figure>
+	<img src="pod.svg" alt="one pod, opened">
+	<figcaption><code>enter</code> opens the object: what each container is doing,
+	what the last one died of and with what exit code, and the events - which is
+	where a failed image pull is written down and nowhere else. Along the bottom is
+	what can be done to it, logs and a shell included.</figcaption>
+</figure>
+
+<h2>The rest</h2>
+
+<ul>
+	<li><a href="https://github.com/zales/krtek">The source and the README</a>, which
+		says what it does and how it is put together.</li>
+	<li><a href="https://github.com/zales/krtek/releases/latest">The latest release</a>:
+		<code>.tar.gz</code>, <code>.deb</code> and the Homebrew formula, for macOS and
+		Linux on both architectures.</li>
+	<li><code>man krtek</code> once it is installed, and <code>?</code> inside the app
+		for the whole key map.</li>
+</ul>
+
+<footer>
+	MIT. What is linked in keeps its own licence - SQLite is public domain, libpq is
+	under the PostgreSQL licence, the MariaDB connector under the LGPL, OpenSSL under
+	Apache 2.0.
+</footer>
+
+</div>
+</body>
+</html>

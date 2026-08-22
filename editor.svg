@@ -1,0 +1,104 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="868" height="316" viewBox="0 0 868 316" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13.0">
+<rect width="100%" height="100%" rx="8" fill="#111114"/>
+<rect x="14.0" y="14.0" width="59.3" height="18.0" fill="#26262c"/>
+<rect x="72.8" y="14.0" width="109.7" height="18.0" fill="#26262c"/>
+<rect x="182.0" y="14.0" width="672.5" height="18.0" fill="#26262c"/>
+<rect x="14.0" y="50.0" width="202.1" height="18.0" fill="#2e2e36"/>
+<rect x="215.6" y="50.0" width="8.9" height="18.0" fill="#2e2e36"/>
+<rect x="232.4" y="50.0" width="8.9" height="18.0" fill="#26262c"/>
+<rect x="249.2" y="50.0" width="42.5" height="18.0" fill="#2e2e36"/>
+<rect x="291.2" y="50.0" width="50.9" height="18.0" fill="#2e2e36"/>
+<rect x="341.6" y="50.0" width="50.9" height="18.0" fill="#2e2e36"/>
+<rect x="392.0" y="50.0" width="8.9" height="18.0" fill="#2e2e36"/>
+<rect x="400.4" y="50.0" width="42.5" height="18.0" fill="#2e2e36"/>
+<rect x="442.4" y="50.0" width="8.9" height="18.0" fill="#2e2e36"/>
+<rect x="450.8" y="50.0" width="59.3" height="18.0" fill="#2e2e36"/>
+<rect x="509.6" y="50.0" width="34.1" height="18.0" fill="#2e2e36"/>
+<rect x="543.2" y="50.0" width="294.5" height="18.0" fill="#2e2e36"/>
+<rect x="845.6" y="50.0" width="8.9" height="18.0" fill="#26262c"/>
+<rect x="249.2" y="68.0" width="42.5" height="18.0" fill="#2e2e36"/>
+<rect x="291.2" y="68.0" width="42.5" height="18.0" fill="#2e2e36"/>
+<rect x="333.2" y="68.0" width="50.9" height="18.0" fill="#2e2e36"/>
+<rect x="383.6" y="68.0" width="8.9" height="18.0" fill="#2e2e36"/>
+<rect x="392.0" y="68.0" width="8.9" height="18.0" fill="#2e2e36"/>
+<rect x="400.4" y="68.0" width="34.1" height="18.0" fill="#2e2e36"/>
+<rect x="434.0" y="68.0" width="8.9" height="18.0" fill="#2e2e36"/>
+<rect x="442.4" y="68.0" width="126.5" height="18.0" fill="#2e2e36"/>
+<rect x="568.4" y="68.0" width="269.3" height="18.0" fill="#2e2e36"/>
+<rect x="249.2" y="86.0" width="42.5" height="18.0" fill="#2e2e36"/>
+<rect x="291.2" y="86.0" width="42.5" height="18.0" fill="#2e2e36"/>
+<rect x="333.2" y="86.0" width="8.9" height="18.0" fill="#2e2e36"/>
+<rect x="341.6" y="86.0" width="17.3" height="18.0" fill="#2e2e36"/>
+<rect x="358.4" y="86.0" width="50.9" height="18.0" fill="#2e2e36"/>
+<rect x="408.8" y="86.0" width="34.1" height="18.0" fill="#2e2e36"/>
+<rect x="442.4" y="86.0" width="395.3" height="18.0" fill="#2e2e36"/>
+<rect x="249.2" y="104.0" width="588.5" height="18.0" fill="#2e2e36"/>
+<rect x="249.2" y="122.0" width="588.5" height="18.0" fill="#2e2e36"/>
+<rect x="249.2" y="140.0" width="588.5" height="18.0" fill="#2e2e36"/>
+<rect x="249.2" y="158.0" width="588.5" height="18.0" fill="#2e2e36"/>
+<rect x="14.0" y="266.0" width="512.9" height="18.0" fill="#26262c"/>
+<rect x="526.4" y="266.0" width="328.1" height="18.0" fill="#26262c"/>
+<text x="14.0" y="27.3" fill="#e0e0e6" font-weight="600" xml:space="preserve" textLength="58.8" lengthAdjust="spacing"> krtek </text>
+<text x="72.8" y="27.3" fill="#8aa7f0" xml:space="preserve" textLength="109.2" lengthAdjust="spacing">/tmp/books.db</text>
+<text x="182.0" y="27.3" fill="#9a9aa6" xml:space="preserve" textLength="672.0" lengthAdjust="spacing">                                                       SQLite 3.50.4  3 objects </text>
+<text x="14.0" y="45.3" fill="#9a9aa6" xml:space="preserve" textLength="210.0" lengthAdjust="spacing"> TABLES &amp; VIEWS          </text>
+<text x="224.0" y="45.3" fill="#8aa7f0" xml:space="preserve" textLength="8.4" lengthAdjust="spacing">┃</text>
+<text x="240.8" y="45.3" fill="#8aa7f0" xml:space="preserve" textLength="16.8" lengthAdjust="spacing">╭─</text>
+<text x="257.6" y="45.3" fill="#8aa7f0" font-weight="600" xml:space="preserve" textLength="42.0" lengthAdjust="spacing"> SQL </text>
+<text x="299.6" y="45.3" fill="#8aa7f0" xml:space="preserve" textLength="546.0" lengthAdjust="spacing">────────────────────────────────────────────────────────────────╮</text>
+<text x="14.0" y="63.3" fill="#8aa7f0" font-weight="600" xml:space="preserve" textLength="201.6" lengthAdjust="spacing"> ▪ authors              </text>
+<text x="215.6" y="63.3" fill="#7c7c88" xml:space="preserve" textLength="8.4" lengthAdjust="spacing">4</text>
+<text x="224.0" y="63.3" fill="#8aa7f0" xml:space="preserve" textLength="8.4" lengthAdjust="spacing">┃</text>
+<text x="240.8" y="63.3" fill="#8aa7f0" xml:space="preserve" textLength="8.4" lengthAdjust="spacing">│</text>
+<text x="249.2" y="63.3" fill="#7c7c88" xml:space="preserve" textLength="42.0" lengthAdjust="spacing">   1 </text>
+<text x="291.2" y="63.3" fill="#8aa7f0" font-weight="600" xml:space="preserve" textLength="50.4" lengthAdjust="spacing">select</text>
+<text x="341.6" y="63.3" fill="#e0e0e6" xml:space="preserve" textLength="50.4" lengthAdjust="spacing"> title</text>
+<text x="392.0" y="63.3" fill="#9a9aa6" xml:space="preserve" textLength="8.4" lengthAdjust="spacing">,</text>
+<text x="400.4" y="63.3" fill="#e0e0e6" xml:space="preserve" textLength="42.0" lengthAdjust="spacing"> year</text>
+<text x="442.4" y="63.3" fill="#9a9aa6" xml:space="preserve" textLength="8.4" lengthAdjust="spacing">,</text>
+<text x="450.8" y="63.3" fill="#e0e0e6" xml:space="preserve" textLength="58.8" lengthAdjust="spacing"> price </text>
+<text x="509.6" y="63.3" fill="#8aa7f0" font-weight="600" xml:space="preserve" textLength="33.6" lengthAdjust="spacing">from</text>
+<text x="543.2" y="63.3" fill="#e0e0e6" xml:space="preserve" textLength="294.0" lengthAdjust="spacing"> books                             </text>
+<text x="837.2" y="63.3" fill="#8aa7f0" xml:space="preserve" textLength="8.4" lengthAdjust="spacing">│</text>
+<text x="14.0" y="81.3" fill="#e0e0e6" xml:space="preserve" textLength="201.6" lengthAdjust="spacing"> ▪ books                </text>
+<text x="215.6" y="81.3" fill="#7c7c88" xml:space="preserve" textLength="8.4" lengthAdjust="spacing">5</text>
+<text x="224.0" y="81.3" fill="#8aa7f0" xml:space="preserve" textLength="8.4" lengthAdjust="spacing">┃</text>
+<text x="240.8" y="81.3" fill="#8aa7f0" xml:space="preserve" textLength="8.4" lengthAdjust="spacing">│</text>
+<text x="249.2" y="81.3" fill="#7c7c88" xml:space="preserve" textLength="42.0" lengthAdjust="spacing">   2 </text>
+<text x="291.2" y="81.3" fill="#8aa7f0" font-weight="600" xml:space="preserve" textLength="42.0" lengthAdjust="spacing">where</text>
+<text x="333.2" y="81.3" fill="#e0e0e6" xml:space="preserve" textLength="50.4" lengthAdjust="spacing"> year </text>
+<text x="383.6" y="81.3" fill="#9a9aa6" xml:space="preserve" textLength="8.4" lengthAdjust="spacing">&lt;</text>
+<text x="400.4" y="81.3" fill="#63a8d8" xml:space="preserve" textLength="33.6" lengthAdjust="spacing">1950</text>
+<text x="442.4" y="81.3" fill="#7c7c88" font-style="italic" xml:space="preserve" textLength="126.0" lengthAdjust="spacing">-- the old ones</text>
+<text x="837.2" y="81.3" fill="#8aa7f0" xml:space="preserve" textLength="8.4" lengthAdjust="spacing">│</text>
+<text x="14.0" y="99.3" fill="#e0e0e6" xml:space="preserve" textLength="201.6" lengthAdjust="spacing"> ~ in_print             </text>
+<text x="215.6" y="99.3" fill="#7c7c88" xml:space="preserve" textLength="8.4" lengthAdjust="spacing">5</text>
+<text x="224.0" y="99.3" fill="#8aa7f0" xml:space="preserve" textLength="8.4" lengthAdjust="spacing">┃</text>
+<text x="240.8" y="99.3" fill="#8aa7f0" xml:space="preserve" textLength="8.4" lengthAdjust="spacing">│</text>
+<text x="249.2" y="99.3" fill="#8aa7f0" xml:space="preserve" textLength="42.0" lengthAdjust="spacing">   3 </text>
+<text x="291.2" y="99.3" fill="#8aa7f0" font-weight="600" xml:space="preserve" textLength="42.0" lengthAdjust="spacing">order</text>
+<text x="341.6" y="99.3" fill="#8aa7f0" font-weight="600" xml:space="preserve" textLength="16.8" lengthAdjust="spacing">by</text>
+<text x="358.4" y="99.3" fill="#e0e0e6" xml:space="preserve" textLength="50.4" lengthAdjust="spacing"> year </text>
+<text x="408.8" y="99.3" fill="#8aa7f0" font-weight="600" xml:space="preserve" textLength="33.6" lengthAdjust="spacing">desc</text>
+<text x="837.2" y="99.3" fill="#8aa7f0" xml:space="preserve" textLength="8.4" lengthAdjust="spacing">│</text>
+<text x="224.0" y="117.3" fill="#8aa7f0" xml:space="preserve" textLength="8.4" lengthAdjust="spacing">┃</text>
+<text x="240.8" y="117.3" fill="#8aa7f0" xml:space="preserve" textLength="8.4" lengthAdjust="spacing">│</text>
+<text x="837.2" y="117.3" fill="#8aa7f0" xml:space="preserve" textLength="8.4" lengthAdjust="spacing">│</text>
+<text x="224.0" y="135.3" fill="#8aa7f0" xml:space="preserve" textLength="8.4" lengthAdjust="spacing">┃</text>
+<text x="240.8" y="135.3" fill="#8aa7f0" xml:space="preserve" textLength="8.4" lengthAdjust="spacing">│</text>
+<text x="837.2" y="135.3" fill="#8aa7f0" xml:space="preserve" textLength="8.4" lengthAdjust="spacing">│</text>
+<text x="224.0" y="153.3" fill="#8aa7f0" xml:space="preserve" textLength="8.4" lengthAdjust="spacing">┃</text>
+<text x="240.8" y="153.3" fill="#8aa7f0" xml:space="preserve" textLength="8.4" lengthAdjust="spacing">│</text>
+<text x="837.2" y="153.3" fill="#8aa7f0" xml:space="preserve" textLength="8.4" lengthAdjust="spacing">│</text>
+<text x="224.0" y="171.3" fill="#8aa7f0" xml:space="preserve" textLength="8.4" lengthAdjust="spacing">┃</text>
+<text x="240.8" y="171.3" fill="#8aa7f0" xml:space="preserve" textLength="8.4" lengthAdjust="spacing">│</text>
+<text x="837.2" y="171.3" fill="#8aa7f0" xml:space="preserve" textLength="8.4" lengthAdjust="spacing">│</text>
+<text x="224.0" y="189.3" fill="#8aa7f0" xml:space="preserve" textLength="8.4" lengthAdjust="spacing">┃</text>
+<text x="240.8" y="189.3" fill="#8aa7f0" xml:space="preserve" textLength="604.8" lengthAdjust="spacing">╰──────────────────────────────────────────────────────────────────────╯</text>
+<text x="224.0" y="207.3" fill="#8aa7f0" xml:space="preserve" textLength="8.4" lengthAdjust="spacing">┃</text>
+<text x="224.0" y="225.3" fill="#8aa7f0" xml:space="preserve" textLength="8.4" lengthAdjust="spacing">┃</text>
+<text x="224.0" y="243.3" fill="#8aa7f0" xml:space="preserve" textLength="8.4" lengthAdjust="spacing">┃</text>
+<text x="224.0" y="261.3" fill="#8aa7f0" xml:space="preserve" textLength="8.4" lengthAdjust="spacing">┃</text>
+<text x="14.0" y="279.3" fill="#71c68f" xml:space="preserve" textLength="512.4" lengthAdjust="spacing"> several statements at once - each one is reported on its own</text>
+<text x="14.0" y="297.3" fill="#7c7c88" xml:space="preserve" textLength="840.0" lengthAdjust="spacing"> ctrl+s runs   tab completes   ctrl+p earlier   ctrl+w word back   esc closes                       </text>
+</svg>
