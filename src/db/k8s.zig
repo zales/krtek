@@ -205,6 +205,9 @@ pub const Db = struct {
 			// Nothing takes a deleted object back, so x asks.
 			.final_deletes = true,
 			.row_noun = "object",
+			.schema_noun = "namespace",
+			// The kinds are what the cluster's API groups say they are.
+			.creates_tables = false,
 			// kubectl apply makes an object; nothing here does.
 			.inserts_rows = false,
 		};

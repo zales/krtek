@@ -241,9 +241,25 @@ fn sidebar(app: *App, width: usize, rows: usize) void {
 		screen.style(.{ .fg = C.accent });
 		_ = write(app, app.filter.items, width - 2);
 	} else if (app.schema.items.len != 0) {
-		_ = write(app, " SCHEMA ", width);
+		// The engine's own word for it, and the key that changes it out at the
+		// right - the same way the filter header shows the `/` that made it, and
+		// the palette puts a key beside every action it lists. A header that says
+		// what it is and not how to change it is where the key goes to be missed.
+		// Upper case, because the other two headings this line can carry are.
+		var shouted: [24]u8 = undefined;
+		const noun = app.conn.caps().schema_noun;
+		const heading = std.ascii.upperString(&shouted, noun[0..@min(noun.len, shouted.len)]);
+		var used: usize = write(app, " ", width);
+		screen.style(.{ .fg = C.dim });
+		used += write(app, heading, width -| used -| 3);
+		used += write(app, " ", width -| used -| 2);
 		screen.style(.{ .fg = C.accent });
-		_ = write(app, app.schema.items, width - 8);
+		used += write(app, app.schema.items, width -| used -| 2);
+		if (width > used + 1) {
+			screen.style(.{ .fg = C.faint });
+			fill(app, ' ', width - used - 2);
+			_ = write(app, "#", 1);
+		}
 	} else {
 		_ = write(app, " TABLES & VIEWS", width);
 	}
@@ -866,7 +882,7 @@ pub const HELP = [_][2][]const u8{
 	.{ "F", "search every table" },
 	.{ "E M", "export, import" },
 	.{ "C c r p s", "copy value, row, page, last SQL" },
-	.{ "O #", "connections, schema" },
+	.{ "O #", "connections, schema or namespace" },
 	.{ ":", "export dump limit text follow open check" },
 	.{ "", "FILES: SFTP, S3, AZURE" },
 	.{ "f", "the two panes: here and the connection" },
@@ -1293,6 +1309,23 @@ fn footerHints(app: *App) []const u8 {
 	if (app.follow_ms != 0 and app.view == .grid) {
 		// The one key worth knowing while the grid moves on its own.
 		return " R stops following   ctrl+k commands   q quit";
+	}
+	// The sidebar's hints depend on the engine: a cluster has namespaces rather
+	// than schemas and no tables anybody creates, and offering either of those in
+	// the wrong words is how a key goes unfound.
+	if (app.view == .grid and app.focus == .sidebar and app.files == null) {
+		const caps = app.conn.caps();
+		var out: std.ArrayListUnmanaged(u8) = .empty;
+		const arena = app.screen.frame.allocator();
+		out.appendSlice(arena, " enter opens   / filter") catch return " enter opens   / filter";
+		if (caps.schemas or caps.databases) {
+			out.print(arena, "   # {s}", .{caps.schema_noun}) catch {};
+		}
+		if (caps.creates_tables) {
+			out.appendSlice(arena, "   c create table") catch {};
+		}
+		out.appendSlice(arena, "   E export   ctrl+k commands   q quit") catch {};
+		return out.items;
 	}
 	return switch (app.view) {
 		.connections => " enter connect   a add   e edit   d remove   ctrl+k commands   q quit",

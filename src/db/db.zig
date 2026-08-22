@@ -179,6 +179,14 @@ pub const Caps = struct {
 	final_deletes: bool = false,
 	/// What one row is called, where "row" is the wrong word for it.
 	row_noun: []const u8 = "row",
+	/// And what a schema is called. PostgreSQL has schemas, MySQL calls the same
+	/// switch a database, RabbitMQ a vhost and Kubernetes a namespace - and a
+	/// screen that says "schema" to somebody looking at a cluster is asking them
+	/// to translate.
+	schema_noun: []const u8 = "schema",
+	/// A table can be created. False where the tables are fixed: the kinds a
+	/// cluster has are what its API groups say it has.
+	creates_tables: bool = true,
 	/// A row can be added. False where the rows are things this program can read
 	/// and remove but has no business making: a Kubernetes object is a document
 	/// with a controller behind it, and an empty grid there must not offer `i`.

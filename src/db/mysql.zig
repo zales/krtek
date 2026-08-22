@@ -167,6 +167,7 @@ pub const Db = struct {
 			.rebuild_to_alter = false,
 			.databases = true,
 			.label = "MySQL",
+			.schema_noun = "database",
 			.text_cast = "CHAR",
 		};
 	}

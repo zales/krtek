@@ -160,6 +160,7 @@ pub const Db = struct {
 			.schemas = true,
 			.databases = true,
 			.label = "RabbitMQ",
+			.schema_noun = "vhost",
 			.speaks_sql = false,
 		};
 	}
