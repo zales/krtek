@@ -15,6 +15,7 @@
 //! signatures computed elsewhere, so they say something this file does not.
 
 const std = @import("std");
+const clock = @import("../clock.zig");
 const db = @import("../db.zig");
 
 const List = db.List;
@@ -179,7 +180,7 @@ pub fn stamp(seconds: i64) Stamp {
 	const day = moment.getEpochDay();
 	const year_day = day.calculateYearDay();
 	const month_day = year_day.calculateMonthDay();
-	const clock = moment.getDaySeconds();
+	const time_of_day = moment.getDaySeconds();
 	// The epoch was a Thursday, which is where the day of the week comes from.
 	const weekday = (day.day + 4) % 7;
 	var out = Stamp{ .buffer = undefined, .length = 0 };
@@ -188,20 +189,16 @@ pub fn stamp(seconds: i64) Stamp {
 		month_day.day_index + 1,
 		MONTHS[month_day.month.numeric() - 1],
 		year_day.year,
-		clock.getHoursIntoDay(),
-		clock.getMinutesIntoHour(),
-		clock.getSecondsIntoMinute(),
+		time_of_day.getHoursIntoDay(),
+		time_of_day.getMinutesIntoHour(),
+		time_of_day.getSecondsIntoMinute(),
 	}) catch out.buffer[0..0];
 	out.length = written.len;
 	return out;
 }
 
 pub fn now() Stamp {
-	var moment: std.c.timespec = undefined;
-	if (std.c.clock_gettime(.REALTIME, &moment) != 0) {
-		return stamp(0);
-	}
-	return stamp(@intCast(moment.sec));
+	return stamp(clock.wallSeconds());
 }
 
 // ------------------------------------------------------------------- tests

@@ -17,6 +17,7 @@
 //! Text in, text out: nothing in this file opens a socket.
 
 const std = @import("std");
+const clock = @import("../clock.zig");
 const db = @import("../db.zig");
 
 const List = db.List;
@@ -337,27 +338,22 @@ pub fn stamp(seconds: i64) Stamp {
 	const moment = std.time.epoch.EpochSeconds{ .secs = @intCast(seconds) };
 	const day = moment.getEpochDay().calculateYearDay();
 	const month_day = day.calculateMonthDay();
-	const clock = moment.getDaySeconds();
+	const time_of_day = moment.getDaySeconds();
 	var out: Stamp = .{ .text = undefined };
 	_ = std.fmt.bufPrint(&out.text, "{d:0>4}{d:0>2}{d:0>2}T{d:0>2}{d:0>2}{d:0>2}Z", .{
 		day.year,
 		month_day.month.numeric(),
 		month_day.day_index + 1,
-		clock.getHoursIntoDay(),
-		clock.getMinutesIntoHour(),
-		clock.getSecondsIntoMinute(),
+		time_of_day.getHoursIntoDay(),
+		time_of_day.getMinutesIntoHour(),
+		time_of_day.getSecondsIntoMinute(),
 	}) catch unreachable;
 	return out;
 }
 
-/// Now, from the wall clock. `std.time.timestamp` is gone in this Zig, so the
-/// clock is read the way the rest of the program reads it.
+/// Now, from the wall clock: a signature says when it was made.
 pub fn now() Stamp {
-	var moment: std.c.timespec = undefined;
-	if (std.c.clock_gettime(.REALTIME, &moment) != 0) {
-		return stamp(0);
-	}
-	return stamp(@intCast(moment.sec));
+	return stamp(clock.wallSeconds());
 }
 
 // ------------------------------------------------------------------- tests

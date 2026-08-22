@@ -35,6 +35,8 @@ pub const ssh = @import("ssh.zig");
 pub const net = @import("net.zig");
 pub const http = @import("http.zig");
 pub const ws = @import("ws.zig");
+pub const clock = @import("clock.zig");
+pub const random = @import("random.zig");
 pub const sigv4 = @import("s3/sigv4.zig");
 
 /// What the interface asks for, as a structure: see the file for why.
@@ -68,6 +70,8 @@ comptime {
 	_ = ws;
 	_ = http;
 	_ = ssh;
+	_ = clock;
+	_ = random;
 	_ = sigv4;
 }
 

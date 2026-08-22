@@ -20,6 +20,7 @@
 //! same and a failed range can be asked for again.
 
 const std = @import("std");
+const clock = @import("clock.zig");
 const builtin = @import("builtin");
 const db = @import("db.zig");
 
@@ -778,9 +779,7 @@ test "a tree is copied whole, and then removed whole" {
 
 	// Somewhere of this test's own, so a machine running it twice at once does
 	// not have the two of them treading on each other.
-	var moment: std.c.timespec = undefined;
-	_ = std.c.clock_gettime(.REALTIME, &moment);
-	const root = try std.fmt.allocPrint(arena, "/tmp/krtek-store-test-{d}", .{moment.nsec});
+	const root = try std.fmt.allocPrint(arena, "/tmp/krtek-store-test-{d}", .{clock.steadyNanos()});
 	removeAll(arena, place, root, 0) catch {};
 	try place.makeDir(arena, root);
 	defer removeAll(arena, place, root, 0) catch {};

@@ -403,9 +403,7 @@ test "the panes walk a real tree and come back out where they went in" {
 	defer scratch.deinit();
 	const arena = scratch.allocator();
 
-	var moment: std.c.timespec = undefined;
-	_ = std.c.clock_gettime(.REALTIME, &moment);
-	const root = try std.fmt.allocPrint(arena, "/tmp/krtek-files-test-{d}", .{moment.nsec});
+	const root = try std.fmt.allocPrint(arena, "/tmp/krtek-files-test-{d}", .{database.clock.steadyNanos()});
 
 	var disk = store.Local.init(testing.allocator);
 	defer disk.deinit();

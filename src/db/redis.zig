@@ -70,7 +70,7 @@ pub const Db = struct {
 		const parts = try parse(allocator, target);
 		defer parts.deinit(allocator);
 
-		const socket = connect(parts.host, parts.port) catch {
+		const socket = db.net.dial(allocator, parts.host, parts.port) catch {
 			try report.print(allocator, "cannot reach redis at {s}:{d}", .{ parts.host, parts.port });
 			return error.Driver;
 		};
@@ -1220,32 +1220,6 @@ pub fn owns(target: []const u8) bool {
 		}
 	}
 	return false;
-}
-
-/// A plain blocking TCP connection, through libc as the rest of this app does.
-fn connect(host: [:0]const u8, port: u16) !std.c.fd_t {
-	var hints = std.mem.zeroes(std.c.addrinfo);
-	hints.family = std.c.AF.UNSPEC;
-	hints.socktype = std.c.SOCK.STREAM;
-	var service: [8]u8 = undefined;
-	const service_text = std.fmt.bufPrintZ(&service, "{d}", .{port}) catch return error.BadPort;
-	var found: ?*std.c.addrinfo = null;
-	if (std.c.getaddrinfo(host.ptr, service_text.ptr, &hints, &found) != @as(std.c.EAI, @enumFromInt(0))) {
-		return error.NoSuchHost;
-	}
-	defer if (found) |list| std.c.freeaddrinfo(list);
-	var candidate = found;
-	while (candidate) |info| : (candidate = info.next) {
-		const socket = std.c.socket(@intCast(info.family), @intCast(info.socktype), @intCast(info.protocol));
-		if (socket < 0) {
-			continue;
-		}
-		if (std.c.connect(socket, info.addr.?, info.addrlen) == 0) {
-			return socket;
-		}
-		_ = std.c.close(socket);
-	}
-	return error.Refused;
 }
 
 test "a redis target is taken apart" {

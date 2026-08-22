@@ -3861,13 +3861,11 @@ fn writeFile(path: []const u8, bytes: []const u8) !void {
 }
 
 
-/// Milliseconds from the monotonic clock; std.time.Timer is gone in this Zig.
+/// Milliseconds on the clock that only goes forwards. Kept as a name of its own
+/// because this file reads it in six places, and the short name is what makes
+/// those lines say what they are about.
 pub fn monotonicMs() f64 {
-	var now: std.c.timespec = undefined;
-	if (std.c.clock_gettime(.MONOTONIC, &now) != 0) {
-		return 0;
-	}
-	return @as(f64, @floatFromInt(now.sec)) * 1000.0 + @as(f64, @floatFromInt(now.nsec)) / 1_000_000.0;
+	return database.clock.steadyMs();
 }
 
 /// Whether a declared type has numeric affinity.

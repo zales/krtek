@@ -40,6 +40,7 @@
 
 const std = @import("std");
 const db = @import("db.zig");
+const clock = @import("clock.zig");
 const net = @import("net.zig");
 
 /// The formats a batch can be packed with, and what a request is made of: two
@@ -83,7 +84,7 @@ comptime {
 
 const fieldOf = scram.fieldOf;
 const escapeName = scram.escapeName;
-const randomBytes = scram.randomBytes;
+const random = @import("random.zig");
 
 /// The pseudo-columns of every topic.
 pub const PARTITION = "partition";
@@ -720,7 +721,7 @@ pub const Db = struct {
 		const base64 = std.base64.standard;
 
 		var raw_nonce: [24]u8 = undefined;
-		randomBytes(&raw_nonce) catch {
+		random.bytes(&raw_nonce) catch {
 			self.remember("no source of randomness on this machine for a SCRAM nonce");
 			return error.Driver;
 		};
@@ -1046,7 +1047,7 @@ pub const Db = struct {
 		var read = Decoder{ .bytes = reply };
 		self.readOffsetReply(&read, at_time) catch |err| {
 			if (err == error.MovedOn) {
-				pause(SETTLE_MS);
+				clock.sleep(SETTLE_MS);
 				try self.clusterMoved();
 				return error.Driver;
 			}
@@ -1109,7 +1110,7 @@ pub const Db = struct {
 		var read = Decoder{ .bytes = reply };
 		return self.readOneOffset(&read) catch |err| {
 			if (err == error.MovedOn and attempt + 1 < ATTEMPTS) {
-				pause(SETTLE_MS);
+				clock.sleep(SETTLE_MS);
 				const name = try self.held(topic);
 				try self.clusterMoved();
 				// The partition is a pointer into the metadata that was just replaced,
@@ -1157,7 +1158,7 @@ pub const Db = struct {
 		const name = try self.held(name_in);
 		var left = ATTEMPTS - attempt;
 		while (left > 0) : (left -= 1) {
-			pause(SETTLE_MS);
+			clock.sleep(SETTLE_MS);
 			self.forget();
 			self.refresh() catch continue;
 			if (self.topicOf(name)) |topic| {
@@ -2624,30 +2625,13 @@ fn readHeaders(arena: std.mem.Allocator, read: *Decoder) DecodeError![]const u8 
 	return out.items;
 }
 
-/// Wait, without a thread to wait on: a cluster that has just been told to make a
-/// topic needs a moment to elect a leader for it, and asking again at once only
-/// gets the same answer.
-fn pause(ms: i64) void {
-	const request = std.c.timespec{
-		.sec = @intCast(@divFloor(ms, 1000)),
-		.nsec = @intCast(@mod(ms, 1000) * 1_000_000),
-	};
-	var left: std.c.timespec = undefined;
-	_ = std.c.nanosleep(&request, &left);
-}
-
 /// How long to wait before asking a cluster that was moving, and how many times.
 const SETTLE_MS: i64 = 300;
 const ATTEMPTS: usize = 3;
 
-/// Milliseconds since the epoch. std.time.milliTimestamp is gone in this Zig, so
-/// the clock is read the way the rest of the program reads the monotonic one.
+/// Milliseconds since the epoch, which is how a record carries the time.
 pub fn wallMs() i64 {
-	var now: std.c.timespec = undefined;
-	if (std.c.clock_gettime(.REALTIME, &now) != 0) {
-		return 0;
-	}
-	return @as(i64, @intCast(now.sec)) * 1000 + @divFloor(@as(i64, @intCast(now.nsec)), 1_000_000);
+	return clock.wallMs();
 }
 
 /// A Kafka timestamp - milliseconds since the epoch - as something readable. UTC,

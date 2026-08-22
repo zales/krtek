@@ -7,26 +7,9 @@
 
 const std = @import("std");
 const db = @import("../db.zig");
+const random = @import("../random.zig");
 
 const List = db.List;
-
-/// Bytes nobody can guess, for a SCRAM nonce. std.crypto.random is gone in this
-/// Zig and arc4random is not on musl, so this is the source both systems have.
-pub fn randomBytes(into: []u8) !void {
-	const fd = std.c.open("/dev/urandom", .{ .ACCMODE = .RDONLY });
-	if (fd < 0) {
-		return error.NoRandom;
-	}
-	defer _ = std.c.close(fd);
-	var got: usize = 0;
-	while (got < into.len) {
-		const read = std.c.read(fd, into[got..].ptr, into.len - got);
-		if (read <= 0) {
-			return error.NoRandom;
-		}
-		got += @intCast(read);
-	}
-}
 
 /// A SCRAM message is a comma-separated list of `k=value`, and this is one of
 /// them - the first with that letter, which is all SCRAM has.
@@ -116,14 +99,4 @@ test "the proof is the client key against its signature, as RFC 5802 has it" {
 	var server_signature: [Hmac.mac_length]u8 = undefined;
 	Hmac.create(&server_signature, auth_message, &server_key);
 	try testing.expectEqualStrings("rmF9pqV8S7suAoZWja4dJRkFsKQ=", base64.Encoder.encode(&buffer, &server_signature));
-}
-
-test "randomness is available, and different every time" {
-	var first: [24]u8 = undefined;
-	var second: [24]u8 = undefined;
-	try randomBytes(&first);
-	try randomBytes(&second);
-	try testing.expect(!std.mem.eql(u8, &first, &second));
-	// And not simply left as it was.
-	try testing.expect(!std.mem.allEqual(u8, &first, 0));
 }

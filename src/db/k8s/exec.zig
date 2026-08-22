@@ -23,6 +23,7 @@
 //! will wait forever, and the interface it is holding up is a single thread.
 
 const std = @import("std");
+const clock = @import("../clock.zig");
 const db = @import("../db.zig");
 
 const List = db.List;
@@ -135,11 +136,7 @@ pub fn run(
 /// Milliseconds on a clock that does not go backwards, which is the only kind a
 /// deadline can be measured against.
 fn nowMs() i64 {
-	var moment: std.c.timespec = undefined;
-	if (std.c.clock_gettime(.MONOTONIC, &moment) != 0) {
-		return 0;
-	}
-	return @as(i64, @intCast(moment.sec)) * 1000 + @divTrunc(@as(i64, @intCast(moment.nsec)), 1_000_000);
+	return @divTrunc(clock.steadyNanos(), 1_000_000);
 }
 
 /// Read the pipe to its end, or until the deadline runs out. A plugin that is

@@ -25,7 +25,7 @@
 const std = @import("std");
 const db = @import("db.zig");
 const net = @import("net.zig");
-const random = @import("kafka/scram.zig");
+const random = @import("random.zig");
 
 const List = db.List;
 
@@ -160,7 +160,7 @@ pub const Socket = struct {
 	/// Send one whole message. Masked, as a client must.
 	pub fn send(self: *Socket, opcode: Opcode, payload: []const u8) Error!void {
 		var mask: [4]u8 = undefined;
-		random.randomBytes(&mask) catch return error.Ws;
+		random.bytes(&mask) catch return error.Ws;
 		var head: [14]u8 = undefined;
 		self.stream.write(header(&head, opcode, payload.len, mask)) catch return error.Ws;
 		if (payload.len == 0) {
@@ -342,7 +342,7 @@ pub fn connect(allocator: std.mem.Allocator, options: Options, why: *List) Error
 	}
 
 	var nonce: [16]u8 = undefined;
-	random.randomBytes(&nonce) catch return error.Ws;
+	random.bytes(&nonce) catch return error.Ws;
 	var key_bytes: [24]u8 = undefined;
 	const key = std.base64.standard.Encoder.encode(&key_bytes, &nonce);
 

@@ -340,6 +340,19 @@ fn useClientCertificate(allocator: std.mem.Allocator, ctx: ?*anyopaque, cert_pem
 }
 
 pub fn connect(allocator: std.mem.Allocator, host: []const u8, port: u16) !Stream {
+	return .{ .fd = try dial(allocator, host, port) };
+}
+
+/// Resolve a name and connect to the first address that answers, as a plain
+/// descriptor. For the one caller that wants a socket and not a `Stream`: the
+/// Redis driver keeps its own read buffer and has no TLS to put on top, and what
+/// it had instead was a second copy of this - identical down to the order of the
+/// arguments.
+///
+/// A name that resolves to both an IPv6 and an IPv4 address is what the loop is
+/// for: taking only the first would leave a host unreachable on a machine whose
+/// IPv6 goes nowhere.
+pub fn dial(allocator: std.mem.Allocator, host: []const u8, port: u16) !std.c.fd_t {
 	const zero = try allocator.dupeZ(u8, host);
 	defer allocator.free(zero);
 	var hints = std.mem.zeroes(std.c.addrinfo);
@@ -359,7 +372,7 @@ pub fn connect(allocator: std.mem.Allocator, host: []const u8, port: u16) !Strea
 			continue;
 		}
 		if (std.c.connect(fd, info.addr.?, info.addrlen) == 0) {
-			return .{ .fd = fd };
+			return fd;
 		}
 		_ = std.c.close(fd);
 	}

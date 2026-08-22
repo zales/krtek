@@ -37,9 +37,10 @@
 
 const std = @import("std");
 const db = @import("db.zig");
+const clock = @import("clock.zig");
 const http = @import("http.zig");
 const ws = @import("ws.zig");
-const random = @import("kafka/scram.zig");
+const random = @import("random.zig");
 
 pub const yaml = @import("k8s/yaml.zig");
 pub const config = @import("k8s/config.zig");
@@ -771,7 +772,7 @@ pub const Db = struct {
 
 		// A marker nothing is going to print by accident.
 		var nonce: [9]u8 = undefined;
-		random.randomBytes(&nonce) catch {
+		random.bytes(&nonce) catch {
 			@memset(&nonce, 7);
 		};
 		var hex: [18]u8 = undefined;
@@ -1772,11 +1773,7 @@ fn sortRows(resource: api.Resource, rows: [][]const Value, order: []const u8, de
 }
 
 fn nowSeconds() i64 {
-	var moment: std.c.timespec = undefined;
-	if (std.c.clock_gettime(.REALTIME, &moment) != 0) {
-		return 0;
-	}
-	return @intCast(moment.sec);
+	return clock.wallSeconds();
 }
 
 /// A shell in a container, over the same WebSocket kubectl uses.
