@@ -443,6 +443,11 @@ pub const App = struct {
 
 	/// Run what is in the editor and close it, so the result is what is on
 	/// screen. The text goes into the history either way.
+	///
+	/// Except while a shell is open in a container, where it stays open and
+	/// empties instead. A shell is a conversation - type, look, type again - and
+	/// reaching for the key that opens the editor between every command turns
+	/// three keystrokes into six.
 	pub fn runEditor(self: *App) !void {
 		const editor = &(self.editor orelse return);
 		const sql = std.mem.trim(u8, editor.text.items, " \t\r\n");
@@ -452,9 +457,20 @@ pub const App = struct {
 		}
 		const owned = try self.allocator.dupe(u8, sql);
 		defer self.allocator.free(owned);
-		self.closeEditor();
+		const talking = self.conn.sessionIn().len != 0;
+		if (talking) {
+			editor.clear();
+		} else {
+			self.closeEditor();
+		}
 		try self.remember(owned);
 		try self.runBatch(owned);
+		// Opening one, or leaving it, changes which of the two this is.
+		if (self.conn.sessionIn().len == 0 and self.editor != null and talking) {
+			self.closeEditor();
+		} else if (self.conn.sessionIn().len != 0 and self.editor == null) {
+			try self.openEditor();
+		}
 	}
 
 	/// Put an earlier statement in the editor; `delta` walks the history.

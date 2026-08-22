@@ -560,7 +560,8 @@ that back, and the editor is a console for the cluster:
 GET pods                        the same as choosing pods on the left
 WHY api-7c9d4                   what it is doing, what it died of, what was said
 LOGS api-7c9d4 500              the last lines of a pod's log
-EXEC api-7c9d4                  a shell in the container, or a command in it
+EXEC api-7c9d4                  open a shell there; what you type goes to it
+EXIT                            and close it again
 DESCRIBE pod api-7c9d4          one object, whole, as the cluster holds it
 SCALE deployments api 5         replicas
 RESTART deployments api         a rolling restart, the annotation kubectl uses
@@ -576,26 +577,36 @@ the last one died of with its exit code, and what the cluster has said about the
 pod lately, which is where a failed image pull or a failed mount is written down
 and nowhere else.
 
-**`EXEC` is a shell in the container, and it is this program's own.** Kubernetes
-offers SPDY, which is retired, and WebSocket, which every version since 1.29
-speaks - so [src/db/ws.zig](src/db/ws.zig) is RFC 6455 for a client: a handshake
-that is four headers and an answer to check, and a frame header of two to fourteen
-bytes. The streams are multiplexed by a channel number in front of every message,
-so the protocol on top of that is a first byte.
+**`EXEC` opens one shell and keeps it.** What is typed goes to that shell and what
+it says comes back as rows, so the session is the point: `cd /var/log` and then
+`ls` mean what they say, which is the whole difference between a shell and a way
+of running one command. The editor stays open and empties instead of closing,
+sitting at the foot of the panel with the output above it - the shape every
+terminal has - and its title says which container is listening. `EXIT` closes it.
 
-The terminal is handed over and handed back. The key loop stops - its reader would
-otherwise eat every keystroke meant for the container - the alternate screen is
-left so what was on it comes back afterwards, and the window size goes down channel
-4 whenever it changes, because a shell that thinks it is eighty columns wide when
-it is not draws everything in the wrong place. The terminal stays raw, which is
-what the pty on the far end wants: it does the echoing, and a local terminal that
-also did it would double every character.
+A shell that never ends has no way of saying a command has ended, so it is asked
+to print a marker and the exit status after each one, with the marker random per
+session in case a command's own output contains it. A non-zero status is said in
+the output as `[exit 1]`, in brackets so it reads as this program's voice rather
+than the command's.
 
-One thing there is worth writing down, because it cost an afternoon. On macOS a
+`EXEC -t` is the other thing, for when it is wanted: the whole terminal handed to
+the container, which is what `top` and `vi` need and what a grid cannot give them.
+The key loop stops - its reader would otherwise eat every keystroke meant for the
+container - the alternate screen is left so what was on it comes back, and the
+window size goes down channel 4 whenever it changes.
+
+Underneath both is [src/db/ws.zig](src/db/ws.zig), because Kubernetes offers SPDY,
+which is retired, and WebSocket, which every version since 1.29 speaks. It is RFC
+6455 for a client: a handshake that is four headers and an answer to check, and a
+frame header of two to fourteen bytes. The streams are multiplexed by a channel
+number in front of every message, so the protocol on top of that is a first byte.
+
+One thing is worth writing down, because it cost an afternoon. On macOS a
 descriptor opened from `/dev/tty` cannot be waited on: `poll` calls it invalid and
 `select` never calls it ready, while `read` on that same descriptor returns what
-was typed - so a shell built on one sees no keystroke, ever. The descriptor the
-shell handed over works properly, and is the one used.
+was typed - so a terminal handover built on one sees no keystroke, ever. The
+descriptor the shell handed over works properly, and is the one used.
 
 **`R` follows a log the way it follows a table.** Anything the engine says is worth
 running again can be followed, so `LOGS api-7c9d4` and then `R` is a tail, and the

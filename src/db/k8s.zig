@@ -39,6 +39,7 @@ const std = @import("std");
 const db = @import("db.zig");
 const http = @import("http.zig");
 const ws = @import("ws.zig");
+const random = @import("kafka/scram.zig");
 
 pub const yaml = @import("k8s/yaml.zig");
 pub const config = @import("k8s/config.zig");
@@ -141,6 +142,15 @@ pub const Db = struct {
 	last_error: List = .empty,
 	progress: ?db.Progress = null,
 	requests: usize = 0,
+	/// The shell open in a container, if one is. One at a time and it stays open,
+	/// so `cd /var/log` and then `ls` mean what they say - which is the whole
+	/// difference between a shell and a way of running one command.
+	session: ?*Shell = null,
+	session_pod: []const u8 = "",
+	/// What the shell is asked to print when a command is done. Random per
+	/// session, because a command whose own output contained the marker would
+	/// otherwise look like a command that had finished.
+	session_marker: [24]u8 = undefined,
 	/// How many objects of a kind were in a namespace when it was last read, by
 	/// `namespace/kind`. See `rowCount` for why this is a memory and not a call.
 	counts: std.StringHashMapUnmanaged(i64) = .empty,
@@ -230,6 +240,7 @@ pub const Db = struct {
 	}
 
 	pub fn close(self: *Db) void {
+		self.closeSession();
 		if (self.client) |*client| {
 			client.deinit();
 		}
@@ -568,11 +579,142 @@ pub const Db = struct {
 		return false;
 	}
 
-	/// Whether this statement wants the terminal rather than the grid.
-	pub fn wantsTerminal(_: *Db, statement: []const u8) bool {
+	/// Whether this statement wants the terminal rather than the grid. Only the
+	/// one that asks for it in so many words: an ordinary `EXEC` keeps a shell
+	/// open here and shows what it says in the grid, which is where everything
+	/// else in this program shows what it has to say.
+	pub fn wantsTerminal(self: *Db, statement: []const u8) bool {
+		// Not while a shell is open: everything typed then is for that shell, and
+		// a line that quietly meant something else instead would be the one thing
+		// a shell must never do.
+		if (self.session != null) {
+			return false;
+		}
 		var words = std.mem.tokenizeAny(u8, statement, " \t\r\n;");
 		const verb = words.next() orelse return false;
-		return eq(verb, "EXEC") or eq(verb, "SH") or eq(verb, "SHELL");
+		if (!eq(verb, "EXEC")) {
+			return false;
+		}
+		const next = words.next() orelse return false;
+		return std.mem.eql(u8, next, "-t");
+	}
+
+	// ---------------------------------------------------------- the one shell
+
+	/// Open a shell in a container and keep it. The session is the point: a
+	/// command runs where the last one left it, so `cd` and an exported variable
+	/// last as long as the shell does.
+	///
+	/// No tty on this one, unlike the handover. A pty would echo everything back
+	/// and wrap it at whatever width it was told, and what is wanted here is what
+	/// the command printed and nothing else.
+	fn openSession(self: *Db, pod: []const u8) db.Error!void {
+		self.closeSession();
+		var scratch = std.heap.ArenaAllocator.init(self.allocator);
+		defer scratch.deinit();
+		const arena = scratch.allocator();
+
+		const target = try std.fmt.allocPrint(
+			arena,
+			"/api/v1/namespaces/{s}/pods/{s}/exec?stdin=true&stdout=true&stderr=true&tty=false&command=sh",
+			.{ self.namespace, pod },
+		);
+		const opened = try self.dial(arena, target, pod);
+		self.session = opened;
+		self.session_pod = try self.home.allocator().dupe(u8, pod);
+
+		// A marker nothing is going to print by accident.
+		var nonce: [9]u8 = undefined;
+		random.randomBytes(&nonce) catch {
+			@memset(&nonce, 7);
+		};
+		var hex: [18]u8 = undefined;
+		for (nonce, 0..) |byte, i| {
+			_ = std.fmt.bufPrint(hex[i * 2 ..][0..2], "{x:0>2}", .{byte}) catch {};
+		}
+		// Zeroed first: what is written is read back with `sliceTo`, and an
+		// unwritten tail of an undefined array is whatever was on the stack.
+		@memset(&self.session_marker, 0);
+		_ = std.fmt.bufPrint(&self.session_marker, "@@{s}@@", .{hex}) catch {};
+	}
+
+	pub fn closeSession(self: *Db) void {
+		if (self.session) |running| {
+			running.deinit();
+			self.allocator.destroy(running);
+		}
+		self.session = null;
+		self.session_pod = "";
+	}
+
+	/// Whether a shell is open, and in which container - for an interface that
+	/// has to say where what is typed is going.
+	pub fn sessionIn(self: *Db) []const u8 {
+		return if (self.session != null) self.session_pod else "";
+	}
+
+	/// Run one command in the open shell and give back what it said.
+	///
+	/// The shell is asked to print a marker and the exit status after every
+	/// command, which is how a session that never ends says a command has ended.
+	/// Without it there is no such thing: a shell's output stops when it stops,
+	/// and a reader can only guess whether more is coming.
+	fn runInSession(self: *Db, line: []const u8) db.Error!Rows {
+		const running = self.session orelse return error.Driver;
+		const arena = self.replies.allocator();
+		const marker = std.mem.sliceTo(&self.session_marker, 0);
+		const sent = try std.fmt.allocPrint(arena, "{s}\nprintf '\\n%s %d\\n' '{s}' \"$?\"\n", .{ line, marker });
+		running.write(sent) catch {
+			self.remember("the shell has gone");
+			self.closeSession();
+			return error.Driver;
+		};
+
+		var out: List = .empty;
+		const started = nowSeconds();
+		var status: []const u8 = "";
+		var ended = false;
+        while (!ended) {
+			if (!(running.read(&out) catch false)) {
+				// The shell itself ended - `exit` typed into it, or the container
+				// went away. What it managed to say still counts.
+				self.closeSession();
+				break;
+			}
+			if (findMarker(out.items, marker)) |found| {
+				status = try arena.dupe(u8, found.status);
+				out.shrinkRetainingCapacity(found.at);
+				ended = true;
+				break;
+			}
+			if (nowSeconds() - started > SESSION_SECONDS) {
+				self.complain(
+					"it is still running after {d} seconds - the shell is still open, and EXEC -t {s} gives it the terminal",
+					.{ SESSION_SECONDS, self.session_pod },
+				);
+				return error.Driver;
+			}
+			if (self.progress) |watching| {
+				if (!watching.call()) {
+					self.remember("stopped waiting; the command is still running in the container");
+					return error.Driver;
+				}
+			}
+		}
+		// Into the arena the rows live in before the buffer goes: `lines` points at
+		// what it is given rather than copying it, and what it was given here is
+		// about to be freed.
+		// A status that is not zero is said in the output, where somebody is
+		// already looking, and in brackets so it reads as this program's voice
+		// rather than the command's. The interface's own status line is taken by
+		// the batch that ran, and a command that failed with output is not a
+		// failure to report there: the output is the point.
+		if (status.len != 0 and !std.mem.eql(u8, status, "0")) {
+			try out.print(self.allocator, "\n[exit {s}]", .{status});
+		}
+		const said = try arena.dupe(u8, std.mem.trimEnd(u8, out.items, "\n"));
+		out.deinit(self.allocator);
+		return try self.lines(arena, "output", std.mem.trimStart(u8, said, "\n"));
 	}
 
 	/// Open a shell in a container: `EXEC <pod> [command...]`, and `sh` where no
@@ -585,8 +727,9 @@ pub const Db = struct {
 
 		var words = std.mem.tokenizeAny(u8, statement, " \t\r\n;");
 		_ = words.next();
+		_ = words.next(); // -t, which is what brought this here
 		const pod = words.next() orelse {
-			self.remember("EXEC <pod> [command] - sh where no command is named");
+			self.remember("EXEC -t <pod> [command] - the terminal, for something full screen");
 			return error.Driver;
 		};
 
@@ -606,6 +749,11 @@ pub const Db = struct {
 			try target.appendSlice(arena, "&command=sh");
 		}
 
+		return .{ .k8s = try self.dial(arena, target.items, pod) };
+	}
+
+	/// Open a WebSocket to an exec endpoint, however it was addressed.
+	fn dial(self: *Db, arena: std.mem.Allocator, target: []const u8, pod: []const u8) db.Error!*Shell {
 		const server = splitServer(self.ready.server) orelse return error.Driver;
 		var headers: std.ArrayListUnmanaged([2][]const u8) = .empty;
 		if (self.authorization.len != 0) {
@@ -622,7 +770,7 @@ pub const Db = struct {
 				.cert_pem = self.ready.cert_pem,
 				.key_pem = self.ready.key_pem,
 			},
-			.target = target.items,
+			.target = target,
 			// The framing kubectl has used since 1.10, and the one every cluster
 			// that speaks WebSocket at all speaks.
 			.protocol = "v4.channel.k8s.io",
@@ -636,7 +784,7 @@ pub const Db = struct {
 		};
 		const opened = try self.allocator.create(Shell);
 		opened.* = .{ .allocator = self.allocator, .socket = socket };
-		return .{ .k8s = opened };
+		return opened;
 	}
 
 	pub fn ddl(_: *Db) db.Ddl {
@@ -784,6 +932,16 @@ pub const Db = struct {
 		const arena = self.replies.allocator();
 		var words = std.mem.tokenizeAny(u8, line, " \t\r\n;");
 		const verb = words.next() orelse return null;
+		// While a shell is open, what is typed is for it. Only the word that
+		// closes it is read here, because a shell nobody can leave is a trap.
+		if (self.session != null) {
+			if (eq(verb, "EXIT") or eq(verb, "QUIT")) {
+				const was = try arena.dupe(u8, self.session_pod);
+				self.closeSession();
+				return .{ .k8s = try self.oneText("shell", try std.fmt.allocPrint(arena, "the shell in {s} is closed", .{was})) };
+			}
+			return .{ .k8s = try self.runInSession(std.mem.trim(u8, line, " \t\r\n;")) };
+		}
 		const first = words.next() orelse "";
 		const second = words.next() orelse "";
 		const third = words.next() orelse "";
@@ -821,6 +979,18 @@ pub const Db = struct {
 		if (eq(verb, "WHY")) {
 			return .{ .k8s = try self.whyPod(arena, first) };
 		}
+		if (eq(verb, "EXEC")) {
+			if (first.len == 0) {
+				self.remember("EXEC <pod> - opens a shell there and keeps it; EXIT closes it");
+				return error.Driver;
+			}
+			try self.openSession(first);
+			return .{ .k8s = try self.oneText("shell", try std.fmt.allocPrint(
+				arena,
+				"a shell is open in {s} - what you type goes there until EXIT",
+				.{first},
+			)) };
+		}
 		if (eq(verb, "SCALE")) {
 			try self.scale(arena, first, second, third);
 			return null;
@@ -830,7 +1000,7 @@ pub const Db = struct {
 			return null;
 		}
 		self.complain(
-			"this is a cluster, not SQL - GET pods, WHY <pod>, LOGS <pod>, EXEC <pod> [command], DESCRIBE pod <name>, SCALE deployments <name> <n>, RESTART deployments <name>, USE <namespace>, CONTEXTS, VERSION",
+			"this is a cluster, not SQL - GET pods, WHY <pod>, LOGS <pod>, EXEC <pod>, DESCRIBE pod <name>, SCALE deployments <name> <n>, RESTART deployments <name>, USE <namespace>, CONTEXTS, VERSION",
 			.{},
 		);
 		return error.Driver;
@@ -1072,6 +1242,33 @@ pub const Db = struct {
 		}
 	}
 };
+
+/// How long one command in the open shell is waited for. A shell is not a query
+/// and something may genuinely take a while, but the interface it is holding up
+/// is one thread, and `EXEC -t` is there for a command that means to run all day.
+const SESSION_SECONDS: i64 = 60;
+
+const Ending = struct {
+	/// Where the command's own output stopped.
+	at: usize,
+	status: []const u8,
+};
+
+/// Find the marker the shell was asked to print when a command ended, and say
+/// where the output before it stopped. The marker is written on a line of its own
+/// with the exit status after it.
+fn findMarker(text: []const u8, marker: []const u8) ?Ending {
+	const at = std.mem.lastIndexOf(u8, text, marker) orelse return null;
+	// Everything the marker's own line holds after it is the status.
+	const rest = text[at + marker.len ..];
+	const line_end = std.mem.indexOfScalar(u8, rest, '\n') orelse rest.len;
+	// And the line the marker is on does not belong to the output.
+	var stop = at;
+	while (stop > 0 and text[stop - 1] != '\n') {
+		stop -= 1;
+	}
+	return .{ .at = stop, .status = std.mem.trim(u8, rest[0..line_end], " \r\n") };
+}
 
 /// A word as it can go in a query string. A command may hold anything.
 fn escapedQuery(arena: std.mem.Allocator, word: []const u8) ![]const u8 {

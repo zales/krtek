@@ -637,6 +637,20 @@ pub const Db = union(enum) {
 		}
 	}
 
+	/// Which container a shell is open in, or nothing. The interface asks so it
+	/// can say where what is typed is going, and keep the editor open while the
+	/// answer is somewhere.
+	pub fn sessionIn(self: Db) []const u8 {
+		switch (self) {
+			inline else => |driver| {
+				if (@hasDecl(@TypeOf(driver.*), "sessionIn")) {
+					return driver.sessionIn();
+				}
+				return "";
+			},
+		}
+	}
+
 	/// Whether this statement wants the terminal rather than the grid. Only one
 	/// engine has anything to say here, and the rest say no by not answering.
 	pub fn wantsTerminal(self: Db, statement: []const u8) bool {

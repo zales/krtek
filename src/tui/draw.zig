@@ -1398,13 +1398,22 @@ fn editorPanel(app: *App, size: Size, side: usize, rows: usize) void {
 	const outer_width = if (size.cols > outer_left + 4) size.cols - outer_left - 1 else 20;
 	const left = outer_left + 1;
 	const width = outer_width -| 2;
-	const top: usize = 1;
 	// The gutter holds the line number, right aligned, and a space.
 	const gutter: usize = 5;
+	const talking = app.conn.sessionIn().len != 0;
 
 	// Tall enough that a completion list has room inside the panel, and one line
 	// taller than what is written, so there is visibly somewhere to keep typing.
-	const height: usize = @min(rows, @max(9, editor.lineCount() + 3));
+	//
+	// Except with a shell open in a container, where it is as small as it can be:
+	// a shell is one line typed at a time and what matters is the output under
+	// it, which a panel nine rows tall would be sitting on.
+	const floor: usize = if (talking) 4 else 9;
+	const height: usize = @min(rows, @max(floor, editor.lineCount() + 3));
+	// A statement is written above its result and a shell is typed below it: what
+	// came back is what you are looking at while you write the next line, which
+	// is the shape every terminal has.
+	const top: usize = if (talking) (if (rows > height) rows - height + 1 else 1) else 1;
 	const shown = height -| 2;
 	const at = editor.position();
 	// Keep the line the cursor is on inside the panel.
@@ -1458,9 +1467,15 @@ fn editorPanel(app: *App, size: Size, side: usize, rows: usize) void {
 	// sentence written twice on one screen teaches nobody anything the second time.
 	screen.reset();
 	// An engine without SQL gets its own name on the panel, because what is typed
-	// there is its command line and calling that SQL would be a lie.
+	// there is its command line and calling that SQL would be a lie. And where a
+	// shell is open in a container, the panel says which one: what is typed is
+	// going somewhere else entirely, and nothing else on the screen says so.
 	const caps = app.conn.caps();
-	const title = if (caps.speaks_sql) "SQL" else if (caps.label.len != 0) caps.label else "command";
+	var named: [64]u8 = undefined;
+	const container = app.conn.sessionIn();
+	const title = if (container.len != 0)
+		(std.fmt.bufPrint(&named, "sh in {s} - EXIT closes it", .{container}) catch "sh")
+	else if (caps.speaks_sql) "SQL" else if (caps.label.len != 0) caps.label else "command";
 	box(app, top, outer_left, outer_width, height, title, "", C.accent);
 
 	// The completion list, hanging under the word being completed.

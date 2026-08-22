@@ -239,11 +239,27 @@ kubectl -n payments run shellme --image=busybox:1.36 --command -- \
 until [ "$(kubectl -n payments get pod shellme -o jsonpath='{.status.phase}' 2>/dev/null)" = "Running" ]; do
 	sleep 2
 done
+# The shell stays open, which is the whole of it: a command runs where the last
+# one left it. `cd` and then `pwd` is the smallest thing that proves it.
 inside=$(python3 tests/screen.py "$ROOT" 's' 'EXEC shellme' '{ctrl-s}' '{sleep}' \
+	'cd /etc' '{ctrl-s}' '{sleep}' 'pwd' '{ctrl-s}' '{sleep}' '{keep}' 2>&1)
+printf '%s' "$inside" | grep -q "/etc" ||
+	fail "the shell did not keep where the last command left it"
+echo "ok: one shell, and a command runs where the last one left it"
+
+# What it says comes back as rows, and what it exited with is said too.
+failed=$(python3 tests/screen.py "$ROOT" 's' 'EXEC shellme' '{ctrl-s}' '{sleep}' \
+	'ls /nope' '{ctrl-s}' '{sleep}' '{keep}' 2>&1)
+printf '%s' "$failed" | grep -q "No such file" || fail "the shell's output did not come back"
+printf '%s' "$failed" | grep -q "exit 1" || fail "a command that failed did not say so"
+echo "ok: output comes back as rows, and a non-zero exit is said"
+
+# And the terminal is still there for something full screen.
+terminal=$(python3 tests/screen.py "$ROOT" 's' 'EXEC -t shellme' '{ctrl-s}' '{sleep}' \
 	'echo I-AM-$(hostname)' '{enter}' '{sleep}' '{keep}' 2>&1)
-printf '%s' "$inside" | grep -q "I-AM-shellme" ||
-	fail "EXEC did not get a shell in the container"
-echo "ok: EXEC opens a shell in the container and what is typed reaches it"
+printf '%s' "$terminal" | grep -q "I-AM-shellme" ||
+	fail "EXEC -t did not hand the terminal to a shell in the container"
+echo "ok: EXEC -t hands the terminal over for something full screen"
 
 # And what it says when the pod is not there, rather than a hung terminal.
 missing=$(python3 tests/screen.py "$ROOT" 's' 'EXEC nosuchpod' '{ctrl-s}' '{sleep}' '{keep}' 2>&1)

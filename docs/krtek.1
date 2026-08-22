@@ -119,8 +119,14 @@ not show.
 asks before deleting, because nothing takes that back. The console is
 .BR GET ", " WHY ", " LOGS ", " EXEC ", " DESCRIBE ", " SCALE ", " RESTART ", " USE ", " NAMESPACES ", " CONTEXTS " and " VERSION .
 .B EXEC
-opens a shell in a container - over WebSocket, spoken here rather than by anything
-installed - and hands the terminal to it until it ends.
+opens one shell in a container and keeps it: what is typed goes there and what it
+says comes back as rows, so a
+.B cd
+lasts until
+.BR EXIT .
+.B "EXEC -t"
+hands the whole terminal over instead, which is what something full screen needs.
+Both speak WebSocket here rather than through anything installed.
 .B WHY
 answers why a pod is unhappy: what each container is doing, what the last one died
 of and with what exit code, and what the cluster has said about it lately.
