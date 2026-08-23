@@ -306,6 +306,31 @@ printf '%s' "$logged" | grep -q "listening on" || {
 }
 echo "ok: l on it shows that pod's log"
 
+# Eighteen kinds is more than a list, so the list down the side is divided the
+# way a cluster is: workloads, then network, then config, then storage, access
+# and the cluster's own. Heading lines take room, so what is really being
+# checked is that moving over them still lands where the cursor says it does.
+side=$(python3 tests/screen.py "$ROOT" '{sleep}' '{keep}' 2>&1)
+for heading in workloads network config storage access cluster; do
+	printf '%s' "$side" | grep -qE "^ $heading *\|" || printf '%s' "$side" | grep -q " $heading " || {
+		printf '%s\n' "$side" >&2
+		fail "the list should be divided, and should have a $heading heading"
+	}
+done
+echo "ok: the kinds are divided the way a cluster is"
+
+# Seventeen steps down from `pods` is `namespaces`, whatever headings are drawn
+# in between - and on a window too short to hold the list, so it has scrolled.
+down=""
+i=0
+while [ $i -lt 17 ]; do down="$down{down}"; i=$((i + 1)); done
+out=$(SCREEN_ROWS=14 python3 tests/screen.py "$ROOT" "{sleep}$down{enter}{sleep}{keep}" 2>&1)
+printf '%s' "$out" | grep -q "namespaces  1-" || {
+	printf '%s\n' "$out" >&2
+	fail "moving down past the headings should land on the kind the cursor is on"
+}
+echo "ok: the cursor counts kinds, not the lines drawn between them"
+
 # What the cluster is made of. Every number here comes out of the API for
 # nothing extra - what a node has left to place pods in, and what the pods on it
 # asked for - so it works on a cluster with no add-ons at all.

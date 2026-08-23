@@ -227,16 +227,45 @@ fn header(app: *App, size: Size) void {
 	screen.reset();
 }
 
+/// Whether the object at `n` is the first of its group among what is visible.
+/// The filter can hide the one that used to start a group, so this is asked of
+/// the list as it is now rather than of the engine's own order.
+fn startsGroup(app: *App, n: usize) bool {
+	const object = app.visibleAt(n) orelse return false;
+	if (n == 0) {
+		return true;
+	}
+	const before = app.visibleAt(n - 1) orelse return true;
+	return !std.mem.eql(u8, before.group, object.group);
+}
+
+/// How many heading lines fall between two objects, which is how much less room
+/// there is for the objects themselves.
+fn headingsBetween(app: *App, from: usize, to: usize) usize {
+	var count: usize = 0;
+	var n = from;
+	while (n <= to) : (n += 1) {
+		if (startsGroup(app, n)) {
+			count += 1;
+		}
+	}
+	return count;
+}
+
 fn sidebar(app: *App, width: usize, rows: usize) void {
 	const screen = app.screen;
 	const visible = app.visibleCount();
-	// Keep the selection on screen.
+	// Keep the selection on screen. Scrolling counts objects, not lines - a
+	// heading is drawn where the group changes and takes a line of its own, so
+	// the room for objects is what is left after those.
 	const list_rows = if (rows > 1) rows - 1 else 1;
 	if (app.sidebar.selected < app.sidebar.scroll) {
 		app.sidebar.scroll = app.sidebar.selected;
 	}
-	if (app.sidebar.selected >= app.sidebar.scroll + list_rows) {
-		app.sidebar.scroll = app.sidebar.selected - list_rows + 1;
+	const headings = headingsBetween(app, app.sidebar.scroll, app.sidebar.selected);
+	const room = if (list_rows > headings) list_rows - headings else 1;
+	if (app.sidebar.selected >= app.sidebar.scroll + room) {
+		app.sidebar.scroll = app.sidebar.selected - room + 1;
 	}
 
 	screen.moveTo(1, 0);
@@ -291,6 +320,19 @@ fn sidebar(app: *App, width: usize, rows: usize) void {
 		n += 1;
 	}) {
 		const object = app.visibleAt(n) orelse break;
+		// A heading where the group changes, and none at all for an engine that
+		// does not sort its objects into any.
+		if (object.group.len != 0 and startsGroup(app, n)) {
+			if (line + 1 >= rows + 1) {
+				break;
+			}
+			screen.moveTo(line, 0);
+			screen.style(.{ .fg = C.faint });
+			_ = write(app, " ", 1);
+			_ = write(app, object.group, width - 1);
+			screen.clearToEol();
+			line += 1;
+		}
 		const selected = n == app.sidebar.selected;
 		screen.moveTo(line, 0);
 		if (selected) {

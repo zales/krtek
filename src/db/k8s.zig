@@ -447,6 +447,7 @@ pub const Db = struct {
 		for (api.RESOURCES) |resource| {
 			try out.append(arena, .{
 				.name = try arena.dupe(u8, resource.name),
+				.group = resource.group,
 				.kind = .table,
 				// A count would be a request each, for every kind, on every redraw.
 				.rows = null,

@@ -214,6 +214,11 @@ pub const Object = struct {
 	/// Empty on an engine without schemas.
 	schema: []const u8 = "",
 	name: []const u8,
+	/// What this one is among the others, for an engine whose list is long enough
+	/// to need dividing: Kubernetes has eighteen kinds and they fall into
+	/// workloads, network, config and the rest. Empty everywhere else, where a
+	/// list of tables is a list of tables and a heading over it would say nothing.
+	group: []const u8 = "",
 	kind: Kind = .table,
 	rows: ?i64 = null,
 	/// The engine's own housekeeping rather than the user's data - Kafka's

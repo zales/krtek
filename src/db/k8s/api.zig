@@ -86,6 +86,8 @@ pub const Resource = struct {
 	scalable: bool = false,
 	/// Whether `LOGS` means anything to it.
 	loggable: bool = false,
+	/// Which part of a cluster this belongs to, for the list down the side.
+	group: []const u8 = "",
 	columns: []const Column,
 };
 
@@ -99,6 +101,7 @@ pub const RESOURCES = [_]Resource{
 		.root = "/api/v1",
 		.singular = "pod",
 		.loggable = true,
+		.group = "workloads",
 		.columns = &.{
 			NAME,
 			.{ .name = "ready", .from = .ready },
@@ -120,6 +123,7 @@ pub const RESOURCES = [_]Resource{
 		.root = "/apis/apps/v1",
 		.singular = "deployment",
 		.scalable = true,
+		.group = "workloads",
 		.columns = &.{
 			NAME,
 			.{ .name = "ready", .from = .replicas },
@@ -135,6 +139,7 @@ pub const RESOURCES = [_]Resource{
 		.root = "/apis/apps/v1",
 		.singular = "statefulset",
 		.scalable = true,
+		.group = "workloads",
 		.columns = &.{
 			NAME,
 			.{ .name = "ready", .from = .replicas },
@@ -147,6 +152,7 @@ pub const RESOURCES = [_]Resource{
 		.kind = "DaemonSet",
 		.root = "/apis/apps/v1",
 		.singular = "daemonset",
+		.group = "workloads",
 		.columns = &.{
 			NAME,
 			.{ .name = "desired", .from = .{ .at = "status.desiredNumberScheduled" }, .numeric = true, .zero_when_missing = true },
@@ -161,6 +167,7 @@ pub const RESOURCES = [_]Resource{
 		.root = "/apis/apps/v1",
 		.singular = "replicaset",
 		.scalable = true,
+		.group = "workloads",
 		.columns = &.{
 			NAME,
 			.{ .name = "ready", .from = .replicas },
@@ -173,6 +180,7 @@ pub const RESOURCES = [_]Resource{
 		.kind = "Job",
 		.root = "/apis/batch/v1",
 		.singular = "job",
+		.group = "workloads",
 		.columns = &.{
 			NAME,
 			.{ .name = "succeeded", .from = .{ .at = "status.succeeded" }, .numeric = true, .zero_when_missing = true },
@@ -186,6 +194,7 @@ pub const RESOURCES = [_]Resource{
 		.kind = "CronJob",
 		.root = "/apis/batch/v1",
 		.singular = "cronjob",
+		.group = "workloads",
 		.columns = &.{
 			NAME,
 			.{ .name = "schedule", .from = .{ .at = "spec.schedule" } },
@@ -199,6 +208,7 @@ pub const RESOURCES = [_]Resource{
 		.kind = "Service",
 		.root = "/api/v1",
 		.singular = "service",
+		.group = "network",
 		.columns = &.{
 			NAME,
 			.{ .name = "type", .from = .{ .at = "spec.type" } },
@@ -212,6 +222,7 @@ pub const RESOURCES = [_]Resource{
 		.kind = "Ingress",
 		.root = "/apis/networking.k8s.io/v1",
 		.singular = "ingress",
+		.group = "network",
 		.columns = &.{
 			NAME,
 			.{ .name = "class", .from = .{ .at = "spec.ingressClassName" } },
@@ -223,6 +234,7 @@ pub const RESOURCES = [_]Resource{
 		.kind = "ConfigMap",
 		.root = "/api/v1",
 		.singular = "configmap",
+		.group = "config",
 		.columns = &.{ NAME, AGE, .{ .name = "labels", .from = .labels } },
 	},
 	.{
@@ -230,6 +242,7 @@ pub const RESOURCES = [_]Resource{
 		.kind = "Secret",
 		.root = "/api/v1",
 		.singular = "secret",
+		.group = "config",
 		.columns = &.{
 			NAME,
 			.{ .name = "type", .from = .{ .at = "type" } },
@@ -241,6 +254,7 @@ pub const RESOURCES = [_]Resource{
 		.kind = "PersistentVolumeClaim",
 		.root = "/api/v1",
 		.singular = "claim",
+		.group = "storage",
 		.columns = &.{
 			NAME,
 			.{ .name = "status", .from = .{ .at = "status.phase" } },
@@ -250,10 +264,38 @@ pub const RESOURCES = [_]Resource{
 		},
 	},
 	.{
+		.name = "persistentvolumes",
+		.kind = "PersistentVolume",
+		.root = "/api/v1",
+		.singular = "volume",
+		.namespaced = false,
+		.group = "storage",
+		.columns = &.{
+			NAME,
+			.{ .name = "status", .from = .{ .at = "status.phase" } },
+			.{ .name = "claim", .from = .{ .at = "spec.claimRef.name" } },
+			AGE,
+		},
+	},
+	.{
+		.name = "storageclasses",
+		.kind = "StorageClass",
+		.root = "/apis/storage.k8s.io/v1",
+		.singular = "storage class",
+		.namespaced = false,
+		.group = "storage",
+		.columns = &.{
+			NAME,
+			.{ .name = "provisioner", .from = .{ .at = "provisioner" } },
+			AGE,
+		},
+	},
+	.{
 		.name = "serviceaccounts",
 		.kind = "ServiceAccount",
 		.root = "/api/v1",
 		.singular = "service account",
+		.group = "access",
 		.columns = &.{ NAME, AGE },
 	},
 	.{
@@ -262,6 +304,7 @@ pub const RESOURCES = [_]Resource{
 		.root = "/api/v1",
 		.singular = "event",
 		.remove = false,
+		.group = "cluster",
 		.columns = &.{
 			.{ .name = "last seen", .from = .{ .at = "lastTimestamp" } },
 			.{ .name = "type", .from = .{ .at = "type" } },
@@ -277,6 +320,7 @@ pub const RESOURCES = [_]Resource{
 		.singular = "node",
 		.namespaced = false,
 		.remove = false,
+		.group = "cluster",
 		.columns = &.{
 			NAME,
 			.{ .name = "version", .from = .{ .at = "status.nodeInfo.kubeletVersion" } },
@@ -297,34 +341,10 @@ pub const RESOURCES = [_]Resource{
 		.root = "/api/v1",
 		.singular = "namespace",
 		.namespaced = false,
+		.group = "cluster",
 		.columns = &.{
 			NAME,
 			.{ .name = "status", .from = .{ .at = "status.phase" } },
-			AGE,
-		},
-	},
-	.{
-		.name = "persistentvolumes",
-		.kind = "PersistentVolume",
-		.root = "/api/v1",
-		.singular = "volume",
-		.namespaced = false,
-		.columns = &.{
-			NAME,
-			.{ .name = "status", .from = .{ .at = "status.phase" } },
-			.{ .name = "claim", .from = .{ .at = "spec.claimRef.name" } },
-			AGE,
-		},
-	},
-	.{
-		.name = "storageclasses",
-		.kind = "StorageClass",
-		.root = "/apis/storage.k8s.io/v1",
-		.singular = "storage class",
-		.namespaced = false,
-		.columns = &.{
-			NAME,
-			.{ .name = "provisioner", .from = .{ .at = "provisioner" } },
 			AGE,
 		},
 	},

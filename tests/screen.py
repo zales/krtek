@@ -26,7 +26,10 @@ import termios
 import time
 import fcntl
 
-ROWS, COLS = 32, 118
+# The terminal this pretends to be. From the environment where a test needs a
+# different shape - a list that scrolls needs a window shorter than the list.
+ROWS = int(os.environ.get("SCREEN_ROWS", 32))
+COLS = int(os.environ.get("SCREEN_COLS", 118))
 
 NAMED = {
 	"down": "\x1b[B",

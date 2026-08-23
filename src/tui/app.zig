@@ -88,6 +88,9 @@ pub const Row = struct {
 
 pub const Object = struct {
 	name: []const u8,
+	/// What this one is among the others, where the engine sorts them: see
+	/// `database.Object`. Empty means the list has no divisions.
+	group: []const u8 = "",
 	kind: []const u8,
 	rows: ?i64,
 };
@@ -1146,6 +1149,7 @@ pub const App = struct {
 	fn freeObjects(self: *App) void {
 		for (self.sidebar.objects.items) |object| {
 			self.allocator.free(object.name);
+			self.allocator.free(object.group);
 			self.allocator.free(object.kind);
 		}
 		self.sidebar.objects.clearRetainingCapacity();
@@ -1158,6 +1162,7 @@ pub const App = struct {
 		for (try self.conn.objects(arena.allocator(), self.grid.schema.items)) |object| {
 			try self.sidebar.objects.append(self.allocator, .{
 				.name = try self.allocator.dupe(u8, object.name),
+				.group = try self.allocator.dupe(u8, object.group),
 				.kind = try self.allocator.dupe(u8, if (object.kind == .view) "view" else "table"),
 				.rows = object.rows,
 			});
