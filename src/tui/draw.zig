@@ -132,7 +132,7 @@ fn connections(app: *App, size: Size, rows: usize) void {
 			// to be clipped still has air between it and the next column.
 			pad(app, item.name, 21, false);
 			_ = write(app, " ", 1);
-			screen.style(.{ .bg = if (on) C.selected else null, .fg = C.faint });
+			screen.style(.{ .bg = if (on) C.selected else null, .fg = if (on) C.dim else C.faint });
 			pad(app, item.engine(), 11, false);
 			// Where the password is kept says itself, rather than the file being the
 			// only place to find that out - and a connection that came from
@@ -140,10 +140,10 @@ fn connections(app: *App, size: Size, rows: usize) void {
 			// "where does this live".
 			screen.style(.{
 				.bg = if (on) C.selected else null,
-				.fg = if (item.found) C.faint else if (item.keeps == .file) C.warn else C.ok,
+				.fg = if (item.found) (if (on) C.dim else C.faint) else if (item.keeps == .file) C.warn else C.ok,
 			});
 			pad(app, if (item.found) "kubeconfig" else item.keeps.label(), 11, false);
-			screen.style(.{ .bg = if (on) C.selected else null, .fg = C.dim });
+			screen.style(.{ .bg = if (on) C.selected else null, .fg = if (on) C.text else C.dim });
 			// 4 for the marker, 22 name, 11 engine, 11 for where the thing lives.
 			const room = if (width > 50) width - 50 else 0;
 			const shown = write(app, item.target, room);
@@ -314,7 +314,7 @@ fn sidebar(app: *App, width: usize, rows: usize) void {
 		const count_width = term.width(count);
 		if (width > used + count_width) {
 			fill(app, ' ', width - used - count_width);
-			screen.style(.{ .bg = if (selected) C.selected else null, .fg = C.faint });
+			screen.style(.{ .bg = if (selected) C.selected else null, .fg = if (selected) C.dim else C.faint });
 			_ = write(app, count, count_width);
 		}
 		screen.reset();
@@ -754,7 +754,11 @@ fn pane(app: *App, one: *Files.Pane, left: usize, width: usize, rows: usize, act
 		screen.style(.{
 			.bg = if (on) C.selected else null,
 			.fg = if (marked) C.warn else if (entry.kind == .dir) C.accent else C.text,
-			.bold = entry.kind == .dir,
+			// Bold on the row the cursor is on as well as under it: here the band
+			// is the only thing saying where the cursor is - there is no bright
+			// cell on the row the way there is in the grid - and a second cue
+			// costs no contrast at all.
+			.bold = on or entry.kind == .dir,
 		});
 
 		// The size and the time are fixed width on the right; the name takes what

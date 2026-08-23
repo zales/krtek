@@ -108,7 +108,12 @@ fn colour(index: u8, scheme: Scheme) vaxis.Color {
 			179 => .{ .rgb = .{ 0xd8, 0xa6, 0x63 } }, // warning
 			203 => .{ .rgb = .{ 0xe8, 0x6b, 0x72 } }, // danger
 			236 => .{ .rgb = .{ 0x26, 0x26, 0x2c } }, // bars
-			238 => .{ .rgb = .{ 0x2e, 0x2e, 0x36 } }, // selection
+			// The band under the cursor. It stops here rather than going lighter
+			// because the name on it is drawn in the accent, and a brighter band
+			// makes the one thing it is pointing at harder to read than the rows
+			// around it - which is the opposite of the job. What is quiet elsewhere
+			// is drawn a step brighter on this, instead.
+			238 => .{ .rgb = .{ 0x4c, 0x4c, 0x56 } }, // selection
 			240 => .{ .rgb = .{ 0x7c, 0x7c, 0x88 } }, // faint
 			242 => .{ .rgb = .{ 0x82, 0x82, 0x8e } }, // null
 			245 => .{ .rgb = .{ 0x9a, 0x9a, 0xa6 } }, // dim
@@ -125,7 +130,7 @@ fn colour(index: u8, scheme: Scheme) vaxis.Color {
 			179 => .{ .rgb = .{ 0x8a, 0x59, 0x0c } }, // warning
 			203 => .{ .rgb = .{ 0xb4, 0x20, 0x28 } }, // danger
 			236 => .{ .rgb = .{ 0xe8, 0xe8, 0xef } }, // bars
-			238 => .{ .rgb = .{ 0xd6, 0xdb, 0xec } }, // selection
+			238 => .{ .rgb = .{ 0xb0, 0xbc, 0xdc } }, // selection
 			240 => .{ .rgb = .{ 0x72, 0x72, 0x80 } }, // faint
 			242 => .{ .rgb = .{ 0x75, 0x75, 0x7f } }, // null
 			245 => .{ .rgb = .{ 0x5c, 0x5c, 0x66 } }, // dim
