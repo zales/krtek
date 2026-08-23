@@ -39,7 +39,10 @@ EOF
 # A certificate of the broker's own making, which is why the TLS check below asks
 # for insecure=1 - and why the one without it has to fail.
 mkdir -p "$WORK/secrets"
-docker run --rm -v "$WORK/secrets:/secrets" --entrypoint bash "$IMAGE" -c '
+# As root, because the directory being written into belongs to whoever ran this
+# and the image does not run as them. A Mac hides that - Docker Desktop maps the
+# user - and Linux does not, where it is a permission denied and no keystore.
+docker run --rm --user root -v "$WORK/secrets:/secrets" --entrypoint bash "$IMAGE" -c '
   keytool -genkeypair -alias broker -keyalg RSA -keysize 2048 -validity 30 \
     -dname "CN=localhost, O=krtek, C=CZ" -ext "SAN=dns:localhost,ip:127.0.0.1" \
     -keystore /secrets/server.keystore.jks -storepass changeit -keypass changeit \

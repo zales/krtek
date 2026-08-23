@@ -20,14 +20,32 @@ LONE=/tmp/krtek-sftp-test-lone
 # A home of its own, so the check below reads a known_hosts this script wrote
 # and not the one belonging to whoever is running it.
 HOME_DIR=/tmp/krtek-sftp-test-home
-trap 'docker rm -f "$NAME" >/dev/null 2>&1 || true; rm -rf "$KEY" "$KEY.pub" "$LONE" "$HOME_DIR" /tmp/krtek-sftp-test-local' EXIT
+# Somewhere to put the one line of sshd configuration below.
+SSHD_DIR=/tmp/krtek-sftp-test-sshd
+trap 'docker rm -f "$NAME" >/dev/null 2>&1 || true; rm -rf "$KEY" "$KEY.pub" "$LONE" "$HOME_DIR" "$SSHD_DIR" /tmp/krtek-sftp-test-local' EXIT
 
 BIN=zig-out/bin/krtek
 test -x "$BIN" || { echo "$BIN is not there - zig build first" >&2; exit 1; }
 
+# Since 9.8, OpenSSH shuts a source out for some seconds after a failed
+# authentication and drops what comes next before it says hello. This suite fails
+# authentication on purpose, several times, from one address - so with the
+# penalty on, the checks after those fail for a reason that has nothing to do
+# with what they are checking. Off here, so what is measured is the driver.
+#
+# krtek says what that penalty is when it meets one on a real server; there is no
+# check for it, because provoking it means waiting out what it costs.
+rm -rf "$SSHD_DIR"
+mkdir -p "$SSHD_DIR"
+# atmoz/sftp runs whatever is in /etc/sftp.d before it starts sshd.
+printf '#!/bin/sh\necho "PerSourcePenalties no" >> /etc/ssh/sshd_config\n' > "$SSHD_DIR/penalties.sh"
+chmod 755 "$SSHD_DIR/penalties.sh"
+
 echo "starting $IMAGE"
 docker rm -f "$NAME" >/dev/null 2>&1 || true
-docker run -d --name "$NAME" -p "$PORT:22" "$IMAGE" foo:heslo:::upload >/dev/null
+docker run -d --name "$NAME" -p "$PORT:22" \
+	-v "$SSHD_DIR/penalties.sh:/etc/sftp.d/penalties.sh:ro" \
+	"$IMAGE" foo:heslo:::upload >/dev/null
 
 printf 'waiting for sshd'
 until docker logs "$NAME" 2>&1 | grep -q "Server listening on 0.0.0.0"; do
@@ -102,12 +120,6 @@ echo "ok: a host that is in known_hosts connects"
 
 check "an unknown host is refused, with its fingerprint" \
 	"sftp://foo:heslo@127.0.0.1:$PORT/upload" "known_hosts"
-check "a wrong password says so" \
-	"sftp://foo:spatne@127.0.0.1:$PORT/upload?insecure=1" "password for foo was not accepted"
-# And when there is nothing to log in with, the word "password" is what makes the
-# interface offer one.
-check "no credentials asks for a password" \
-	"sftp://nikdo@127.0.0.1:$PORT/upload?insecure=1" "password"
 check "a file is not a directory" \
 	"sftp://foo:heslo@127.0.0.1:$PORT/upload/velky.bin?insecure=1" "is a file, not a directory"
 check "a directory that is not there says so" \
@@ -163,6 +175,20 @@ if docker exec "$NAME" test -e /home/foo/upload/strom; then
 fi
 echo "ok: a tree is removed with everything under it"
 
+# --- what a refused login says, which has to come last ---
+#
+# Everything that fails to authenticate goes here, and nothing follows it: since
+# 9.8 OpenSSH shuts a source out for some seconds after a failed authentication
+# and drops what comes next before the banner. On a slow machine the checks after
+# these got in anyway; on a fast one they do not, and the failure has nothing to
+# do with what they were checking.
+check "a wrong password says so" \
+	"sftp://foo:spatne@127.0.0.1:$PORT/upload?insecure=1" "password for foo was not accepted"
+# And when there is nothing to log in with, the word "password" is what makes the
+# interface offer one.
+check "no credentials asks for a password" \
+	"sftp://nikdo@127.0.0.1:$PORT/upload?insecure=1" "password"
+
 # --- the password prompt, which is where those two messages end up ---
 #
 # The driver saying the right thing is only half of it: the interface decides
@@ -190,12 +216,6 @@ echo "ok: a refused password says so, and can be typed again"
 # And the right password after a wrong one, which is the retry actually working:
 # the second attempt has to go in on its own, because adding a password to a
 # target that has one leaves both in it.
-#
-# The wait is OpenSSH's, not this test's. Since 9.8 it shuts a source out for
-# some seconds after a failed authentication and drops what comes next before
-# the banner, so an attempt made straight away fails for a reason that has
-# nothing to do with the password.
-sleep 25
 out=$(tests/screen.py "$ASK" "{sleep}heslo{enter}{sleep}{keep}" 2>&1 || true)
 printf '%s' "$out" | grep -q "SFTP (libssh2" || {
 	printf '%s\n' "$out" >&2

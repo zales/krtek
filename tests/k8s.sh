@@ -203,8 +203,17 @@ check "a context that is not there says which ones are" "k8s://staging" "there i
 # kubectl is the yardstick: the same pods, the same states, from both.
 # The sidebar and the rule that divides it off come first on every line; the grid
 # is whatever follows the rule.
-mine=$(screen "$ROOT" '{keep}' | sed -n '4,16p' | sed 's/^.*[┃│]//' | awk 'NF >= 3 {print $1, $2, $3}' | sort)
-theirs=$(kubectl -n payments get pods --no-headers | awk '{print $1, $2, $3}' | sort)
+# Asked more than once, because a crash-looping pod is not standing still: it
+# goes CrashLoopBackOff, restarts into Error, and comes back - so two snapshots
+# taken a second apart can disagree about it while both are right. What is being
+# checked is that the two agree about a cluster, not that they were asked at the
+# same instant.
+for _ in $(seq 1 6); do
+	mine=$(screen "$ROOT" '{keep}' | sed -n '4,16p' | sed 's/^.*[┃│]//' | awk 'NF >= 3 {print $1, $2, $3}' | sort)
+	theirs=$(kubectl -n payments get pods --no-headers | awk '{print $1, $2, $3}' | sort)
+	[ "$mine" = "$theirs" ] && break
+	sleep 3
+done
 [ -n "$theirs" ] || fail "kubectl listed no pods, so there is nothing to compare against"
 if [ "$mine" != "$theirs" ]; then
 	echo "--- krtek:"   >&2; printf '%s\n' "$mine"   >&2
@@ -266,8 +275,19 @@ printf '%s' "$opened" | grep -q "s shell" || fail "the object screen should offe
 echo "ok: enter opens a screen about the pod, with logs and a shell on it"
 
 # And the actions on it are the engine's own console lines.
-logged=$(python3 tests/screen.py "$ROOT" '{tab}' '{enter}' '{sleep}' 'l' '{sleep}' '{keep}' 2>&1)
-printf '%s' "$logged" | grep -q "line" || fail "l on the object screen should show the log"
+#
+# What the pod actually wrote, not the name of the column it arrives in: a
+# listing that came back empty still draws the header, so grepping for that
+# passes whether or not there was a log. Asked more than once because the log is
+# a round trip to the cluster, and half a second is not a promise.
+for _ in $(seq 1 6); do
+	logged=$(python3 tests/screen.py "$ROOT" '{tab}' '{enter}' '{sleep}' 'l' '{sleep}' '{sleep}' '{keep}' 2>&1)
+	printf '%s' "$logged" | grep -q "listening on" && break
+done
+printf '%s' "$logged" | grep -q "listening on" || {
+	printf '%s\n' "$logged" >&2
+	fail "l on the object screen should show the log"
+}
 echo "ok: l on it shows that pod's log"
 
 # And the terminal is still there for something full screen.
@@ -278,8 +298,16 @@ printf '%s' "$terminal" | grep -q "I-AM-shellme" ||
 echo "ok: EXEC -t hands the terminal over for something full screen"
 
 # And what it says when the pod is not there, rather than a hung terminal.
-missing=$(python3 tests/screen.py "$ROOT" 's' 'EXEC nosuchpod' '{ctrl-s}' '{sleep}' '{keep}' 2>&1)
-printf '%s' "$missing" | grep -qi "nosuchpod" || fail "EXEC on a missing pod should name it"
+#
+# `m` because that is where a failed statement puts what went wrong: the line
+# along the bottom says how many failed and offers the details, and the details
+# are where the name is. This check used to read the bottom line and had not
+# been run since it stopped being there.
+missing=$(python3 tests/screen.py "$ROOT" 's' 'EXEC nosuchpod' '{ctrl-s}' '{sleep}' 'm' '{sleep}' '{keep}' 2>&1)
+printf '%s' "$missing" | grep -qi "nosuchpod" || {
+	printf '%s\n' "$missing" >&2
+	fail "EXEC on a missing pod should name it"
+}
 echo "ok: EXEC on a pod that is not there says so"
 
 # A manifest applied from the editor. Typed rather than pasted, so the newlines
