@@ -22,7 +22,7 @@ pub fn frame(app: *App, size: Size) !void {
 	const screen = app.screen;
 	screen.begin();
 	// Set again by whatever is being typed into, if anything is.
-	app.type_cursor = null;
+	app.typing.cursor = null;
 
 	const body_rows = if (size.rows > 3) size.rows - 3 else 1;
 	// The file manager takes the whole width: two panes and a sidebar on eighty
@@ -36,7 +36,7 @@ pub fn frame(app: *App, size: Size) !void {
 	header(app, size);
 	if (app.view == .connections) {
 		connections(app, size, body_rows);
-		if (app.form != null) {
+		if (app.typing.form != null) {
 			try formPanel(app, size, 0, body_rows);
 		}
 		if (app.palette != null) {
@@ -61,10 +61,10 @@ pub fn frame(app: *App, size: Size) !void {
 		.files => files(app, size, body_rows),
 		.connections => {},
 	}
-	if (app.form != null) {
+	if (app.typing.form != null) {
 		try formPanel(app, size, side, body_rows);
 	}
-	if (app.editor != null) {
+	if (app.typing.editor != null) {
 		editorPanel(app, size, side, body_rows);
 	}
 	if (app.detail) {
@@ -82,19 +82,19 @@ pub fn frame(app: *App, size: Size) !void {
 /// Park the cursor where the user is typing, then put the frame on screen.
 fn cursorAndFlush(app: *App, size: Size) !void {
 	const screen = app.screen;
-	if (app.prompt) |prompt| {
+	if (app.typing.prompt) |prompt| {
 		// A password shows dots, so the cursor goes after the last one.
 		const typed = if (prompt.kind == .password)
 			std.unicode.utf8CountCodepoints(prompt.buffer.items) catch prompt.buffer.items.len
 		else
 			term.width(prompt.buffer.items);
 		screen.cursorAt(size.rows - 1, term.width(prompt.label) + typed);
-	} else if (app.editor) |*editor| {
+	} else if (app.typing.editor) |*editor| {
 		// In the editor the cursor is where the typing happens, inside the panel.
 		const at = editor.position();
 		const side: usize = if (size.cols > SIDEBAR + 20) SIDEBAR else 0;
 		screen.cursorAt(2 + (at.line - editor.scroll), side + 2 + 5 + at.column);
-	} else if (app.type_cursor) |spot| {
+	} else if (app.typing.cursor) |spot| {
 		screen.cursorAt(spot.row, spot.col);
 	} else {
 		screen.cursorOff();
@@ -241,10 +241,10 @@ fn sidebar(app: *App, width: usize, rows: usize) void {
 
 	screen.moveTo(1, 0);
 	screen.style(.{ .fg = C.dim });
-	if (app.prompt != null and app.prompt.?.kind == .filter) {
+	if (app.typing.prompt != null and app.typing.prompt.?.kind == .filter) {
 		_ = write(app, " filter: ", width);
 		screen.style(.{ .fg = C.accent });
-		_ = write(app, app.prompt.?.buffer.items, width - 9);
+		_ = write(app, app.typing.prompt.?.buffer.items, width - 9);
 	} else if (app.filter.items.len > 0) {
 		_ = write(app, " /", width);
 		screen.style(.{ .fg = C.accent });
@@ -1225,7 +1225,7 @@ fn palettePanel(app: *App, size: Size, rows: usize) void {
 	var used: usize = write(app, " › ", width - 2);
 	screen.style(.{ .bg = C.bar, .fg = C.text });
 	used += write(app, palette.query.items, width -| used -| 2);
-	app.type_cursor = .{ .row = line, .col = left + 1 + used };
+	app.typing.cursor = .{ .row = line, .col = left + 1 + used };
 	screen.style(.{ .bg = C.bar, .fg = C.faint });
 	if (palette.query.items.len == 0) {
 		used += write(app, "what do you want to do?", width -| used -| 2);
@@ -1332,7 +1332,7 @@ fn promptLine(app: *App, size: Size) void {
 	const screen = app.screen;
 	screen.moveTo(size.rows - 1, 0);
 	screen.reset();
-	if (app.prompt) |prompt| {
+	if (app.typing.prompt) |prompt| {
 		screen.style(.{ .fg = C.accent, .bold = true });
 		var used: usize = write(app, prompt.label, size.cols);
 		screen.style(.{ .fg = C.text });
@@ -1356,7 +1356,7 @@ fn promptLine(app: *App, size: Size) void {
 /// What is worth pressing where the user actually is. `ctrl+k` is on every one
 /// of them, because it is the way to everything else.
 fn footerHints(app: *App) []const u8 {
-	if (app.prefix) |pending| {
+	if (app.typing.prefix) |pending| {
 		return switch (pending) {
 			'C' => " c the value   r the row   p the page as CSV   s the last SQL   esc nothing",
 			else => " esc cancels",
@@ -1365,10 +1365,10 @@ fn footerHints(app: *App) []const u8 {
 	if (app.detail) {
 		return " esc closes the value   ctrl+k commands";
 	}
-	if (app.editor != null) {
+	if (app.typing.editor != null) {
 		return " ctrl+s runs   tab completes   ctrl+p earlier   ctrl+w word back   esc closes";
 	}
-	if (app.form != null) {
+	if (app.typing.form != null) {
 		// Not the palette here: in a form ctrl+k removes a row.
 		return " tab moves   ctrl+s saves   ctrl+u clears the field   esc cancels";
 	}
@@ -1468,7 +1468,7 @@ fn addHint(arena: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), text: []c
 /// The SQL editor: line numbers, the statement in colour, and the completion
 /// list where the word being typed is.
 fn editorPanel(app: *App, size: Size, side: usize, rows: usize) void {
-	const editor = &app.editor.?;
+	const editor = &app.typing.editor.?;
 	const screen = app.screen;
 	const outer_left = side + 1;
 	const outer_width = if (size.cols > outer_left + 4) size.cols - outer_left - 1 else 20;
@@ -1707,7 +1707,7 @@ fn fill(app: *App, char: u8, count: usize) void {
 /// a terminal can draw that does not depend on having colours to spare. And the
 /// frame was the height of the pane, which made every form nine tenths empty box.
 fn formPanel(app: *App, size: Size, side: usize, rows: usize) !void {
-	const form = &app.form.?;
+	const form = &app.typing.form.?;
 	const screen = app.screen;
 	const outer_left = side + 1;
 	const outer_width = if (size.cols > outer_left + 2) size.cols - outer_left - 1 else 20;
@@ -1932,7 +1932,7 @@ fn formPanel(app: *App, size: Size, side: usize, rows: usize) !void {
 					tail(field.text.items, span);
 				if (focused) {
 					// After the last character, where the next one will go.
-					app.type_cursor = .{ .row = line, .col = at + @min(term.width(shown), span -| 1) };
+					app.typing.cursor = .{ .row = line, .col = at + @min(term.width(shown), span -| 1) };
 				}
 				// A row too narrow for its labels puts the label inside the empty
 				// field instead of dropping it: five fields in a line still say what

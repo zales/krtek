@@ -21,12 +21,12 @@ pub fn handle(app: *App, key: Key, size: term.Size) !void {
 		app.followTick();
 		return;
 	}
-	if (app.prompt != null) {
+	if (app.typing.prompt != null) {
 		try typing(app, key);
 		return;
 	}
-	if (app.form != null) {
-		switch (app.form.?.handle(key)) {
+	if (app.typing.form != null) {
+		switch (app.typing.form.?.handle(key)) {
 			.none => try app.afterFormKey(),
 			.cancel => app.closeForm(),
 			.submit => try app.submitForm(),
@@ -39,12 +39,12 @@ pub fn handle(app: *App, key: Key, size: term.Size) !void {
 		try onPalette(app, key, size);
 		return;
 	}
-	if (app.editor != null) {
+	if (app.typing.editor != null) {
 		try onEditor(app, key);
 		return;
 	}
-	if (app.prefix) |pending| {
-		app.prefix = null;
+	if (app.typing.prefix) |pending| {
+		app.typing.prefix = null;
 		try afterPrefix(app, pending, key);
 		return;
 	}
@@ -266,7 +266,7 @@ test "the palette finds an action by a few letters of it" {
 /// Keys while the SQL editor is open. Everything that is not a command inserts
 /// itself, which is what makes it an editor rather than a prompt.
 fn onEditor(app: *App, key: Key) !void {
-	const editor = &app.editor.?;
+	const editor = &app.typing.editor.?;
 	switch (key) {
 		.ctrl => |code| switch (code) {
 			's' => try app.runEditor(),
@@ -676,7 +676,7 @@ fn letter(app: *App, point: u21, size: term.Size) !void {
 		'D' => try drop(app),
 		'X' => try truncate(app),
 		'C' => {
-			app.prefix = 'C';
+			app.typing.prefix = 'C';
 			app.say("copy: c value   r row   p page as CSV   s last SQL", .{});
 		},
 		else => {},
@@ -855,12 +855,12 @@ fn onObject(app: *App, key: Key) !void {
 
 /// An action nothing takes back asks first, in the words the engine gave it.
 fn askAction(app: *App, action: database.Action) !void {
-	if (app.prompt) |*old| {
+	if (app.typing.prompt) |*old| {
 		old.buffer.deinit(app.allocator);
 	}
-	app.pending.clearRetainingCapacity();
-	try app.pending.appendSlice(app.allocator, action.statement);
-	app.prompt = .{ .kind = .confirm, .label = " type y to " };
+	app.typing.pending.clearRetainingCapacity();
+	try app.typing.pending.appendSlice(app.allocator, action.statement);
+	app.typing.prompt = .{ .kind = .confirm, .label = " type y to " };
 	app.say("{s}?", .{action.label});
 }
 
@@ -933,7 +933,7 @@ fn edit(app: *App) !void {
 	try ask(app, .edit, " value: ");
 	const cell = app.rows.items[app.cursor_row].cells[app.cursor_col];
 	if (cell.kind != .nul) {
-		try app.prompt.?.buffer.appendSlice(app.allocator, cell.text);
+		try app.typing.prompt.?.buffer.appendSlice(app.allocator, cell.text);
 	}
 }
 
@@ -1016,28 +1016,28 @@ fn askRename(app: *App) !void {
 		return;
 	}
 	try ask(app, .rename_file, " rename to: ");
-	try app.prompt.?.buffer.appendSlice(app.allocator, one.name);
+	try app.typing.prompt.?.buffer.appendSlice(app.allocator, one.name);
 }
 
 fn ask(app: *App, kind: PromptKind, label: []const u8) !void {
-	if (app.prompt) |*old| {
+	if (app.typing.prompt) |*old| {
 		old.buffer.deinit(app.allocator);
 	}
-	app.prompt = .{ .kind = kind, .label = label };
+	app.typing.prompt = .{ .kind = kind, .label = label };
 	if (kind == .filter and app.filter.items.len > 0) {
-		try app.prompt.?.buffer.appendSlice(app.allocator, app.filter.items);
+		try app.typing.prompt.?.buffer.appendSlice(app.allocator, app.filter.items);
 	}
 }
 
 fn close(app: *App) void {
-	if (app.prompt) |*prompt| {
+	if (app.typing.prompt) |*prompt| {
 		prompt.buffer.deinit(app.allocator);
 	}
-	app.prompt = null;
+	app.typing.prompt = null;
 }
 
 fn typing(app: *App, key: Key) !void {
-	const prompt = &app.prompt.?;
+	const prompt = &app.typing.prompt.?;
 	switch (key) {
 		.escape => {
 			if (prompt.kind == .filter) {
@@ -1133,7 +1133,7 @@ fn typing(app: *App, key: Key) !void {
 
 /// The object filter applies as it is typed.
 fn refilter(app: *App) !void {
-	const prompt = app.prompt orelse return;
+	const prompt = app.typing.prompt orelse return;
 	if (prompt.kind != .filter) {
 		return;
 	}

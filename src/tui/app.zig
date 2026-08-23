@@ -263,12 +263,37 @@ const Saved = struct {
 	editing: ?usize = null,
 };
 
+/// What is being typed, and what is waiting on the answer.
+///
+/// One prompt, one form, one editor - never two at once, which is why they sit
+/// together rather than each keeping its own corner. The arena is the form's:
+/// it is built again whenever the engine at the top of it changes, so what was
+/// typed has to outlive the form it was typed into.
+const Typing = struct {
+	prompt: ?Prompt = null,
+	form: ?Form.Form = null,
+	arena: std.heap.ArenaAllocator,
+	/// A statement waiting for a yes at the confirmation prompt.
+	pending: std.ArrayListUnmanaged(u8) = .empty,
+	/// The SQL editor, when it is open. This is where statements are written;
+	/// the one-line prompt only takes the short `:` commands now.
+	editor: ?Editor = null,
+	/// A key that is waiting for the one after it - `C` for the copy keys. The
+	/// footer lists what the next key can be, so a prefix is not something to
+	/// remember either.
+	prefix: ?u21 = null,
+	/// Where the text cursor should sit. Worked out while drawing, because only
+	/// the drawing code knows where a field ended up, and read at the end of the
+	/// frame to put the terminal's own cursor there.
+	cursor: ?Spot = null,
+	/// Which engine the open connection form was built for: when the choice at the
+	/// top of it changes, the fields under it are somebody else's.
+	built_for: conns.Engine = .sqlite,
+};
+
 pub const App = struct {
 	allocator: std.mem.Allocator,
 	arena: std.heap.ArenaAllocator, // the loaded page of rows
-	/// What the connection form is holding: it is built again whenever the engine
-	/// changes, so what was typed has to outlive the form it was typed into.
-	form_arena: std.heap.ArenaAllocator,
 	screen: *Term,
 	conn: database.Db,
 	/// False while the connection list is on screen and nothing is open.
@@ -311,10 +336,7 @@ pub const App = struct {
 	row_scroll: usize = 0,
 	col_scroll: usize = 0,
 
-	prompt: ?Prompt = null,
-	form: ?Form.Form = null,
-	/// A statement waiting for a yes at the confirmation prompt.
-	pending: std.ArrayListUnmanaged(u8) = .empty,
+	typing: Typing,
 	marked: std.ArrayListUnmanaged(usize) = .empty, // row indexes ticked with space
 	hidden: std.ArrayListUnmanaged(usize) = .empty, // column indexes hidden from the grid
 	/// What the filter form put together: conditions an engine of any kind can
@@ -333,24 +355,10 @@ pub const App = struct {
 	quit: bool = false,
 
 	saved: Saved,
-	/// Which engine the open connection form was built for: when the choice at the
-	/// top of it changes, the fields under it are somebody else's.
-	built_engine: conns.Engine = .sqlite,
 	palette: ?Palette = null,
 	/// The two panes, while the file manager is on screen. Null the rest of the
 	/// time: a connection that holds rows has no business keeping one open.
 	files: ?*Files.Manager = null,
-	/// The SQL editor, when it is open. This is where statements are written;
-	/// the one-line prompt only takes the short `:` commands now.
-	editor: ?Editor = null,
-	/// A key that is waiting for the one after it - `C` for the copy keys. The
-	/// footer lists what the next key can be, so a prefix is not something to
-	/// remember either.
-	prefix: ?u21 = null,
-	/// Where the text cursor should sit. Worked out while drawing, because only
-	/// the drawing code knows where a field ended up, and read at the end of the
-	/// frame to put the terminal's own cursor there.
-	type_cursor: ?Spot = null,
 	running: Running = .{},
 	/// Set once the App sits at its final address. `init` connects while the
 	/// struct is still being built and returned by value, so the pointer handed
@@ -370,7 +378,7 @@ pub const App = struct {
 			.arena = std.heap.ArenaAllocator.init(allocator),
 			.report = .{ .arena = std.heap.ArenaAllocator.init(allocator) },
 			.object = .{ .arena = std.heap.ArenaAllocator.init(allocator) },
-			.form_arena = std.heap.ArenaAllocator.init(allocator),
+			.typing = .{ .arena = std.heap.ArenaAllocator.init(allocator) },
 			.screen = try Term.init(allocator, io, env),
 			.conn = undefined,
 			.connected = false,
@@ -425,7 +433,7 @@ pub const App = struct {
 				const sent = !std.mem.eql(u8, bare, target);
 				self.saved.pending.clearRetainingCapacity();
 				try self.saved.pending.appendSlice(self.allocator, bare);
-				self.prompt = .{ .kind = .password, .label = " password: " };
+				self.typing.prompt = .{ .kind = .password, .label = " password: " };
 				// A server with no password and a server with the wrong one both say
 				// `password`, and there is no telling those apart by their words.
 				// What can be told is whether one was sent - and answering somebody
@@ -491,10 +499,10 @@ pub const App = struct {
 	// --- the SQL editor ---
 
 	pub fn openEditor(self: *App) !void {
-		if (self.editor != null) {
+		if (self.typing.editor != null) {
 			return;
 		}
-		self.editor = Editor.init(self.allocator);
+		self.typing.editor = Editor.init(self.allocator);
 		// Not a list of keys: the footer has one, and saying it twice on one screen
 		// teaches nobody anything the second time. What is worth saying here is what
 		// this panel *is*, which is not the same thing on every engine.
@@ -507,10 +515,10 @@ pub const App = struct {
 	}
 
 	pub fn closeEditor(self: *App) void {
-		if (self.editor) |*open| {
+		if (self.typing.editor) |*open| {
 			open.deinit();
 		}
-		self.editor = null;
+		self.typing.editor = null;
 	}
 
 	/// Run what is in the editor and close it, so the result is what is on
@@ -521,7 +529,7 @@ pub const App = struct {
 	/// reaching for the key that opens the editor between every command turns
 	/// three keystrokes into six.
 	pub fn runEditor(self: *App) !void {
-		const editor = &(self.editor orelse return);
+		const editor = &(self.typing.editor orelse return);
 		const sql = std.mem.trim(u8, editor.text.items, " \t\r\n");
 		if (sql.len == 0) {
 			self.complain("nothing to run", .{});
@@ -546,7 +554,7 @@ pub const App = struct {
 		try self.remember(owned);
 		try self.runBatch(owned);
 		// Opening one, or leaving it, changes which of the two this is.
-		if (self.conn.sessionIn().len == 0 and self.editor != null and talking) {
+		if (self.conn.sessionIn().len == 0 and self.typing.editor != null and talking) {
 			self.closeEditor();
 		} else {
 			try self.followShell();
@@ -555,7 +563,7 @@ pub const App = struct {
 
 	/// Put an earlier statement in the editor; `delta` walks the history.
 	pub fn editorHistory(self: *App, delta: isize) !void {
-		const editor = &(self.editor orelse return);
+		const editor = &(self.typing.editor orelse return);
 		if (self.history.items.len == 0) {
 			return;
 		}
@@ -571,7 +579,7 @@ pub const App = struct {
 	/// What tab offers: the names in this database, the columns of the table on
 	/// screen, and SQL's own words.
 	pub fn completeInEditor(self: *App) !void {
-		const editor = &(self.editor orelse return);
+		const editor = &(self.typing.editor orelse return);
 		var arena = std.heap.ArenaAllocator.init(self.allocator);
 		defer arena.deinit();
 		const scratch = arena.allocator();
@@ -786,7 +794,7 @@ pub const App = struct {
 			return;
 		}
 		self.saved.editing = null;
-		_ = self.form_arena.reset(.retain_capacity);
+		_ = self.typing.arena.reset(.retain_capacity);
 		var name: []const u8 = "";
 		var target: []const u8 = "";
 		var secret: []const u8 = "";
@@ -815,7 +823,7 @@ pub const App = struct {
 	/// An arena that outlives the form: the connection form is built again every
 	/// time the engine changes, and what was typed has to survive that.
 	fn formArena(self: *App) std.mem.Allocator {
-		return self.form_arena.allocator();
+		return self.typing.arena.allocator();
 	}
 
 	fn showConnectionForm(self: *App, shape: conns.Shape, name: []const u8, keeps: conns.Keeps, secret: []const u8) !void {
@@ -824,7 +832,7 @@ pub const App = struct {
 			if (self.saved.editing != null) "edit connection" else "add connection",
 			"pick the engine, fill in what it needs",
 		);
-		self.built_engine = shape.engine;
+		self.typing.built_for = shape.engine;
 		try form.text("name", name, 24);
 		try form.choice("engine", &conns.ENGINES, Form.indexOf(&conns.ENGINES, shape.engine.label()));
 
@@ -945,12 +953,12 @@ pub const App = struct {
 	/// so changing the engine builds the rest of it again - keeping whatever was
 	/// typed that the new engine also asks for.
 	pub fn afterFormKey(self: *App) !void {
-		const form = &(self.form orelse return);
+		const form = &(self.typing.form orelse return);
 		if (form.purpose != .connection) {
 			return;
 		}
 		const picked = conns.Engine.of(form.valueNamed("engine"));
-		if (picked == self.built_engine) {
+		if (picked == self.typing.built_for) {
 			return;
 		}
 		var shape = self.shapeOf(form);
@@ -963,7 +971,7 @@ pub const App = struct {
 		const keeps = std.meta.stringToEnum(conns.Keeps, form.valueNamed("keep the password")) orelse .ask;
 		try self.showConnectionForm(shape, name, keeps, secret);
 		// Back on the engine, so it can be cycled again without walking up to it.
-		self.form.?.cursor = 1;
+		self.typing.form.?.cursor = 1;
 	}
 
 	/// What the fields of the connection form say, whichever engine they are for.
@@ -1032,7 +1040,7 @@ pub const App = struct {
 		self.follow.statement.deinit(self.allocator);
 		self.report.list.deinit(self.allocator);
 		self.marked.deinit(self.allocator);
-		self.pending.deinit(self.allocator);
+		self.typing.pending.deinit(self.allocator);
 		self.saved.list.deinit();
 		self.saved.path.deinit(self.allocator);
 		self.saved.pending.deinit(self.allocator);
@@ -1056,14 +1064,14 @@ pub const App = struct {
 			self.allocator.free(value);
 		}
 		self.schema.deinit(self.allocator);
-		if (self.prompt) |*prompt| {
+		if (self.typing.prompt) |*prompt| {
 			prompt.buffer.deinit(self.allocator);
 		}
 		self.allocator.free(self.owned_path);
 		self.arena.deinit();
 		self.report.arena.deinit();
 		self.object.arena.deinit();
-		self.form_arena.deinit();
+		self.typing.arena.deinit();
 	}
 
 	/// The table on screen, with the schema it lives in.
@@ -1350,9 +1358,9 @@ pub const App = struct {
 	/// a statement may have opened or closed one.
 	fn followShell(self: *App) !void {
 		const talking = self.conn.sessionIn().len != 0;
-		if (talking and self.editor == null) {
+		if (talking and self.typing.editor == null) {
 			try self.openEditor();
-		} else if (!talking and self.editor != null and self.editor.?.text.items.len == 0) {
+		} else if (!talking and self.typing.editor != null and self.typing.editor.?.text.items.len == 0) {
 			self.closeEditor();
 		}
 	}
@@ -1482,7 +1490,7 @@ pub const App = struct {
 		if (self.follow.ms == 0 or self.view != .grid or !self.hasRows()) {
 			return;
 		}
-		if (self.prompt != null or self.form != null or self.editor != null or self.files != null or self.detail) {
+		if (self.typing.prompt != null or self.typing.form != null or self.typing.editor != null or self.files != null or self.detail) {
 			return;
 		}
 		self.reload() catch {};
@@ -1573,10 +1581,10 @@ pub const App = struct {
 		if (self.conn.files() != null or caps.final_deletes) {
 			const count = if (self.marked.items.len != 0) self.marked.items.len else @as(usize, 1);
 			const noun = if (self.conn.files() != null) "file" else caps.row_noun;
-			if (self.prompt) |*old| {
+			if (self.typing.prompt) |*old| {
 				old.buffer.deinit(self.allocator);
 			}
-			self.prompt = .{ .kind = .remove_rows, .label = " type y to delete: " };
+			self.typing.prompt = .{ .kind = .remove_rows, .label = " type y to delete: " };
 			self.say("delete {d} {s}{s}?", .{ count, noun, if (count == 1) "" else "s" });
 			return;
 		}
@@ -1931,10 +1939,10 @@ pub const App = struct {
 
 	/// Ask before running something destructive.
 	pub fn confirm(self: *App, statement: []const u8, verb: []const u8) !void {
-		self.pending.clearRetainingCapacity();
-		try self.pending.appendSlice(self.allocator, statement);
-		self.prompt = .{ .kind = .confirm, .label = " type y to " };
-		try self.prompt.?.buffer.appendSlice(self.allocator, "");
+		self.typing.pending.clearRetainingCapacity();
+		try self.typing.pending.appendSlice(self.allocator, statement);
+		self.typing.prompt = .{ .kind = .confirm, .label = " type y to " };
+		try self.typing.prompt.?.buffer.appendSlice(self.allocator, "");
 		self.say("{s}: {s}", .{ verb, statement });
 	}
 
@@ -2155,11 +2163,11 @@ pub const App = struct {
 	}
 
 	pub fn clearPending(self: *App) void {
-		self.pending.clearRetainingCapacity();
+		self.typing.pending.clearRetainingCapacity();
 	}
 
 	pub fn runPending(self: *App) !void {
-		if (self.pending.items.len == 0) {
+		if (self.typing.pending.items.len == 0) {
 			return;
 		}
 		// Whatever was being looked at may not survive this, and the answer goes
@@ -2167,9 +2175,9 @@ pub const App = struct {
 		if (self.view == .object) {
 			self.closeObject();
 		}
-		const statement = try self.allocator.dupe(u8, self.pending.items);
+		const statement = try self.allocator.dupe(u8, self.typing.pending.items);
 		defer self.allocator.free(statement);
-		self.pending.clearRetainingCapacity();
+		self.typing.pending.clearRetainingCapacity();
 		try self.runBatch(statement);
 		try self.loadObjects();
 		if (self.table_name) |name| {
@@ -2891,17 +2899,17 @@ pub const App = struct {
 	// --------------------------------------------------------------- forms
 
 	pub fn closeForm(self: *App) void {
-		if (self.form) |*open| {
+		if (self.typing.form) |*open| {
 			open.deinit();
 		}
-		self.form = null;
+		self.typing.form = null;
 	}
 
 	fn newForm(self: *App, purpose: Form.Purpose, title: []const u8, hint: []const u8) !*Form.Form {
 		self.closeForm();
-		self.form = Form.Form.init(self.allocator, purpose, title);
-		self.form.?.hint = hint;
-		return &self.form.?;
+		self.typing.form = Form.Form.init(self.allocator, purpose, title);
+		self.typing.form.?.hint = hint;
+		return &self.typing.form.?;
 	}
 
 	/// Insert, edit or clone a row of the current table.
@@ -3038,7 +3046,7 @@ pub const App = struct {
 
 	/// Append another column row to an open create/alter form.
 	pub fn addFormRow(self: *App) !void {
-		const form = &(self.form orelse return);
+		const form = &(self.typing.form orelse return);
 		if (form.purpose != .create_table and form.purpose != .alter_table) {
 			return;
 		}
@@ -3052,7 +3060,7 @@ pub const App = struct {
 
 	/// Drop the column row the cursor is in.
 	pub fn removeFormRow(self: *App) !void {
-		const form = &(self.form orelse return);
+		const form = &(self.typing.form orelse return);
 		const row = form.currentRow() orelse return;
 		var remaining: usize = 0;
 		for (form.fields.items) |field| {
@@ -3239,7 +3247,7 @@ pub const App = struct {
 	/// Turn the open form into SQL and run it. Everything goes through
 	/// `runBatch`, so a failure is reported the same way a typed query is.
 	pub fn submitForm(self: *App) !void {
-		const form = &(self.form orelse return);
+		const form = &(self.typing.form orelse return);
 		var arena = std.heap.ArenaAllocator.init(self.allocator);
 		defer arena.deinit();
 		const a = arena.allocator();
