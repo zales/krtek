@@ -208,10 +208,16 @@ check "a context that is not there says which ones are" "k8s://staging" "there i
 # taken a second apart can disagree about it while both are right. What is being
 # checked is that the two agree about a cluster, not that they were asked at the
 # same instant.
-for _ in $(seq 1 6); do
+# The broken pod has to have settled into CrashLoopBackOff as well, and not
+# merely into whatever both happen to see: it goes Error between restarts, and
+# two views agreeing on Error is agreement about a state the checks below are
+# not about.
+for _ in $(seq 1 10); do
 	mine=$(screen "$ROOT" '{keep}' | sed -n '4,16p' | sed 's/^.*[┃│]//' | awk 'NF >= 3 {print $1, $2, $3}' | sort)
 	theirs=$(kubectl -n payments get pods --no-headers | awk '{print $1, $2, $3}' | sort)
-	[ "$mine" = "$theirs" ] && break
+	if [ "$mine" = "$theirs" ] && printf '%s' "$theirs" | grep -q CrashLoopBackOff; then
+		break
+	fi
 	sleep 3
 done
 [ -n "$theirs" ] || fail "kubectl listed no pods, so there is nothing to compare against"
