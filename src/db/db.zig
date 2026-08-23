@@ -41,6 +41,101 @@ pub const typed = @import("typed.zig");
 pub const random = @import("random.zig");
 pub const sigv4 = @import("s3/sigv4.zig");
 
+/// Rows a driver built in memory, rather than a cursor over what a server is
+/// still sending.
+///
+/// Seven of the ten engines here answer that way: Redis, Kafka, S3, Azure Blob,
+/// RabbitMQ, SFTP and Kubernetes all take an answer apart and hand back a grid
+/// they assembled. Only the three SQL engines have a real cursor. So seven
+/// drivers had written out the same sixty-eight lines - two of them identical to
+/// the byte, a third differing by a comment - to hold a list of rows and walk it
+/// once.
+///
+/// What actually differed between them is data, and is data here: whether the
+/// rows came from a table that can be edited, how many the statement changed,
+/// which columns are numbers. The one thing that is really the driver's is what
+/// its own `Value` means, which it says by having an `asValue` method.
+pub fn Built(comptime Owner: type, comptime Held: type) type {
+	return struct {
+		const Self = @This();
+
+		/// Whose reply arena the rows are kept in. They live exactly as long as
+		/// the answer they were made from, which is what that arena is for.
+		owner: *Owner,
+		names: []const []const u8 = &.{},
+		/// Which columns are numbers, for a grid that right-aligns them. Absent
+		/// means none, which is what a driver with nothing to say leaves it as.
+		numeric: []const bool = &.{},
+		rows: std.ArrayListUnmanaged([]const Held) = .empty,
+		/// The table these came from, where they came from one. Empty means they
+		/// are an answer rather than a table, and so cannot be edited.
+		table: []const u8 = "",
+		/// What a statement changed, for the engines that count.
+		changed: i64 = 0,
+		at: usize = 0,
+		started: bool = false,
+
+		pub fn add(self: *Self, values: []const Held) Error!void {
+			const arena = self.owner.replies.allocator();
+			try self.rows.append(arena, try arena.dupe(Held, values));
+		}
+
+		/// Before the first row rather than on it, so the first `next` lands on
+		/// the first row like every other cursor here.
+		pub fn next(self: *Self) Error!bool {
+			if (!self.started) {
+				self.started = true;
+			} else {
+				self.at += 1;
+			}
+			return self.at < self.rows.items.len;
+		}
+
+		pub fn close(self: *Self) void {
+			self.at = 0;
+			self.rows.clearRetainingCapacity();
+		}
+
+		pub fn columnCount(self: *Self) usize {
+			return self.names.len;
+		}
+
+		pub fn name(self: *Self, at: usize) []const u8 {
+			return if (at < self.names.len) self.names[at] else "";
+		}
+
+		/// Out of range is null rather than an error: a grid that asks for a
+		/// column that is not there has already gone wrong, and crashing is not
+		/// the way to say so.
+		pub fn value(self: *Self, at: usize) Value {
+			if (self.at >= self.rows.items.len) {
+				return .{ .null = {} };
+			}
+			const row = self.rows.items[self.at];
+			if (at >= row.len) {
+				return .{ .null = {} };
+			}
+			return row[at].asValue();
+		}
+
+		pub fn sourceTable(self: *Self, _: usize) []const u8 {
+			return self.table;
+		}
+
+		pub fn sourceColumn(self: *Self, at: usize) []const u8 {
+			return if (self.table.len != 0) self.name(at) else "";
+		}
+
+		pub fn isNumeric(self: *Self, at: usize) bool {
+			return at < self.numeric.len and self.numeric[at];
+		}
+
+		pub fn affected(self: *Self) i64 {
+			return self.changed;
+		}
+	};
+}
+
 /// What the interface asks for, as a structure: see the file for why.
 pub const ask = @import("ask.zig");
 

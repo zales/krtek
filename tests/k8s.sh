@@ -268,8 +268,18 @@ echo "ok: output comes back as rows, and a non-zero exit is said"
 
 # Enter on a pod opens a screen about that pod, with what can be done to it along
 # the bottom - which is the thing somebody at a terminal reaches for first.
-opened=$(python3 tests/screen.py "$ROOT" '{tab}' '{enter}' '{sleep}' '{keep}' 2>&1)
-printf '%s' "$opened" | grep -q "container" || fail "enter on a pod should open a screen about it"
+#
+# Asked more than once: the container's own state arrives after the pod's, so a
+# pod opened the moment it exists has a screen with everything but that on it.
+for _ in $(seq 1 6); do
+	opened=$(python3 tests/screen.py "$ROOT" '{tab}' '{enter}' '{sleep}' '{keep}' 2>&1)
+	printf '%s' "$opened" | grep -q "container" && break
+	sleep 2
+done
+printf '%s' "$opened" | grep -q "container" || {
+	printf '%s\n' "$opened" >&2
+	fail "enter on a pod should open a screen about it"
+}
 printf '%s' "$opened" | grep -q "l logs" || fail "the object screen should offer logs"
 printf '%s' "$opened" | grep -q "s shell" || fail "the object screen should offer a shell"
 echo "ok: enter opens a screen about the pod, with logs and a shell on it"

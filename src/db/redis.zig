@@ -528,7 +528,7 @@ pub const Db = struct {
 			self.remember(reply.failure);
 			return error.Driver;
 		}
-		var rows = Rows{ .owner = self, .names = &[_][]const u8{"reply"} };
+		var rows = Rows{ .owner = self, .table = TABLE, .names = &[_][]const u8{"reply"} };
 		switch (reply) {
 			.list => |maybe| {
 				// A flat reply is one row per element; guessing more structure than
@@ -543,13 +543,13 @@ pub const Db = struct {
 	}
 
 	fn oneText(self: *Db, name: []const u8, text: []const u8) db.Error!Rows {
-		var rows = Rows{ .owner = self, .names = &[_][]const u8{name} };
+		var rows = Rows{ .owner = self, .table = TABLE, .names = &[_][]const u8{name} };
 		try rows.add(&[_]Value{.{ .text = try self.replies.allocator().dupe(u8, text) }});
 		return rows;
 	}
 
 	fn oneNumber(self: *Db, name: []const u8, number: i64) db.Error!Rows {
-		var rows = Rows{ .owner = self, .names = &[_][]const u8{name} };
+		var rows = Rows{ .owner = self, .table = TABLE, .names = &[_][]const u8{name} };
 		try rows.add(&[_]Value{.{ .number = number }});
 		return rows;
 	}
@@ -563,7 +563,7 @@ pub const Db = struct {
 	/// `take` were ignored altogether and every page showed the same keys.
 	fn scan(self: *Db, pattern: []const u8, skip: usize, take: usize) db.Error!Rows {
 		const arena = self.replies.allocator();
-		var rows = Rows{ .owner = self, .names = &[_][]const u8{ "key", "type", "ttl", "value" } };
+		var rows = Rows{ .owner = self, .table = TABLE, .names = &[_][]const u8{ "key", "type", "ttl", "value" } };
 		var cursor: []const u8 = "0";
 		var found: usize = 0;
 		var passed: usize = 0;
@@ -924,80 +924,29 @@ pub const Value = union(enum) {
 	number: i64,
 	failure: []const u8,
 	list: ?[]const Value,
+
+	/// What this means to the grid. The one thing a driver's own value type
+	/// has to say for itself; the walking and holding is db.Built's.
+	pub fn asValue(self: @This()) db.Value {
+		return switch (self) {
+			.nil => .{ .null = {} },
+			.number => |number| .{ .int = number },
+			.failure => |text| .{ .text = text },
+			// A key that is not there and a key holding nothing are different
+			// things, and only one of them is null.
+			.text => |text| if (text) |bytes| .{ .text = bytes } else .{ .null = {} },
+			// A list is shown as a mark rather than flattened: what is in it is
+			// what opening the row is for.
+			.list => .{ .text = "…" },
+		};
+	}
 };
 
 // ------------------------------------------------------------------- cursor
 
 /// Every reply is small enough to hold, so the cursor is a list of rows rather
 /// than something that streams.
-pub const Rows = struct {
-	owner: *Db,
-	names: []const []const u8 = &[_][]const u8{},
-	rows: std.ArrayListUnmanaged([]const Value) = .empty,
-	at: usize = 0,
-	started: bool = false,
-	changed: i64 = 0,
-
-	fn add(self: *Rows, values: []const Value) db.Error!void {
-		const arena = self.owner.replies.allocator();
-		try self.rows.append(arena, try arena.dupe(Value, values));
-	}
-
-	pub fn next(self: *Rows) db.Error!bool {
-		if (!self.started) {
-			self.started = true;
-		} else {
-			self.at += 1;
-		}
-		return self.at < self.rows.items.len;
-	}
-
-	pub fn close(self: *Rows) void {
-		self.at = 0;
-		self.rows.clearRetainingCapacity();
-	}
-
-	pub fn columnCount(self: *Rows) usize {
-		return self.names.len;
-	}
-
-	pub fn name(self: *Rows, at: usize) []const u8 {
-		return if (at < self.names.len) self.names[at] else "";
-	}
-
-	pub fn value(self: *Rows, at: usize) db.Value {
-		if (self.at >= self.rows.items.len) {
-			return .{ .null = {} };
-		}
-		const row = self.rows.items[self.at];
-		if (at >= row.len) {
-			return .{ .null = {} };
-		}
-		return switch (row[at]) {
-			.nil => .{ .null = {} },
-			.number => |number| .{ .int = number },
-			.failure => |text| .{ .text = text },
-			.text => |text| if (text) |bytes| .{ .text = bytes } else .{ .null = {} },
-			.list => .{ .text = "…" },
-		};
-	}
-
-	pub fn sourceTable(_: *Rows, _: usize) []const u8 {
-		return "data";
-	}
-
-	pub fn sourceColumn(self: *Rows, at: usize) []const u8 {
-		return self.name(at);
-	}
-
-	pub fn isNumeric(self: *Rows, at: usize) bool {
-		return std.mem.eql(u8, self.name(at), "ttl");
-	}
-
-	pub fn affected(self: *Rows) i64 {
-		return self.changed;
-	}
-};
+pub const Rows = db.Built(Db, Value);
 
 // ---------------------------------------------------------------------- DDL
 

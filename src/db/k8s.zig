@@ -128,6 +128,16 @@ pub const Value = union(enum) {
 	nil,
 	number: i64,
 	text: []const u8,
+
+	/// What this means to the grid. The one thing a driver's own value type
+	/// has to say for itself; the walking and holding is db.Built's.
+	pub fn asValue(self: @This()) db.Value {
+		return switch (self) {
+			.nil => .{ .null = {} },
+			.number => |number| .{ .int = number },
+			.text => |text| .{ .text = text },
+		};
+	}
 };
 
 pub const Db = struct {
@@ -1877,68 +1887,7 @@ pub const Shell = struct {
 	}
 };
 
-pub const Rows = struct {
-	owner: *Db,
-	names: []const []const u8 = &.{},
-	rows: std.ArrayListUnmanaged([]const Value) = .empty,
-	numeric: []const bool = &.{},
-	table: []const u8 = "",
-	at: usize = 0,
-	started: bool = false,
-
-	pub fn next(self: *Rows) db.Error!bool {
-		if (!self.started) {
-			self.started = true;
-		} else {
-			self.at += 1;
-		}
-		return self.at < self.rows.items.len;
-	}
-
-	pub fn close(self: *Rows) void {
-		self.at = 0;
-		self.rows.clearRetainingCapacity();
-	}
-
-	pub fn columnCount(self: *Rows) usize {
-		return self.names.len;
-	}
-
-	pub fn name(self: *Rows, at: usize) []const u8 {
-		return if (at < self.names.len) self.names[at] else "";
-	}
-
-	pub fn value(self: *Rows, at: usize) db.Value {
-		if (self.at >= self.rows.items.len) {
-			return .{ .null = {} };
-		}
-		const row = self.rows.items[self.at];
-		if (at >= row.len) {
-			return .{ .null = {} };
-		}
-		return switch (row[at]) {
-			.nil => .{ .null = {} },
-			.number => |number| .{ .int = number },
-			.text => |text| .{ .text = text },
-		};
-	}
-
-	pub fn sourceTable(self: *Rows, _: usize) []const u8 {
-		return self.table;
-	}
-
-	pub fn sourceColumn(self: *Rows, at: usize) []const u8 {
-		return self.name(at);
-	}
-
-	pub fn isNumeric(self: *Rows, at: usize) bool {
-		return at < self.numeric.len and self.numeric[at];
-	}
-
-	pub fn affected(_: *Rows) i64 {
-		return 0;
-	}
-};
+pub const Rows = db.Built(Db, Value);
 
 /// There is no DDL on a cluster: a resource kind is not something anybody creates
 /// from here, and every one of these says so rather than writing a statement

@@ -411,7 +411,7 @@ pub const Db = struct {
 				}
 			}
 			seen += 1;
-			try rows.addJson(table, item);
+			try addJson(&rows, table, item);
 		}
 		return .{ .rabbit = rows };
 	}
@@ -1279,93 +1279,39 @@ pub const Value = union(enum) {
 	text: []const u8,
 	blob: []const u8,
 	number: i64,
-};
 
-pub const Rows = struct {
-	owner: *Db,
-	names: []const []const u8 = &.{},
-	numeric: []const bool = &.{},
-	rows: std.ArrayListUnmanaged([]const Value) = .empty,
-	table: []const u8 = "",
-	at: usize = 0,
-	started: bool = false,
-
-	fn add(self: *Rows, values: []const Value) db.Error!void {
-		const arena = self.owner.replies.allocator();
-		try self.rows.append(arena, try arena.dupe(Value, values));
-	}
-
-	/// One row out of one JSON object, by the table's columns.
-	fn addJson(self: *Rows, table: api.Table, item: Json) db.Error!void {
-		const arena = self.owner.replies.allocator();
-		var values: std.ArrayListUnmanaged(Value) = .empty;
-		for (table.columns) |column| {
-			const found = api.pick(item, column.from) orelse {
-				try values.append(arena, .{ .nil = {} });
-				continue;
-			};
-			try values.append(arena, switch (found) {
-				.integer => |number| .{ .number = number },
-				else => .{ .text = try api.flatten(arena, found) },
-			});
-		}
-		try self.add(values.items);
-	}
-
-	pub fn next(self: *Rows) db.Error!bool {
-		if (!self.started) {
-			self.started = true;
-		} else {
-			self.at += 1;
-		}
-		return self.at < self.rows.items.len;
-	}
-
-	pub fn close(self: *Rows) void {
-		self.at = 0;
-		self.rows.clearRetainingCapacity();
-	}
-
-	pub fn columnCount(self: *Rows) usize {
-		return self.names.len;
-	}
-
-	pub fn name(self: *Rows, at: usize) []const u8 {
-		return if (at < self.names.len) self.names[at] else "";
-	}
-
-	pub fn value(self: *Rows, at: usize) db.Value {
-		if (self.at >= self.rows.items.len) {
-			return .{ .null = {} };
-		}
-		const row = self.rows.items[self.at];
-		if (at >= row.len) {
-			return .{ .null = {} };
-		}
-		return switch (row[at]) {
+	/// What this means to the grid. The one thing a driver's own value type
+	/// has to say for itself; the walking and holding is db.Built's.
+	pub fn asValue(self: @This()) db.Value {
+		return switch (self) {
 			.nil => .{ .null = {} },
 			.number => |number| .{ .int = number },
 			.text => |value_text| .{ .text = value_text },
 			.blob => |bytes| .{ .blob = bytes },
 		};
 	}
-
-	pub fn sourceTable(self: *Rows, _: usize) []const u8 {
-		return self.table;
-	}
-
-	pub fn sourceColumn(self: *Rows, at: usize) []const u8 {
-		return if (self.table.len != 0) self.name(at) else "";
-	}
-
-	pub fn isNumeric(self: *Rows, at: usize) bool {
-		return at < self.numeric.len and self.numeric[at];
-	}
-
-	pub fn affected(_: *Rows) i64 {
-		return 0;
-	}
 };
+
+pub const Rows = db.Built(Db, Value);
+
+/// One row out of one JSON object, by the table's columns. A function rather
+/// than a method: the rows themselves are `db.Built` now, and what a management
+/// API document turns into is this driver's business alone.
+fn addJson(rows: *Rows, table: api.Table, item: Json) db.Error!void {
+	const arena = rows.owner.replies.allocator();
+	var values: std.ArrayListUnmanaged(Value) = .empty;
+	for (table.columns) |column| {
+		const found = api.pick(item, column.from) orelse {
+			try values.append(arena, .{ .nil = {} });
+			continue;
+		};
+		try values.append(arena, switch (found) {
+			.integer => |number| .{ .number = number },
+			else => .{ .text = try api.flatten(arena, found) },
+		});
+	}
+	try rows.add(values.items);
+}
 
 // ---------------------------------------------------------------------- DDL
 
