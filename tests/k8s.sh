@@ -306,6 +306,43 @@ printf '%s' "$logged" | grep -q "listening on" || {
 }
 echo "ok: l on it shows that pod's log"
 
+# What the cluster is made of. Every number here comes out of the API for
+# nothing extra - what a node has left to place pods in, and what the pods on it
+# asked for - so it works on a cluster with no add-ons at all.
+summary=$(python3 tests/screen.py "$ROOT" 's' 'CLUSTER' '{ctrl-s}' '{sleep}' '{keep}' 2>&1)
+for expected in "version" "nodes" "cpu" "memory" "pods" "cpu requested"; do
+	printf '%s' "$summary" | grep -q "$expected" || {
+		printf '%s\n' "$summary" >&2
+		fail "CLUSTER should say $expected"
+	}
+done
+# Against kubectl, which is the yardstick everywhere else in this file.
+nodes=$(kubectl get nodes --no-headers | wc -l | tr -d ' ')
+printf '%s' "$summary" | grep -q "ready of $nodes" || {
+	printf '%s\n' "$summary" >&2
+	fail "CLUSTER should count the nodes kubectl counts"
+}
+echo "ok: CLUSTER says what the cluster is and what is spoken for"
+
+# And what is actually being used, which a cluster may not know. This one does
+# not - k3s is started without metrics-server above - so what is checked is that
+# it says so rather than answering zero, which is the difference between "idle"
+# and "nobody is measuring".
+out=$(python3 tests/screen.py "$ROOT" 's' 'TOP nodes' '{ctrl-s}' '{sleep}' 'm' '{sleep}' '{keep}' 2>&1)
+printf '%s' "$out" | grep -q "no metrics-server" || {
+	printf '%s\n' "$out" >&2
+	fail "TOP on a cluster without metrics-server should say so"
+}
+echo "ok: TOP says when there is nothing measuring, rather than answering zero"
+
+# A node's row carries what it has room for.
+row=$(python3 tests/screen.py "$ROOT" 's' 'GET nodes' '{ctrl-s}' '{sleep}' '{keep}' 2>&1)
+printf '%s' "$row" | grep -qE 'cpu +memory +pods' || {
+	printf '%s\n' "$row" >&2
+	fail "a node should say what it has left for pods"
+}
+echo "ok: a node says what it has left to place pods in"
+
 # A log is read across, not down: the one column it has takes the room nobody
 # else wants, rather than the width a table column is clipped to.
 kubectl -n payments delete pod tikac --ignore-not-found >/dev/null 2>&1

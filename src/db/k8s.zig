@@ -117,6 +117,9 @@ fn escapedTarget(arena: std.mem.Allocator, name: []const u8) ![]const u8 {
 /// the grid quietly ending early.
 const LIST_LIMIT: usize = 32 << 20;
 /// How many lines of a pod's log `LOGS` asks for when nobody said.
+/// Where metrics-server answers, when a cluster has one.
+const METRICS = "/apis/metrics.k8s.io/v1beta1";
+
 const LOG_LINES: usize = 200;
 
 /// Why an object is not made or changed from a grid. Said by `caps` before
@@ -729,7 +732,7 @@ pub const Db = struct {
 	pub fn repeatable(_: *Db, statement: []const u8) bool {
 		var words = std.mem.tokenizeAny(u8, statement, " \t\r\n;");
 		const verb = words.next() orelse return false;
-		for ([_][]const u8{ "GET", "DESCRIBE", "LOGS", "WHY", "CONTEXTS", "NAMESPACES", "NS", "VERSION" }) |reading| {
+		for ([_][]const u8{ "GET", "DESCRIBE", "LOGS", "WHY", "CONTEXTS", "NAMESPACES", "NS", "VERSION", "CLUSTER", "TOP" }) |reading| {
 			if (eq(verb, reading)) {
 				return true;
 			}
@@ -1121,6 +1124,12 @@ pub const Db = struct {
 		if (eq(verb, "VERSION")) {
 			return .{ .k8s = try self.oneText("version", self.version_text.items) };
 		}
+		if (eq(verb, "CLUSTER")) {
+			return .{ .k8s = try self.cluster(arena) };
+		}
+		if (eq(verb, "TOP")) {
+			return .{ .k8s = try self.top(arena, first) };
+		}
 		if (eq(verb, "GET")) {
 			if (api.find(first) == null) {
 				self.complain("there is nothing here called {s}", .{first});
@@ -1177,7 +1186,7 @@ pub const Db = struct {
 			return null;
 		}
 		self.complain(
-			"this is a cluster, not SQL - GET pods, WHY <pod>, LOGS <pod>, EXEC <pod>, DESCRIBE pod <name>, SCALE deployments <name> <n>, RESTART deployments <name>, USE <namespace>, CONTEXTS, VERSION",
+			"this is a cluster, not SQL - GET pods, WHY <pod>, LOGS <pod>, EXEC <pod>, DESCRIBE pod <name>, SCALE deployments <name> <n>, RESTART deployments <name>, USE <namespace>, CLUSTER, TOP nodes, CONTEXTS, VERSION",
 			.{},
 		);
 		return error.Driver;
@@ -1446,6 +1455,229 @@ pub const Db = struct {
 		cells[0] = .{ .text = what };
 		cells[1] = if (said.len == 0) .nil else .{ .text = said };
 		try rows.rows.append(arena, cells);
+	}
+
+	/// What the cluster is and what it has: the version, how many nodes are ready
+	/// out of how many there are, what they have between them, and how much of
+	/// that the pods on them have asked for.
+	///
+	/// Asked for rather than used: what a pod requests is what the scheduler
+	/// placed it by and what it is guaranteed, and it is in the API for nothing
+	/// extra. What is actually being burned needs metrics-server, which a cluster
+	/// may not have - `TOP` is that question, and says so where it cannot answer.
+	fn cluster(self: *Db, arena: std.mem.Allocator) db.Error!Rows {
+		var rows = Rows{ .owner = self, .table = "" };
+		const heading = try arena.alloc([]const u8, 2);
+		heading[0] = "what";
+		heading[1] = "value";
+		rows.names = heading;
+		rows.numeric = try arena.alloc(bool, 2);
+		@memset(@constCast(rows.numeric), false);
+
+		try self.pair(arena, &rows, "version", self.version_text.items);
+		try self.pair(arena, &rows, "context", self.parts.context);
+
+		const nodes = api.find("nodes").?;
+		const found = try self.fetch(arena, try self.listPath(arena, nodes, ""), "nodes");
+		var ready: usize = 0;
+		var cpu: i64 = 0;
+		var memory: i64 = 0;
+		var room: i64 = 0;
+		for (found) |node| {
+			if (isReady(node)) {
+				ready += 1;
+			}
+			cpu += quantityAt(node, "status.allocatable.cpu");
+			memory += quantityAt(node, "status.allocatable.memory");
+			room += quantityAt(node, "status.allocatable.pods");
+		}
+		try self.pair(arena, &rows, "nodes", try std.fmt.allocPrint(arena, "{d} ready of {d}", .{ ready, found.len }));
+		try self.pair(arena, &rows, "cpu", try api.coresText(arena, cpu));
+		try self.pair(arena, &rows, "memory", try api.bytesText(arena, memory));
+
+		// Every namespace, because a cluster's load is not the load in whichever
+		// namespace somebody happens to be looking at.
+		const pods = api.find("pods").?;
+		const all = try self.fetch(arena, try std.fmt.allocPrint(arena, "{s}/{s}", .{ pods.root, pods.name }), "pods");
+		var running: usize = 0;
+		var wanted_cpu: i64 = 0;
+		var wanted_memory: i64 = 0;
+		for (all) |pod| {
+			if (eq(textAt(pod, "status.phase"), "Running")) {
+				running += 1;
+			}
+			wanted_cpu += askedTotal(pod, "cpu");
+			wanted_memory += askedTotal(pod, "memory");
+		}
+		try self.pair(arena, &rows, "pods", try std.fmt.allocPrint(arena, "{d} running of {d}, room for {d}", .{
+			running,
+			all.len,
+			@divTrunc(room, 1000),
+		}));
+		try self.pair(arena, &rows, "cpu requested", try shareText(arena, wanted_cpu, cpu, .cores));
+		try self.pair(arena, &rows, "memory requested", try shareText(arena, wanted_memory, memory, .bytes));
+		return rows;
+	}
+
+	/// What is actually being used, as against what was asked for.
+	///
+	/// This is the one thing here that a cluster may simply not know. The numbers
+	/// come from metrics-server, which is an add-on: it is on every managed
+	/// cluster and on hardly any local one, and where it is missing the API says
+	/// so with a 404 rather than with an empty answer. That is worth passing on in
+	/// those words, because "0 cores" and "nobody is measuring" look alike on a
+	/// screen and mean opposite things.
+	fn top(self: *Db, arena: std.mem.Allocator, what: []const u8) db.Error!Rows {
+		const pods = what.len != 0 and (eq(what, "pods") or eq(what, "pod"));
+		if (what.len != 0 and !pods and !eq(what, "nodes") and !eq(what, "node")) {
+			self.remember("TOP nodes, or TOP pods");
+			return error.Driver;
+		}
+		const path = if (pods)
+			if (self.namespace.len == 0 or eq(self.namespace, "*"))
+				try std.fmt.allocPrint(arena, "{s}/pods", .{METRICS})
+			else
+				try std.fmt.allocPrint(arena, "{s}/namespaces/{s}/pods", .{ METRICS, self.namespace })
+		else
+			try std.fmt.allocPrint(arena, "{s}/nodes", .{METRICS});
+
+		const response = self.call(arena, "GET", path, "") catch return error.Driver;
+		if (response.status == 404) {
+			self.remember("this cluster has no metrics-server, so nothing is measuring what is being used");
+			return error.Driver;
+		}
+		if (!response.ok()) {
+			return self.fail(response, if (pods) "pods" else "nodes");
+		}
+		const parsed = std.json.parseFromSliceLeaky(Json, arena, response.body, .{}) catch {
+			self.remember("the cluster answered with something that is not JSON");
+			return error.Driver;
+		};
+		const items = switch (api.at(parsed, "items") orelse Json{ .null = {} }) {
+			.array => |list| list.items,
+			else => &[_]Json{},
+		};
+
+		var rows = Rows{ .owner = self, .table = "" };
+		const heading = try arena.alloc([]const u8, if (pods) 5 else 3);
+		heading[0] = "name";
+		heading[1] = "cpu";
+		heading[2] = "memory";
+		if (pods) {
+			heading[3] = "cpu asked";
+			heading[4] = "memory asked";
+		}
+		rows.names = heading;
+		rows.numeric = try arena.alloc(bool, heading.len);
+		@memset(@constCast(rows.numeric), false);
+
+		// The spec of a pod is in a different call from its usage, so what it
+		// asked for is looked up once for the whole page rather than per row.
+		const specs = if (pods)
+			self.fetch(arena, try self.listPath(arena, api.find("pods").?, ""), "pods") catch &[_]Json{}
+		else
+			&[_]Json{};
+
+		for (items) |item| {
+			const name = textAt(item, "metadata.name");
+			var cpu: i64 = 0;
+			var memory: i64 = 0;
+			if (pods) {
+				// A pod's usage is per container here too, and what somebody wants
+				// is the pod.
+				const containers = api.at(item, "containers") orelse Json{ .null = {} };
+				if (containers == .array) {
+					for (containers.array.items) |one| {
+						cpu += quantityAt(one, "usage.cpu");
+						memory += quantityAt(one, "usage.memory");
+					}
+				}
+			} else {
+				cpu = quantityAt(item, "usage.cpu");
+				memory = quantityAt(item, "usage.memory");
+			}
+
+			const cells = try arena.alloc(Value, heading.len);
+			cells[0] = .{ .text = name };
+			cells[1] = .{ .text = try api.coresText(arena, cpu) };
+			cells[2] = .{ .text = try api.bytesText(arena, memory) };
+			if (pods) {
+				cells[3] = .nil;
+				cells[4] = .nil;
+				for (specs) |spec| {
+					if (!eq(textAt(spec, "metadata.name"), name)) {
+						continue;
+					}
+					const asked_cpu = askedTotal(spec, "cpu");
+					const asked_memory = askedTotal(spec, "memory");
+					if (asked_cpu != 0) {
+						cells[3] = .{ .text = try api.coresText(arena, asked_cpu) };
+					}
+					if (asked_memory != 0) {
+						cells[4] = .{ .text = try api.bytesText(arena, asked_memory) };
+					}
+					break;
+				}
+			}
+			try rows.rows.append(arena, cells);
+		}
+		return rows;
+	}
+
+	fn isReady(node: Json) bool {
+		const conditions = api.at(node, "status.conditions") orelse return false;
+		if (conditions != .array) {
+			return false;
+		}
+		for (conditions.array.items) |one| {
+			if (eq(textAt(one, "type"), "Ready")) {
+				return eq(textAt(one, "status"), "True");
+			}
+		}
+		return false;
+	}
+
+	fn quantityAt(object: Json, path: []const u8) i64 {
+		const found = api.at(object, path) orelse return 0;
+		return switch (found) {
+			.string => |text| api.quantityOf(text) orelse 0,
+			.integer => |n| n * 1000,
+			else => 0,
+		};
+	}
+
+	/// What one pod asked for, over all its containers.
+	fn askedTotal(pod: Json, what: []const u8) i64 {
+		const containers = api.at(pod, "spec.containers") orelse return 0;
+		if (containers != .array) {
+			return 0;
+		}
+		var total: i64 = 0;
+		for (containers.array.items) |one| {
+			const requests = api.at(one, "resources.requests") orelse continue;
+			const value = api.at(requests, what) orelse continue;
+			if (value == .string) {
+				total += api.quantityOf(value.string) orelse 0;
+			}
+		}
+		return total;
+	}
+
+	/// `3500m of 14 (25%)`. The share is what somebody is actually after: a
+	/// number on its own says nothing about whether there is room left.
+	fn shareText(arena: std.mem.Allocator, part: i64, whole: i64, kind: enum { cores, bytes }) db.Error![]const u8 {
+		const one = switch (kind) {
+			.cores => try api.coresText(arena, part),
+			.bytes => try api.bytesText(arena, part),
+		};
+		if (whole == 0) {
+			return one;
+		}
+		const other = switch (kind) {
+			.cores => try api.coresText(arena, whole),
+			.bytes => try api.bytesText(arena, whole),
+		};
+		return std.fmt.allocPrint(arena, "{s} of {s} ({d}%)", .{ one, other, @divTrunc(part * 100, whole) });
 	}
 
 	fn logs(self: *Db, arena: std.mem.Allocator, name: []const u8, howMany: []const u8) db.Error!Rows {
@@ -2133,7 +2365,7 @@ test "only the console verbs that look are worth repeating" {
 	// A grid the follow key refreshes on a clock must not be one that changes
 	// the cluster every time it ticks.
 	var db_stub: Db = undefined;
-	for ([_][]const u8{ "GET pods", "get pods", "LOGS api-7c9", "WHY api-7c9", "DESCRIBE pod x", "CONTEXTS", "VERSION", "NAMESPACES" }) |reading| {
+	for ([_][]const u8{ "GET pods", "get pods", "LOGS api-7c9", "WHY api-7c9", "DESCRIBE pod x", "CONTEXTS", "VERSION", "NAMESPACES", "CLUSTER", "TOP nodes", "TOP pods" }) |reading| {
 		if (!Db.repeatable(&db_stub, reading)) {
 			std.debug.print("should repeat: {s}\n", .{reading});
 			return error.TestUnexpectedResult;

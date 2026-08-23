@@ -39,6 +39,20 @@ pub const From = union(enum) {
 	labels,
 	/// A service's ports, as `80/TCP,443/TCP`.
 	ports,
+	/// A quantity out of the object, written the way somebody reads it rather
+	/// than the way the API stores it: `8143396Ki` is `7.8Gi`.
+	quantity: []const u8,
+	/// What a pod asked for, added up over its containers. The API keeps these
+	/// per container, and what somebody wants to know about a pod is its whole
+	/// appetite - which is also what the scheduler placed it by.
+	asked: Asked,
+};
+
+pub const Asked = struct {
+	/// `requests` or `limits`.
+	which: []const u8,
+	/// `cpu` or `memory`.
+	what: []const u8,
 };
 
 pub const Column = struct {
@@ -90,6 +104,11 @@ pub const RESOURCES = [_]Resource{
 			.{ .name = "ready", .from = .ready },
 			.{ .name = "status", .from = .pod_status },
 			.{ .name = "restarts", .from = .restarts, .numeric = true },
+			// What the pod asked for, which is what it was placed by. Empty where
+			// it asked for nothing, because that is a choice with consequences and
+			// a zero would read as having asked.
+			.{ .name = "cpu", .from = .{ .asked = .{ .which = "requests", .what = "cpu" } } },
+			.{ .name = "memory", .from = .{ .asked = .{ .which = "requests", .what = "memory" } } },
 			AGE,
 			.{ .name = "ip", .from = .{ .at = "status.podIP" } },
 			.{ .name = "node", .from = .{ .at = "spec.nodeName" } },
@@ -261,6 +280,12 @@ pub const RESOURCES = [_]Resource{
 		.columns = &.{
 			NAME,
 			.{ .name = "version", .from = .{ .at = "status.nodeInfo.kubeletVersion" } },
+			// What is left for pods to be placed in, rather than what the machine
+			// has: the kubelet and the system keep a share back, and a node with
+			// eight gigabytes never had eight to give.
+			.{ .name = "cpu", .from = .{ .quantity = "status.allocatable.cpu" } },
+			.{ .name = "memory", .from = .{ .quantity = "status.allocatable.memory" } },
+			.{ .name = "pods", .from = .{ .at = "status.allocatable.pods" }, .numeric = true },
 			.{ .name = "os", .from = .{ .at = "status.nodeInfo.operatingSystem" } },
 			.{ .name = "arch", .from = .{ .at = "status.nodeInfo.architecture" } },
 			AGE,
@@ -377,6 +402,133 @@ pub fn at(object: Json, path: []const u8) ?Json {
 }
 
 /// One cell as text. `now` is the moment the age is measured against, in seconds
+/// A Kubernetes quantity as a number of the smallest thing it counts: millicores
+/// for a CPU, bytes for memory.
+///
+/// The API writes these as a number and a suffix - `100m`, `4`, `2Gi`, `8143396Ki`
+/// - and there are two families of suffix that look alike and are not. `Ki`, `Mi`
+/// and `Gi` are powers of two; `K`, `M` and `G` are powers of ten. Reading one as
+/// the other is a memory figure out by seven per cent and a CPU figure out by a
+/// factor of a thousand, and neither would look wrong on a screen.
+///
+/// Null where it cannot be read, because a made-up number here is worse than a
+/// blank: somebody sizing a cluster would believe it.
+pub fn quantityOf(text: []const u8) ?i64 {
+	const trimmed = std.mem.trim(u8, text, " \t");
+	if (trimmed.len == 0) {
+		return null;
+	}
+	var digits: usize = 0;
+	while (digits < trimmed.len and (std.ascii.isDigit(trimmed[digits]) or trimmed[digits] == '.')) : (digits += 1) {}
+	const number = std.fmt.parseFloat(f64, trimmed[0..digits]) catch return null;
+	const suffix = trimmed[digits..];
+
+	// The three a CPU is written in, all of them thousandths of each other.
+	// metrics-server answers in nanocores - `48209274n` is 48 millicores - and
+	// reading that as anything else is a busy node that looks idle.
+	if (std.mem.eql(u8, suffix, "m")) {
+		return @intFromFloat(number);
+	}
+	if (std.mem.eql(u8, suffix, "u")) {
+		return @intFromFloat(number / 1000);
+	}
+	if (std.mem.eql(u8, suffix, "n")) {
+		return @intFromFloat(number / 1_000_000);
+	}
+	const scale: f64 = if (suffix.len == 0)
+		1000 // a bare CPU count, in millicores
+	else if (std.mem.eql(u8, suffix, "Ki"))
+		1024
+	else if (std.mem.eql(u8, suffix, "Mi"))
+		1024 * 1024
+	else if (std.mem.eql(u8, suffix, "Gi"))
+		1024 * 1024 * 1024
+	else if (std.mem.eql(u8, suffix, "Ti"))
+		1024 * 1024 * 1024 * 1024
+	else if (std.mem.eql(u8, suffix, "K") or std.mem.eql(u8, suffix, "k"))
+		1000
+	else if (std.mem.eql(u8, suffix, "M"))
+		1000 * 1000
+	else if (std.mem.eql(u8, suffix, "G"))
+		1000 * 1000 * 1000
+	else if (std.mem.eql(u8, suffix, "T"))
+		1000 * 1000 * 1000 * 1000
+	else
+		return null;
+	return @intFromFloat(number * scale);
+}
+
+/// Bytes as somebody reads them. Powers of two, as Kubernetes writes them, so
+/// that what comes out can be compared with what a manifest asked for.
+pub fn bytesText(arena: std.mem.Allocator, bytes: i64) ![]const u8 {
+	const units = [_][]const u8{ "B", "Ki", "Mi", "Gi", "Ti" };
+	var value: f64 = @floatFromInt(bytes);
+	var unit: usize = 0;
+	while (value >= 1024 and unit + 1 < units.len) : (unit += 1) {
+		value /= 1024;
+	}
+	if (unit == 0) {
+		return std.fmt.allocPrint(arena, "{d}B", .{bytes});
+	}
+	return std.fmt.allocPrint(arena, "{d:.1}{s}", .{ value, units[unit] });
+}
+
+/// Millicores as somebody reads them: whole cores where it divides, and the
+/// thousandths kubectl uses where it does not.
+pub fn coresText(arena: std.mem.Allocator, milli: i64) ![]const u8 {
+	if (milli != 0 and @rem(milli, 1000) == 0) {
+		return std.fmt.allocPrint(arena, "{d}", .{@divExact(milli, 1000)});
+	}
+	return std.fmt.allocPrint(arena, "{d}m", .{milli});
+}
+
+/// One of the two, told apart by what the number counts. A path that names a
+/// CPU is read as cores; anything else is bytes.
+fn readable(arena: std.mem.Allocator, found: ?Json) ![]const u8 {
+	const value = found orelse return "";
+	const text = switch (value) {
+		.string => |t| t,
+		.integer => |n| return std.fmt.allocPrint(arena, "{d}", .{n}),
+		else => return "",
+	};
+	const amount = quantityOf(text) orelse return arena.dupe(u8, text);
+    // A CPU is the only thing written in thousandths, and `m` is how it says so;
+    // a memory figure never carries that suffix.
+	if (std.mem.endsWith(u8, text, "m") or std.mem.indexOfAny(u8, text, "KMGTi") == null) {
+		return coresText(arena, amount);
+	}
+	return bytesText(arena, amount);
+}
+
+/// What every container in a pod asked for, added up. A pod with nothing asked
+/// for shows nothing rather than a zero: not asking is a choice with
+/// consequences, and `0` reads as having asked for none.
+fn askedFor(arena: std.mem.Allocator, object: Json, which: Asked) ![]const u8 {
+	const containers = at(object, "spec.containers") orelse return "";
+	if (containers != .array) {
+		return "";
+	}
+	var total: i64 = 0;
+	var any = false;
+	for (containers.array.items) |one| {
+		const found = at(one, "resources") orelse continue;
+		const group = at(found, which.which) orelse continue;
+		const value = at(group, which.what) orelse continue;
+		if (value != .string) {
+			continue;
+		}
+		total += quantityOf(value.string) orelse continue;
+		any = true;
+	}
+	if (!any) {
+		return "";
+	}
+	return if (std.mem.eql(u8, which.what, "cpu"))
+		coresText(arena, total)
+	else
+		bytesText(arena, total);
+}
+
 /// since the epoch, so a whole page is aged from one reading of the clock.
 pub fn cell(arena: std.mem.Allocator, object: Json, column: Column, now: i64) ![]const u8 {
 	return switch (column.from) {
@@ -394,6 +546,8 @@ pub fn cell(arena: std.mem.Allocator, object: Json, column: Column, now: i64) ![
 		.replicas => try replicaCount(arena, object),
 		.labels => try labels(arena, object),
 		.ports => try ports(arena, object),
+		.quantity => |path| try readable(arena, at(object, path)),
+		.asked => |which| try askedFor(arena, object, which),
 	};
 }
 
@@ -628,6 +782,17 @@ fn parsed(arena: std.mem.Allocator, text: []const u8) !Json {
 	return (try std.json.parseFromSlice(Json, arena, text, .{})).value;
 }
 
+/// One row's cells by column name, so a test says what it means rather than
+/// counting columns - and does not have to be rewritten every time one is added.
+fn cellNamed(a: std.mem.Allocator, object: Json, resource: Resource, want: []const u8, now: i64) ![]const u8 {
+	for (resource.columns) |column| {
+		if (std.mem.eql(u8, column.name, want)) {
+			return cell(a, object, column, now);
+		}
+	}
+	return error.NoSuchColumn;
+}
+
 test "a pod's row is read and worked out from what the API answers" {
 	var arena = std.heap.ArenaAllocator.init(testing.allocator);
 	defer arena.deinit();
@@ -635,24 +800,62 @@ test "a pod's row is read and worked out from what the API answers" {
 	const pod = try parsed(a,
 		\\{"metadata": {"name": "api-7c9", "creationTimestamp": "2026-08-20T10:00:00Z",
 		\\              "labels": {"app": "api"}},
-		\\ "spec": {"nodeName": "node-1", "containers": [{"name": "api"}, {"name": "sidecar"}]},
+		\\ "spec": {"nodeName": "node-1", "containers": [
+		\\     {"name": "api", "resources": {"requests": {"cpu": "100m", "memory": "64Mi"}}},
+		\\     {"name": "sidecar", "resources": {"requests": {"cpu": "250m", "memory": "192Mi"}}}]},
 		\\ "status": {"phase": "Running", "podIP": "10.1.2.3",
 		\\            "containerStatuses": [{"ready": true, "restartCount": 2},
 		\\                                  {"ready": false, "restartCount": 5}]}}
 	);
 	const now = epochOf("2026-08-22T14:30:00Z").?;
 	const resource = find("pods").?;
-	var cells: [8][]const u8 = undefined;
-	for (resource.columns, 0..) |column, i| {
-		cells[i] = try cell(a, pod, column, now);
-	}
-	try testing.expectEqualStrings("api-7c9", cells[0]);
-	try testing.expectEqualStrings("1/2", cells[1]);
-	try testing.expectEqualStrings("Running", cells[2]);
-	try testing.expectEqualStrings("7", cells[3]);
-	try testing.expectEqualStrings("2d4h", cells[4]);
-	try testing.expectEqualStrings("10.1.2.3", cells[5]);
-	try testing.expectEqualStrings("node-1", cells[6]);
+
+	try testing.expectEqualStrings("api-7c9", try cellNamed(a, pod, resource, "name", now));
+	try testing.expectEqualStrings("1/2", try cellNamed(a, pod, resource, "ready", now));
+	try testing.expectEqualStrings("Running", try cellNamed(a, pod, resource, "status", now));
+	try testing.expectEqualStrings("7", try cellNamed(a, pod, resource, "restarts", now));
+	try testing.expectEqualStrings("2d4h", try cellNamed(a, pod, resource, "age", now));
+	try testing.expectEqualStrings("10.1.2.3", try cellNamed(a, pod, resource, "ip", now));
+	try testing.expectEqualStrings("node-1", try cellNamed(a, pod, resource, "node", now));
+
+	// What the pod asked for is the whole pod's appetite, not the first
+	// container's: 100m and 250m is 350m, and 64Mi and 192Mi is 256Mi.
+	try testing.expectEqualStrings("350m", try cellNamed(a, pod, resource, "cpu", now));
+	try testing.expectEqualStrings("256.0Mi", try cellNamed(a, pod, resource, "memory", now));
+}
+
+test "a pod that asked for nothing says nothing, rather than asking for none" {
+	var arena = std.heap.ArenaAllocator.init(testing.allocator);
+	defer arena.deinit();
+	const a = arena.allocator();
+	const pod = try parsed(a,
+		\\{"metadata": {"name": "bez"}, "spec": {"containers": [{"name": "one"}]}}
+	);
+	const resource = find("pods").?;
+	// Empty, not "0": not asking is a choice the scheduler treats differently
+	// from asking for none, and a zero here would read as the second.
+	try testing.expectEqualStrings("", try cellNamed(a, pod, resource, "cpu", 0));
+	try testing.expectEqualStrings("", try cellNamed(a, pod, resource, "memory", 0));
+}
+
+test "a node says what is left to place pods in, in units somebody reads" {
+	var arena = std.heap.ArenaAllocator.init(testing.allocator);
+	defer arena.deinit();
+	const a = arena.allocator();
+	const node = try parsed(a,
+		\\{"metadata": {"name": "node-1"},
+		\\ "status": {"allocatable": {"cpu": "14", "memory": "8143396Ki", "pods": "110"},
+		\\            "capacity": {"cpu": "16", "memory": "8388608Ki"},
+		\\            "nodeInfo": {"kubeletVersion": "v1.31.5", "operatingSystem": "linux",
+		\\                         "architecture": "arm64"}}}
+	);
+	const resource = find("nodes").?;
+	try testing.expectEqualStrings("14", try cellNamed(a, node, resource, "cpu", 0));
+	try testing.expectEqualStrings("7.8Gi", try cellNamed(a, node, resource, "memory", 0));
+	try testing.expectEqualStrings("110", try cellNamed(a, node, resource, "pods", 0));
+	// Allocatable and not capacity: the kubelet and the system keep a share back,
+	// and a node with sixteen cores never had sixteen to give.
+	try testing.expectEqualStrings("v1.31.5", try cellNamed(a, node, resource, "version", 0));
 }
 
 test "an object missing half of itself gives empty cells, not wrong ones" {
@@ -832,6 +1035,53 @@ test "every resource is namespaced or not, and none of them is nameless" {
 	// The one that is not in a namespace really is not.
 	try testing.expect(!find("nodes").?.namespaced);
 	try testing.expect(find("pods").?.namespaced);
+}
+
+test "a quantity is read in the units it was written in, not the ones it looks like" {
+	// CPU, counted in thousandths whichever way it is written.
+	try testing.expectEqual(@as(?i64, 100), quantityOf("100m"));
+	try testing.expectEqual(@as(?i64, 4000), quantityOf("4"));
+	try testing.expectEqual(@as(?i64, 1500), quantityOf("1.5"));
+	// What metrics-server answers in. A node using 48 millicores writes it as
+	// forty-eight million nanocores, and reading that as millicores is a busy
+	// machine that looks asleep - which is what it looked like the first time.
+	try testing.expectEqual(@as(?i64, 48), quantityOf("48209274n"));
+	try testing.expectEqual(@as(?i64, 1000), quantityOf("1000000000n"));
+	try testing.expectEqual(@as(?i64, 5), quantityOf("5000u"));
+
+	// Memory. `Ki` is a thousand and twenty-four and `K` is a thousand, which is
+	// the pair this exists to keep apart.
+	try testing.expectEqual(@as(?i64, 1024), quantityOf("1Ki"));
+	try testing.expectEqual(@as(?i64, 1000), quantityOf("1K"));
+	try testing.expectEqual(@as(?i64, 2 * 1024 * 1024 * 1024), quantityOf("2Gi"));
+	try testing.expectEqual(@as(?i64, 8143396 * 1024), quantityOf("8143396Ki"));
+
+	// Nothing invented out of what cannot be read: a made-up number here is
+	// worse than a blank, because somebody sizing a cluster would believe it.
+	try testing.expectEqual(@as(?i64, null), quantityOf(""));
+	try testing.expectEqual(@as(?i64, null), quantityOf("plenty"));
+	try testing.expectEqual(@as(?i64, null), quantityOf("12Zi"));
+}
+
+test "and is written back the way somebody reads it" {
+	var scratch = std.heap.ArenaAllocator.init(testing.allocator);
+	defer scratch.deinit();
+	const arena = scratch.allocator();
+
+	try testing.expectEqualStrings("4", try coresText(arena, 4000));
+	try testing.expectEqualStrings("100m", try coresText(arena, 100));
+	try testing.expectEqualStrings("1500m", try coresText(arena, 1500));
+	try testing.expectEqualStrings("0m", try coresText(arena, 0));
+
+	try testing.expectEqualStrings("2.0Gi", try bytesText(arena, 2 * 1024 * 1024 * 1024));
+	try testing.expectEqualStrings("7.8Gi", try bytesText(arena, 8143396 * 1024));
+	try testing.expectEqualStrings("512B", try bytesText(arena, 512));
+	try testing.expectEqualStrings("0B", try bytesText(arena, 0));
+
+	// The round trip is what matters: what a manifest asked for comes back
+	// saying the same thing.
+	try testing.expectEqualStrings("2.0Gi", try bytesText(arena, quantityOf("2Gi").?));
+	try testing.expectEqualStrings("100m", try coresText(arena, quantityOf("100m").?));
 }
 
 test "a manifest's kind comes back as the path it lives under" {
