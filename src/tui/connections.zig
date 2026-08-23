@@ -600,6 +600,11 @@ pub fn save(list: *List, file_path: []const u8) !void {
 }
 
 /// Remove the password from a target, whichever way it was written.
+///
+/// Always a copy in the arena, even where there was nothing to take out. A
+/// function that sometimes hands back what it was given is a function whose
+/// result has two different lifetimes, and the caller cannot see which it got:
+/// clearing the buffer the argument came from then quietly rewrites the answer.
 pub fn withoutPassword(arena: std.mem.Allocator, target: []const u8) ![]const u8 {
 	// A URL: scheme://user:password@host/…?password=…
 	if (std.mem.indexOf(u8, target, "://")) |scheme_end| {
@@ -637,7 +642,7 @@ pub fn withoutPassword(arena: std.mem.Allocator, target: []const u8) ![]const u8
 	}
 	// A keyword string: host=… password=… dbname=…
 	if (std.mem.indexOf(u8, target, "password=") == null) {
-		return target;
+		return arena.dupe(u8, target);
 	}
 	var out: std.ArrayListUnmanaged(u8) = .empty;
 	var parts = std.mem.tokenizeAny(u8, target, " \t");
@@ -659,9 +664,11 @@ pub fn withoutPassword(arena: std.mem.Allocator, target: []const u8) ![]const u8
 /// the password goes in the form the target already uses: a URI gets it as a
 /// query parameter, which libpq reads as a keyword, and a keyword string gets
 /// one more keyword.
+/// Put a password into a target. Always a copy in the arena - see the note on
+/// `withoutPassword` for why nothing here hands back its own argument.
 pub fn withPassword(arena: std.mem.Allocator, target: []const u8, password: []const u8) ![]const u8 {
 	if (password.len == 0) {
-		return target;
+		return arena.dupe(u8, target);
 	}
 	var out: std.ArrayListUnmanaged(u8) = .empty;
 	try out.appendSlice(arena, target);
@@ -830,6 +837,37 @@ test "a password is never written out" {
 	);
 	// A file path is left exactly as it is.
 	try std.testing.expectEqualStrings("/tmp/my.db", try withoutPassword(a, "/tmp/my.db"));
+}
+
+test "neither password function ever hands back what it was given" {
+	var scratch = std.heap.ArenaAllocator.init(std.testing.allocator);
+	defer scratch.deinit();
+	const arena = scratch.allocator();
+
+	// The case that bit: an empty password had nothing to add, and the answer was
+	// the argument itself. The caller then cleared the buffer that argument lived
+	// in - which `clearRetainingCapacity` fills with undefined - and connected to
+	// forty-three bytes of 0xAA.
+	//
+	// So what is checked is not the text but the address: whatever comes back is
+	// the arena's, and clearing anything the caller owns cannot reach it.
+	var held: std.ArrayListUnmanaged(u8) = .empty;
+	defer held.deinit(std.testing.allocator);
+	try held.appendSlice(std.testing.allocator, "sftp://foo@127.0.0.1:2222/upload?insecure=1");
+
+	const kept = try withPassword(arena, held.items, "");
+	try std.testing.expect(kept.ptr != held.items.ptr);
+	const bare = try withoutPassword(arena, held.items);
+	try std.testing.expect(bare.ptr != held.items.ptr);
+	// And a keyword string with no password in it, which took the other way out.
+	const keywords = try withoutPassword(arena, "host=localhost dbname=demo");
+	try std.testing.expectEqualStrings("host=localhost dbname=demo", keywords);
+
+	// The text still says what it said.
+	const before = try std.testing.allocator.dupe(u8, kept);
+	defer std.testing.allocator.free(before);
+	held.clearRetainingCapacity();
+	try std.testing.expectEqualStrings(before, kept);
 }
 
 test "a password is added quoted, for one attempt" {

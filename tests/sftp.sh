@@ -213,6 +213,17 @@ printf '%s' "$out" | grep -q "was not accepted" || {
 printf '%s' "$out" | grep -q "password:" || fail "and should leave the prompt up to try again"
 echo "ok: a refused password says so, and can be typed again"
 
+# Enter at the prompt with nothing typed. There is no password to try, so the
+# answer is the question again - and what it must not be is a target made of the
+# bytes `clearRetainingCapacity` leaves behind, which is what it was.
+out=$(tests/screen.py "$ASK" "{sleep}{enter}{sleep}{keep}" 2>&1 || true)
+printf '%s' "$out" | grep -q "the server wants a password" || {
+	printf '%s\n' "$out" >&2
+	fail "an empty password should ask again"
+}
+printf '%s' "$out" | grep -q "cannot open" && fail "and should not connect to whatever was left in the buffer"
+echo "ok: an empty password asks again rather than connecting to nothing"
+
 # And the right password after a wrong one, which is the retry actually working:
 # the second attempt has to go in on its own, because adding a password to a
 # target that has one leaves both in it.
