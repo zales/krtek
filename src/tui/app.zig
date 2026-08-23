@@ -4019,3 +4019,87 @@ fn needsPassword(message: []const u8) bool {
 pub fn divCeil(a: usize, b: usize) usize {
 	return if (b == 0) 1 else (a + b - 1) / b;
 }
+
+// ------------------------------------------------------------------- tests
+//
+// What can be asked without a terminal, a connection or a screen: the small
+// decisions the grid is built out of. This file had none, which is a strange
+// thing for the largest one here.
+
+const testing = std.testing;
+
+test "the filter form's operators mean what they say, and an unknown one is equality" {
+	try testing.expectEqual(database.ask.Op.eq, operatorOf("="));
+	try testing.expectEqual(database.ask.Op.ne, operatorOf("!="));
+	try testing.expectEqual(database.ask.Op.le, operatorOf("<="));
+	try testing.expectEqual(database.ask.Op.not_null, operatorOf("IS NOT NULL"));
+	// `contains` is LIKE with the wildcards put on for the user.
+	try testing.expectEqual(database.ask.Op.like, operatorOf("contains"));
+	try testing.expectEqual(database.ask.Op.like, operatorOf("LIKE"));
+	// Anything else is equality rather than an error: the form only offers the
+	// list above, so this is what a value out of step with it falls back to.
+	try testing.expectEqual(database.ask.Op.eq, operatorOf("what"));
+	try testing.expectEqual(database.ask.Op.eq, operatorOf(""));
+}
+
+test "a declared type has numeric affinity by the same rule SQLite uses" {
+	try testing.expect(isNumeric("INTEGER"));
+	try testing.expect(isNumeric("bigint"));
+	try testing.expect(isNumeric("NUMERIC(10,2)"));
+	try testing.expect(isNumeric("double precision"));
+	try testing.expect(!isNumeric("TEXT"));
+	try testing.expect(!isNumeric("timestamptz"));
+	try testing.expect(!isNumeric(""));
+	// And by that rule a column called `point` is a number, because "INT" is in
+	// it. SQLite says the same about the same word; a grid that right-aligns one
+	// geometry column is a smaller wrong than a rule of our own invention.
+	try testing.expect(isNumeric("point"));
+}
+
+test "a value looks like a number, or is text that happens to have digits in it" {
+	try testing.expect(looksNumeric("42"));
+	try testing.expect(looksNumeric("-1"));
+	try testing.expect(looksNumeric("3.14"));
+	try testing.expect(looksNumeric("1e-9"));
+	try testing.expect(!looksNumeric(""));
+	try testing.expect(!looksNumeric("."));
+	try testing.expect(!looksNumeric("-"));
+	// A sign that is not at the front and not after an exponent is not a number,
+	// which is what keeps a date out of the right-hand column.
+	try testing.expect(!looksNumeric("2026-08-23"));
+	try testing.expect(!looksNumeric("12a"));
+	try testing.expect(!looksNumeric("ahoj"));
+}
+
+test "a cell is one line, whatever was in it" {
+	var scratch = std.heap.ArenaAllocator.init(testing.allocator);
+	defer scratch.deinit();
+	const arena = scratch.allocator();
+
+	// A newline inside a value would tear the grid apart, so every kind of one
+	// becomes a space and the value keeps its length.
+	try testing.expectEqualStrings("a b c d", try flatten(arena, "a\nb\rc\td"));
+	try testing.expectEqualStrings("nic", try flatten(arena, "nic"));
+	try testing.expectEqualStrings("", try flatten(arena, ""));
+}
+
+test "counting pages never divides by nothing" {
+	try testing.expectEqual(@as(usize, 3), divCeil(21, 10));
+	try testing.expectEqual(@as(usize, 2), divCeil(20, 10));
+	try testing.expectEqual(@as(usize, 0), divCeil(0, 10));
+	// A limit of nothing is one page, not a crash: `1/0` on the screen is worse
+	// than a wrong number and a divide by zero is worse than both.
+	try testing.expectEqual(@as(usize, 1), divCeil(50, 0));
+}
+
+test "a driver that cannot say what it wants is guessed at, and the guess is not clever" {
+	try testing.expect(needsPassword("fe_sendauth: no password supplied"));
+	try testing.expect(needsPassword("foo needs a password, or a key the agent does not have"));
+	try testing.expect(needsPassword("Authentication failed"));
+	try testing.expect(!needsPassword("there is no table called books"));
+	try testing.expect(!needsPassword(""));
+	// And here is what it cannot do, written down rather than found out again: a
+	// refused password says the same word as a missing one. `error.NeedPassword`
+	// is why this is only a fallback.
+	try testing.expect(needsPassword("the password for foo was not accepted"));
+}

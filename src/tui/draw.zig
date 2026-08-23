@@ -2132,3 +2132,55 @@ fn relations(app: *App, size: Size, side: usize, rows: usize) void {
 		screen.clearToEol();
 	}
 }
+
+// ------------------------------------------------------------------- tests
+//
+// The measuring, not the drawing: where text is cut when it does not fit, and
+// what a password looks like when it is shown. Neither needs a terminal, and
+// both are places a mistake is silent - a value cut in the middle of a character
+// draws a replacement mark, and a mask that is one dot short of the truth says
+// how long somebody's password is.
+
+const testing = std.testing;
+
+test "a path that does not fit keeps its end, and never breaks a character" {
+	try testing.expectEqualStrings("/home/z", endOf("/home/z", 20));
+	// `/home/zales/deep` says more as `deep` than as `/home`.
+	try testing.expectEqualStrings("s/deep", endOf("/home/zales/deep", 7));
+	// Too narrow to say anything: the whole thing back rather than one letter.
+	try testing.expectEqualStrings("/home/zales", endOf("/home/zales", 1));
+	// The cut lands on a character boundary, so what comes out is still text.
+	const czech = endOf("/doma/žluťoučký", 6);
+	try testing.expect(std.unicode.utf8ValidateSlice(czech));
+	try testing.expect(term.width(czech) <= 6);
+}
+
+test "the last columns of a value are whole characters" {
+	try testing.expectEqualStrings("ahoj", tail("ahoj", 10));
+	try testing.expectEqualStrings("hoj", tail("ahoj", 3));
+	try testing.expectEqualStrings("", tail("ahoj", 0));
+	const wide = tail("žluťoučký kůň", 5);
+	try testing.expect(std.unicode.utf8ValidateSlice(wide));
+	try testing.expect(term.width(wide) <= 5);
+}
+
+test "a password is dots, and as many of them as it has characters" {
+	var buffer: [64]u8 = undefined;
+	// One dot per character, not per byte: `hěslo` is five, not six.
+	try testing.expectEqual(@as(usize, 5), std.unicode.utf8CountCodepoints(mask(&buffer, "hěslo", 20)) catch 0);
+	try testing.expectEqual(@as(usize, 0), mask(&buffer, "", 20).len);
+	// Never more than the field can show, and never more than the buffer holds -
+	// a long password in a narrow field is what would run past the end of both.
+	try testing.expectEqual(@as(usize, 3), std.unicode.utf8CountCodepoints(mask(&buffer, "velmi dlouhe heslo", 3)) catch 0);
+	var tiny: [6]u8 = undefined;
+	try testing.expect(mask(&tiny, "velmi dlouhe heslo", 40).len <= tiny.len);
+	// And nothing of the password itself comes back.
+	try testing.expect(std.mem.indexOf(u8, mask(&buffer, "hunter2", 20), "hunter2") == null);
+}
+
+test "a key is written the way the palette shows it" {
+	var buffer: [8]u8 = undefined;
+	try testing.expectEqualStrings("space", keyName(&buffer, ' '));
+	try testing.expectEqualStrings("a", keyName(&buffer, 'a'));
+	try testing.expectEqualStrings("č", keyName(&buffer, 'č'));
+}
