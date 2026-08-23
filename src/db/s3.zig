@@ -34,6 +34,7 @@
 
 const std = @import("std");
 const db = @import("db.zig");
+const typed = @import("typed.zig");
 const http = @import("http.zig");
 
 pub const sigv4 = @import("s3/sigv4.zig");
@@ -957,7 +958,7 @@ pub const Db = struct {
 		var scratch = std.heap.ArenaAllocator.init(self.allocator);
 		defer scratch.deinit();
 		const arena = scratch.allocator();
-		const args = try splitCommand(arena, text);
+		const args = try typed.split(arena, text);
 		if (args.len == 0) {
 			return self.oneText("s3", "");
 		}
@@ -1019,7 +1020,7 @@ pub const Db = struct {
 				.{ .text = key },
 				.{ .number = @intCast(response.body.len) },
 				.{ .text = response.get("content-type") orelse "" },
-				if (readable(response.body)) .{ .text = response.body } else .{ .blob = response.body },
+				if (typed.readable(response.body)) .{ .text = response.body } else .{ .blob = response.body },
 			});
 			return rows;
 		}
@@ -1648,24 +1649,6 @@ fn unescapeKey(arena: std.mem.Allocator, text: []const u8) ![]const u8 {
 	return out.items;
 }
 
-/// Whether an object can be shown as text. Not the content type: a great many
-/// buckets are full of `application/octet-stream` that is JSON, and a great many
-/// `text/plain` keys are anything but. What the bytes are is the better question,
-/// and everything else goes to the viewer that draws an image or hex.
-fn readable(bytes: []const u8) bool {
-	if (bytes.len == 0) {
-		return true;
-	}
-	if (!std.unicode.utf8ValidateSlice(bytes)) {
-		return false;
-	}
-	for (bytes) |byte| {
-		if (byte < 0x20 and byte != '\t' and byte != '\n' and byte != '\r') {
-			return false;
-		}
-	}
-	return true;
-}
 
 /// An ETag arrives in quotes, which are not part of it.
 fn trimQuotes(text: []const u8) []const u8 {
@@ -1710,33 +1693,6 @@ fn flat(value: ??[]const u8) ?[]const u8 {
 	return inner orelse null;
 }
 
-/// A command line as a list of arguments, with quotes honoured so a value may
-/// contain spaces.
-fn splitCommand(arena: std.mem.Allocator, text: []const u8) ![]const []const u8 {
-	var out: std.ArrayListUnmanaged([]const u8) = .empty;
-	var at: usize = 0;
-	while (at < text.len) {
-		while (at < text.len and (text[at] == ' ' or text[at] == '\t')) : (at += 1) {}
-		if (at >= text.len) {
-			break;
-		}
-		if (text[at] == '"' or text[at] == '\'') {
-			const quote = text[at];
-			at += 1;
-			const start = at;
-			while (at < text.len and text[at] != quote) : (at += 1) {}
-			try out.append(arena, text[start..at]);
-			if (at < text.len) {
-				at += 1;
-			}
-			continue;
-		}
-		const start = at;
-		while (at < text.len and text[at] != ' ' and text[at] != '\t') : (at += 1) {}
-		try out.append(arena, text[start..at]);
-	}
-	return out.items;
-}
 
 // ------------------------------------------------------------------- cursor
 
@@ -1998,13 +1954,13 @@ test "a command line comes apart the way a shell would do it" {
 	defer scratch.deinit();
 	const arena = scratch.allocator();
 
-	const args = try splitCommand(arena, "PUT \"august trip.txt\" 'hello there'");
+	const args = try typed.split(arena, "PUT \"august trip.txt\" 'hello there'");
 	try testing.expectEqual(@as(usize, 3), args.len);
 	try testing.expectEqualStrings("PUT", args[0]);
 	try testing.expectEqualStrings("august trip.txt", args[1]);
 	try testing.expectEqualStrings("hello there", args[2]);
 
-	try testing.expectEqual(@as(usize, 0), (try splitCommand(arena, "   ")).len);
+	try testing.expectEqual(@as(usize, 0), (try typed.split(arena, "   ")).len);
 }
 
 test "a bucket and a prefix tell themselves apart" {
@@ -2014,15 +1970,15 @@ test "a bucket and a prefix tell themselves apart" {
 }
 
 test "text is shown as text and everything else as bytes" {
-	try testing.expect(readable("ahoj, světe\n"));
-	try testing.expect(readable(""));
-	try testing.expect(readable("{\"a\":1}\r\n\t"));
+	try testing.expect(typed.readable("ahoj, světe\n"));
+	try testing.expect(typed.readable(""));
+	try testing.expect(typed.readable("{\"a\":1}\r\n\t"));
 	// A PNG's own first bytes, which are exactly what the image viewer wants.
-	try testing.expect(!readable(&.{ 0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a }));
-	try testing.expect(!readable(&.{ 'a', 0x00, 'b' }));
+	try testing.expect(!typed.readable(&.{ 0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a }));
+	try testing.expect(!typed.readable(&.{ 'a', 0x00, 'b' }));
 	// Valid UTF-8 is not enough on its own: a control byte is not text.
-	try testing.expect(!readable(&.{ 'a', 0x07 }));
-	try testing.expect(!readable(&.{ 0xff, 0xfe }));
+	try testing.expect(!typed.readable(&.{ 'a', 0x07 }));
+	try testing.expect(!typed.readable(&.{ 0xff, 0xfe }));
 }
 
 test "an access key is not shown in full" {	var scratch = std.heap.ArenaAllocator.init(testing.allocator);

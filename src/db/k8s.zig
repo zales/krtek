@@ -37,6 +37,7 @@
 
 const std = @import("std");
 const db = @import("db.zig");
+const targets = @import("targets.zig");
 const clock = @import("clock.zig");
 const http = @import("http.zig");
 const ws = @import("ws.zig");
@@ -79,7 +80,7 @@ pub const Context = struct {
 /// was showing a list of databases.
 pub fn contexts(arena: std.mem.Allocator) []const Context {
 	const path = (config.find(arena, "") catch null) orelse return &.{};
-	const text = config.readFile(arena, path) catch return &.{};
+	const text = targets.readFile(arena, path) catch return &.{};
 	var why: List = .empty;
 	const doc = yaml.parse(arena, text, &why) catch return &.{};
 	const current = (doc.get("current-context") orelse yaml.Value{ .scalar = "" }).text();
@@ -177,7 +178,7 @@ pub const Db = struct {
 			try report.appendSlice(allocator, "there is no kubeconfig: no $KUBECONFIG, and no home directory to look in");
 			return error.Driver;
 		};
-		const text = config.readFile(home, path) catch {
+		const text = targets.readFile(home, path) catch {
 			try report.print(allocator, "{s} cannot be read", .{path});
 			return error.Driver;
 		};
@@ -1182,7 +1183,7 @@ pub const Db = struct {
 		@memset(@constCast(rows.numeric), false);
 
 		const path = (config.find(arena, self.parts.kubeconfig) catch null) orelse return rows;
-		const text = config.readFile(arena, path) catch return rows;
+		const text = targets.readFile(arena, path) catch return rows;
 		var why: List = .empty;
 		const doc = yaml.parse(arena, text, &why) catch return rows;
 		for (config.contexts(arena, doc) catch &.{}) |name| {

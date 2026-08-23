@@ -36,6 +36,8 @@ pub const net = @import("net.zig");
 pub const http = @import("http.zig");
 pub const ws = @import("ws.zig");
 pub const clock = @import("clock.zig");
+pub const targets = @import("targets.zig");
+pub const typed = @import("typed.zig");
 pub const random = @import("random.zig");
 pub const sigv4 = @import("s3/sigv4.zig");
 
@@ -71,6 +73,8 @@ comptime {
 	_ = http;
 	_ = ssh;
 	_ = clock;
+	_ = targets;
+	_ = typed;
 	_ = random;
 	_ = sigv4;
 }

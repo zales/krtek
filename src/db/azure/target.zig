@@ -19,6 +19,7 @@
 //! that does.
 
 const std = @import("std");
+const targets = @import("../targets.zig");
 const db = @import("../db.zig");
 
 const List = db.List;
@@ -95,23 +96,23 @@ pub fn parse(arena: std.mem.Allocator, target: []const u8) !Parts {
 		while (options.next()) |option| {
 			const equals = std.mem.indexOfScalar(u8, option, '=') orelse continue;
 			const name = option[0..equals];
-			const value = try unescape(arena, option[equals + 1 ..]);
-			if (eql(name, "key") or eql(name, "account_key") or eql(name, "password")) {
+			const value = try targets.unescape(arena, option[equals + 1 ..]);
+			if (targets.eql(name, "key") or targets.eql(name, "account_key") or targets.eql(name, "password")) {
 				self.key = value;
-			} else if (eql(name, "sas") or eql(name, "token")) {
+			} else if (targets.eql(name, "sas") or targets.eql(name, "token")) {
 				self.sas = std.mem.trimStart(u8, value, "?");
-			} else if (eql(name, "account")) {
+			} else if (targets.eql(name, "account")) {
 				self.account = value;
-			} else if (eql(name, "container")) {
+			} else if (targets.eql(name, "container")) {
 				self.container = value;
-			} else if (eql(name, "endpoint") or eql(name, "host")) {
+			} else if (targets.eql(name, "endpoint") or targets.eql(name, "host")) {
 				endpoint_given = value;
-			} else if (eql(name, "tls") or eql(name, "ssl")) {
-				tls = !eql(value, "0");
-			} else if (eql(name, "insecure")) {
-				self.verify = eql(value, "0");
-			} else if (eql(name, "path") or eql(name, "path_style")) {
-				self.path_style = !eql(value, "0");
+			} else if (targets.eql(name, "tls") or targets.eql(name, "ssl")) {
+				tls = !targets.eql(value, "0");
+			} else if (targets.eql(name, "insecure")) {
+				self.verify = targets.eql(value, "0");
+			} else if (targets.eql(name, "path") or targets.eql(name, "path_style")) {
+				self.path_style = !targets.eql(value, "0");
 			}
 		}
 	}
@@ -124,10 +125,10 @@ pub fn parse(arena: std.mem.Allocator, target: []const u8) !Parts {
 		const userinfo = rest[0..at];
 		authority = rest[at + 1 ..];
 		if (std.mem.indexOfScalar(u8, userinfo, ':')) |colon| {
-			self.account = try unescape(arena, userinfo[0..colon]);
-			self.key = try unescape(arena, userinfo[colon + 1 ..]);
+			self.account = try targets.unescape(arena, userinfo[0..colon]);
+			self.key = try targets.unescape(arena, userinfo[colon + 1 ..]);
 		} else {
-			self.account = try unescape(arena, userinfo);
+			self.account = try targets.unescape(arena, userinfo);
 		}
 		if (self.key.len != 0) {
 			self.source = "the target";
@@ -151,15 +152,15 @@ pub fn parse(arena: std.mem.Allocator, target: []const u8) !Parts {
 	// known; without one, the name is the container on the account's own endpoint.
 	if (path.len != 0 or port != null or std.mem.endsWith(u8, host, SUFFIX)) {
 		self.host = try arena.dupe(u8, host);
-		self.container = try unescape(arena, firstSegment(path));
+		self.container = try targets.unescape(arena, targets.firstSegment(path));
 		// Azurite puts the account in the path, so what looks like the container
 		// there is the account and the container is the segment after it.
 		if (std.mem.eql(u8, self.container, self.account)) {
 			self.path_style = true;
-			self.container = try unescape(arena, secondSegment(path));
+			self.container = try targets.unescape(arena, secondSegment(path));
 		}
 	} else if (host.len != 0) {
-		self.container = try unescape(arena, host);
+		self.container = try targets.unescape(arena, host);
 	}
 	if (endpoint_given) |given| {
 		self.host = given;
@@ -205,19 +206,19 @@ pub fn fromConnectionString(arena: std.mem.Allocator, text: []const u8) !Parts {
 		const name = std.mem.trim(u8, item[0..equals], " ");
 		// A key is base64 and ends in `=`, so only the first one separates.
 		const value = item[equals + 1 ..];
-		if (eql(name, "AccountName")) {
+		if (targets.eql(name, "AccountName")) {
 			self.account = value;
-		} else if (eql(name, "AccountKey")) {
+		} else if (targets.eql(name, "AccountKey")) {
 			self.key = value;
-		} else if (eql(name, "SharedAccessSignature")) {
+		} else if (targets.eql(name, "SharedAccessSignature")) {
 			self.sas = std.mem.trimStart(u8, value, "?");
-		} else if (eql(name, "EndpointSuffix")) {
+		} else if (targets.eql(name, "EndpointSuffix")) {
 			suffix = value;
-		} else if (eql(name, "BlobEndpoint")) {
+		} else if (targets.eql(name, "BlobEndpoint")) {
 			endpoint = value;
-		} else if (eql(name, "DefaultEndpointsProtocol")) {
+		} else if (targets.eql(name, "DefaultEndpointsProtocol")) {
 			protocol = value;
-		} else if (eql(name, "Container")) {
+		} else if (targets.eql(name, "Container")) {
 			self.container = value;
 		}
 	}
@@ -246,7 +247,7 @@ pub fn fromConnectionString(arena: std.mem.Allocator, text: []const u8) !Parts {
 			self.port = if (self.tls) 443 else 80;
 		}
 	} else {
-		self.tls = !eql(protocol, "http");
+		self.tls = !targets.eql(protocol, "http");
 		self.host = try std.fmt.allocPrint(arena, "{s}.blob.{s}", .{ self.account, suffix });
 		self.port = if (self.tls) 443 else 80;
 	}
@@ -259,17 +260,17 @@ pub fn resolve(arena: std.mem.Allocator, self: *Parts) !void {
 	if (!self.anonymous()) {
 		return;
 	}
-	if (getenv("AZURE_STORAGE_KEY")) |key| {
+	if (targets.getenv("AZURE_STORAGE_KEY")) |key| {
 		self.key = key;
 		self.source = "the environment";
 		if (self.account.len == 0) {
-			if (getenv("AZURE_STORAGE_ACCOUNT")) |account| {
+			if (targets.getenv("AZURE_STORAGE_ACCOUNT")) |account| {
 				self.account = account;
 			}
 		}
 		return;
 	}
-	if (getenv("AZURE_STORAGE_CONNECTION_STRING")) |text| {
+	if (targets.getenv("AZURE_STORAGE_CONNECTION_STRING")) |text| {
 		const found = fromConnectionString(arena, text) catch return;
 		if (found.key.len != 0 or found.sas.len != 0) {
 			const container = self.container;
@@ -282,53 +283,14 @@ pub fn resolve(arena: std.mem.Allocator, self: *Parts) !void {
 	}
 }
 
-fn firstSegment(path: []const u8) []const u8 {
-	const slash = std.mem.indexOfScalar(u8, path, '/') orelse return path;
-	return path[0..slash];
-}
 
 fn secondSegment(path: []const u8) []const u8 {
 	const slash = std.mem.indexOfScalar(u8, path, '/') orelse return "";
-	return firstSegment(path[slash + 1 ..]);
+	return targets.firstSegment(path[slash + 1 ..]);
 }
 
-fn eql(left: []const u8, right: []const u8) bool {
-	return std.ascii.eqlIgnoreCase(left, right);
-}
 
-fn getenv(name: [:0]const u8) ?[]const u8 {
-	const value = std.c.getenv(name.ptr) orelse return null;
-	const text = std.mem.sliceTo(value, 0);
-	return if (text.len == 0) null else text;
-}
 
-fn unescape(arena: std.mem.Allocator, text: []const u8) ![]const u8 {
-	if (std.mem.indexOfScalar(u8, text, '%') == null) {
-		return text;
-	}
-	var out: List = .empty;
-	var at: usize = 0;
-	while (at < text.len) {
-		if (text[at] == '%' and at + 2 < text.len) {
-			const high = std.fmt.charToDigit(text[at + 1], 16) catch {
-				try out.append(arena, text[at]);
-				at += 1;
-				continue;
-			};
-			const low = std.fmt.charToDigit(text[at + 2], 16) catch {
-				try out.append(arena, text[at]);
-				at += 1;
-				continue;
-			};
-			try out.append(arena, high * 16 + low);
-			at += 3;
-			continue;
-		}
-		try out.append(arena, text[at]);
-		at += 1;
-	}
-	return out.items;
-}
 
 // ------------------------------------------------------------------- tests
 

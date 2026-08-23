@@ -19,6 +19,7 @@
 //! without a machine that happens to be set up right.
 
 const std = @import("std");
+const targets = @import("../targets.zig");
 const db = @import("../db.zig");
 
 const List = db.List;
@@ -87,25 +88,25 @@ pub fn parse(arena: std.mem.Allocator, target: []const u8) !Parts {
 		while (options.next()) |option| {
 			const equals = std.mem.indexOfScalar(u8, option, '=') orelse continue;
 			const name = option[0..equals];
-			const value = try unescape(arena, option[equals + 1 ..]);
-			if (eql(name, "region")) {
+			const value = try targets.unescape(arena, option[equals + 1 ..]);
+			if (targets.eql(name, "region")) {
 				self.region = value;
-			} else if (eql(name, "endpoint") or eql(name, "host")) {
+			} else if (targets.eql(name, "endpoint") or targets.eql(name, "host")) {
 				endpoint_given = value;
-			} else if (eql(name, "key") or eql(name, "access_key") or eql(name, "access-key")) {
+			} else if (targets.eql(name, "key") or targets.eql(name, "access_key") or targets.eql(name, "access-key")) {
 				self.key = value;
-			} else if (eql(name, "secret") or eql(name, "secret_key") or eql(name, "password")) {
+			} else if (targets.eql(name, "secret") or targets.eql(name, "secret_key") or targets.eql(name, "password")) {
 				self.secret = value;
-			} else if (eql(name, "token") or eql(name, "session_token")) {
+			} else if (targets.eql(name, "token") or targets.eql(name, "session_token")) {
 				self.token = value;
-			} else if (eql(name, "profile")) {
+			} else if (targets.eql(name, "profile")) {
 				self.profile = value;
-			} else if (eql(name, "path") or eql(name, "path_style") or eql(name, "path-style")) {
-				style_given = !eql(value, "0");
-			} else if (eql(name, "tls") or eql(name, "ssl")) {
-				scheme_said_tls = !eql(value, "0");
-			} else if (eql(name, "insecure")) {
-				self.verify = eql(value, "0");
+			} else if (targets.eql(name, "path") or targets.eql(name, "path_style") or targets.eql(name, "path-style")) {
+				style_given = !targets.eql(value, "0");
+			} else if (targets.eql(name, "tls") or targets.eql(name, "ssl")) {
+				scheme_said_tls = !targets.eql(value, "0");
+			} else if (targets.eql(name, "insecure")) {
+				self.verify = targets.eql(value, "0");
 			}
 		}
 	}
@@ -117,10 +118,10 @@ pub fn parse(arena: std.mem.Allocator, target: []const u8) !Parts {
 		const userinfo = rest[0..at];
 		rest = rest[at + 1 ..];
 		if (std.mem.indexOfScalar(u8, userinfo, ':')) |colon| {
-			self.key = try unescape(arena, userinfo[0..colon]);
-			self.secret = try unescape(arena, userinfo[colon + 1 ..]);
+			self.key = try targets.unescape(arena, userinfo[0..colon]);
+			self.secret = try targets.unescape(arena, userinfo[colon + 1 ..]);
 		} else {
-			self.key = try unescape(arena, userinfo);
+			self.key = try targets.unescape(arena, userinfo);
 		}
 		if (self.key.len != 0) {
 			self.source = "the target";
@@ -151,9 +152,9 @@ pub fn parse(arena: std.mem.Allocator, target: []const u8) !Parts {
 		std.mem.eql(u8, host, "localhost");
 	if (path.len != 0 or looks_like_server) {
 		self.endpoint = try arena.dupe(u8, host);
-		self.bucket = try unescape(arena, firstSegment(path));
+		self.bucket = try targets.unescape(arena, targets.firstSegment(path));
 	} else {
-		self.bucket = try unescape(arena, host);
+		self.bucket = try targets.unescape(arena, host);
 	}
 	if (endpoint_given) |given| {
 		// An explicit endpoint wins, and what was taken for one is the bucket after
@@ -178,10 +179,6 @@ pub fn parse(arena: std.mem.Allocator, target: []const u8) !Parts {
 	return self;
 }
 
-fn firstSegment(path: []const u8) []const u8 {
-	const slash = std.mem.indexOfScalar(u8, path, '/') orelse return path;
-	return path[0..slash];
-}
 
 pub fn isAmazon(endpoint: []const u8) bool {
 	return endpoint.len == 0 or std.mem.endsWith(u8, endpoint, "amazonaws.com");
@@ -192,39 +189,7 @@ pub fn amazonEndpoint(arena: std.mem.Allocator, region: []const u8) ![]const u8 
 	return std.fmt.allocPrint(arena, "s3.{s}.amazonaws.com", .{region});
 }
 
-fn eql(left: []const u8, right: []const u8) bool {
-	return std.ascii.eqlIgnoreCase(left, right);
-}
 
-/// %20 and the like, as a URL carries them. A secret key is base64 and can hold
-/// a `+` and a `/`, which is why the escaped form has to work.
-fn unescape(arena: std.mem.Allocator, text: []const u8) ![]const u8 {
-	if (std.mem.indexOfScalar(u8, text, '%') == null) {
-		return text;
-	}
-	var out: List = .empty;
-	var at: usize = 0;
-	while (at < text.len) {
-		if (text[at] == '%' and at + 2 < text.len) {
-			const high = std.fmt.charToDigit(text[at + 1], 16) catch {
-				try out.append(arena, text[at]);
-				at += 1;
-				continue;
-			};
-			const low = std.fmt.charToDigit(text[at + 2], 16) catch {
-				try out.append(arena, text[at]);
-				at += 1;
-				continue;
-			};
-			try out.append(arena, high * 16 + low);
-			at += 3;
-			continue;
-		}
-		try out.append(arena, text[at]);
-		at += 1;
-	}
-	return out.items;
-}
 
 // ------------------------------------------------------- finding the secrets
 
@@ -246,11 +211,11 @@ pub fn resolve(arena: std.mem.Allocator, self: *Parts) !void {
 		take(self, fromEnvironment(), "the environment");
 	}
 	if (self.key.len == 0 or self.region.len == 0) {
-		const home = getenv("HOME") orelse "";
+		const home = targets.getenv("HOME") orelse "";
 		if (home.len != 0) {
 			for ([_][]const u8{ "credentials", "config" }) |name| {
 				const path = try std.fmt.allocPrint(arena, "{s}/.aws/{s}", .{ home, name });
-				const text = readFile(arena, path) catch continue;
+				const text = targets.readFile(arena, path) catch continue;
 				take(self, fromIni(arena, text, self.profile), "~/.aws");
 			}
 		}
@@ -281,10 +246,10 @@ fn take(self: *Parts, found: Found, source: []const u8) void {
 
 pub fn fromEnvironment() Found {
 	return .{
-		.key = getenv("AWS_ACCESS_KEY_ID") orelse "",
-		.secret = getenv("AWS_SECRET_ACCESS_KEY") orelse "",
-		.token = getenv("AWS_SESSION_TOKEN") orelse "",
-		.region = getenv("AWS_REGION") orelse getenv("AWS_DEFAULT_REGION") orelse "",
+		.key = targets.getenv("AWS_ACCESS_KEY_ID") orelse "",
+		.secret = targets.getenv("AWS_SECRET_ACCESS_KEY") orelse "",
+		.token = targets.getenv("AWS_SESSION_TOKEN") orelse "",
+		.region = targets.getenv("AWS_REGION") orelse targets.getenv("AWS_DEFAULT_REGION") orelse "",
 	};
 }
 
@@ -316,46 +281,20 @@ pub fn fromIni(arena: std.mem.Allocator, text: []const u8, profile: []const u8) 
 		const equals = std.mem.indexOfScalar(u8, line, '=') orelse continue;
 		const name = std.mem.trim(u8, line[0..equals], " \t");
 		const value = arena.dupe(u8, std.mem.trim(u8, line[equals + 1 ..], " \t")) catch continue;
-		if (eql(name, "aws_access_key_id")) {
+		if (targets.eql(name, "aws_access_key_id")) {
 			found.key = value;
-		} else if (eql(name, "aws_secret_access_key")) {
+		} else if (targets.eql(name, "aws_secret_access_key")) {
 			found.secret = value;
-		} else if (eql(name, "aws_session_token")) {
+		} else if (targets.eql(name, "aws_session_token")) {
 			found.token = value;
-		} else if (eql(name, "region")) {
+		} else if (targets.eql(name, "region")) {
 			found.region = value;
 		}
 	}
 	return found;
 }
 
-fn getenv(name: [:0]const u8) ?[]const u8 {
-	const value = std.c.getenv(name.ptr) orelse return null;
-	const text = std.mem.sliceTo(value, 0);
-	return if (text.len == 0) null else text;
-}
 
-/// Through libc, as everywhere else in this program.
-fn readFile(arena: std.mem.Allocator, path: []const u8) ![]u8 {
-	var zero: [std.fs.max_path_bytes]u8 = undefined;
-	if (path.len >= zero.len) {
-		return error.NameTooLong;
-	}
-	@memcpy(zero[0..path.len], path);
-	zero[path.len] = 0;
-	const file = std.c.fopen(@ptrCast(&zero), "rb") orelse return error.CannotOpen;
-	defer _ = std.c.fclose(file);
-	var out: List = .empty;
-	var chunk: [4096]u8 = undefined;
-	while (true) {
-		const got = std.c.fread(&chunk, 1, chunk.len, file);
-		if (got == 0) {
-			break;
-		}
-		try out.appendSlice(arena, chunk[0..got]);
-	}
-	return out.items;
-}
 
 // ------------------------------------------------------------------- tests
 

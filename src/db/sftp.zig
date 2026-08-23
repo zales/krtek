@@ -24,6 +24,7 @@
 
 const std = @import("std");
 const db = @import("db.zig");
+const typed = @import("typed.zig");
 const ssh = @import("ssh.zig");
 
 pub const address = @import("sftp/target.zig");
@@ -667,7 +668,7 @@ pub const Db = struct {
 		var scratch = std.heap.ArenaAllocator.init(self.allocator);
 		defer scratch.deinit();
 		const arena = scratch.allocator();
-		const args = try splitCommand(arena, line);
+		const args = try typed.split(arena, line);
 		if (args.len == 0) {
 			return self.oneText("sftp", "");
 		}
@@ -729,7 +730,7 @@ pub const Db = struct {
 			try rows.add(&.{
 				.{ .text = try replies.dupe(u8, args[1]) },
 				.{ .number = @intCast(bytes.len) },
-				if (readable(bytes)) .{ .text = bytes } else .{ .blob = bytes },
+				if (typed.readable(bytes)) .{ .text = bytes } else .{ .blob = bytes },
 			});
 			return rows;
 		}
@@ -912,20 +913,6 @@ fn kindOf(attributes: ssh.Attributes) []const u8 {
 	return "file";
 }
 
-fn readable(bytes: []const u8) bool {
-	if (bytes.len == 0) {
-		return true;
-	}
-	if (!std.unicode.utf8ValidateSlice(bytes)) {
-		return false;
-	}
-	for (bytes) |byte| {
-		if (byte < 0x20 and byte != '\t' and byte != '\n' and byte != '\r') {
-			return false;
-		}
-	}
-	return true;
-}
 
 fn eql(left: []const u8, right: []const u8) bool {
 	return std.ascii.eqlIgnoreCase(left, right);
@@ -936,31 +923,6 @@ fn flat(value: ??[]const u8) ?[]const u8 {
 	return inner orelse null;
 }
 
-fn splitCommand(arena: std.mem.Allocator, text: []const u8) ![]const []const u8 {
-	var out: std.ArrayListUnmanaged([]const u8) = .empty;
-	var at: usize = 0;
-	while (at < text.len) {
-		while (at < text.len and (text[at] == ' ' or text[at] == '\t')) : (at += 1) {}
-		if (at >= text.len) {
-			break;
-		}
-		if (text[at] == '"' or text[at] == '\'') {
-			const quote = text[at];
-			at += 1;
-			const start = at;
-			while (at < text.len and text[at] != quote) : (at += 1) {}
-			try out.append(arena, text[start..at]);
-			if (at < text.len) {
-				at += 1;
-			}
-			continue;
-		}
-		const start = at;
-		while (at < text.len and text[at] != ' ' and text[at] != '\t') : (at += 1) {}
-		try out.append(arena, text[start..at]);
-	}
-	return out.items;
-}
 
 // ------------------------------------------------------------------- cursor
 
@@ -1151,7 +1113,7 @@ test "what a row is called by its permission bits" {
 test "a command line comes apart the way a shell would do it" {
 	var scratch = std.heap.ArenaAllocator.init(testing.allocator);
 	defer scratch.deinit();
-	const args = try splitCommand(scratch.allocator(), "PUT \"august trip.txt\" 'ahoj, svete'");
+	const args = try typed.split(scratch.allocator(), "PUT \"august trip.txt\" 'ahoj, svete'");
 	try testing.expectEqual(@as(usize, 3), args.len);
 	try testing.expectEqualStrings("august trip.txt", args[1]);
 	try testing.expectEqualStrings("ahoj, svete", args[2]);

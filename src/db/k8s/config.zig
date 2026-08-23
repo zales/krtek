@@ -14,6 +14,7 @@
 //! on and every reimplementation gets differently.
 
 const std = @import("std");
+const targets = @import("../targets.zig");
 const db = @import("../db.zig");
 const yaml = @import("yaml.zig");
 const exec = @import("exec.zig");
@@ -211,7 +212,7 @@ fn material(arena: std.mem.Allocator, data: []const u8, path: []const u8, what: 
 	if (path.len == 0) {
 		return "";
 	}
-	return readFile(arena, path) catch {
+	return targets.readFile(arena, path) catch {
 		try why.print(arena, "the {s} is at {s}, which cannot be read", .{ what, path });
 		return error.Config;
 	};
@@ -297,7 +298,7 @@ pub fn find(arena: std.mem.Allocator, named: []const u8) Error!?[]const u8 {
 			if (place.len == 0) {
 				continue;
 			}
-			_ = readFile(arena, place) catch continue;
+			_ = targets.readFile(arena, place) catch continue;
 			return try arena.dupe(u8, place);
 		}
 	}
@@ -305,26 +306,6 @@ pub fn find(arena: std.mem.Allocator, named: []const u8) Error!?[]const u8 {
 	return try std.fmt.allocPrint(arena, "{s}/.kube/config", .{std.mem.sliceTo(home, 0)});
 }
 
-pub fn readFile(arena: std.mem.Allocator, path: []const u8) ![]u8 {
-	var zero: [std.fs.max_path_bytes]u8 = undefined;
-	if (path.len >= zero.len) {
-		return error.NameTooLong;
-	}
-	@memcpy(zero[0..path.len], path);
-	zero[path.len] = 0;
-	const file = std.c.fopen(@ptrCast(&zero), "rb") orelse return error.CannotOpen;
-	defer _ = std.c.fclose(file);
-	var out: List = .empty;
-	var chunk: [4096]u8 = undefined;
-	while (true) {
-		const got = std.c.fread(&chunk, 1, chunk.len, file);
-		if (got == 0) {
-			break;
-		}
-		try out.appendSlice(arena, chunk[0..got]);
-	}
-	return out.items;
-}
 
 // ------------------------------------------------------------------- tests
 

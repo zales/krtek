@@ -25,6 +25,7 @@
 
 const std = @import("std");
 const db = @import("db.zig");
+const typed = @import("typed.zig");
 const http = @import("http.zig");
 
 pub const xml = @import("xml.zig");
@@ -869,7 +870,7 @@ pub const Db = struct {
 		var scratch = std.heap.ArenaAllocator.init(self.allocator);
 		defer scratch.deinit();
 		const arena = scratch.allocator();
-		const args = try splitCommand(arena, text);
+		const args = try typed.split(arena, text);
 		if (args.len == 0) {
 			return self.oneText("azure", "");
 		}
@@ -931,7 +932,7 @@ pub const Db = struct {
 				.{ .text = name },
 				.{ .number = @intCast(response.body.len) },
 				.{ .text = response.get("content-type") orelse "" },
-				if (readable(response.body)) .{ .text = response.body } else .{ .blob = response.body },
+				if (typed.readable(response.body)) .{ .text = response.body } else .{ .blob = response.body },
 			});
 			return rows;
 		}
@@ -1444,22 +1445,6 @@ fn contentTypeOf(headers: []const sign.Header) []const u8 {
 	return "";
 }
 
-/// Whether a blob can be shown as text; anything else goes to the viewer that
-/// draws an image or hex.
-fn readable(bytes: []const u8) bool {
-	if (bytes.len == 0) {
-		return true;
-	}
-	if (!std.unicode.utf8ValidateSlice(bytes)) {
-		return false;
-	}
-	for (bytes) |byte| {
-		if (byte < 0x20 and byte != '\t' and byte != '\n' and byte != '\r') {
-			return false;
-		}
-	}
-	return true;
-}
 
 fn trimQuotes(text: []const u8) []const u8 {
 	return std.mem.trim(u8, text, "\"");
@@ -1487,31 +1472,6 @@ fn flat(value: ??[]const u8) ?[]const u8 {
 	return inner orelse null;
 }
 
-fn splitCommand(arena: std.mem.Allocator, text: []const u8) ![]const []const u8 {
-	var out: std.ArrayListUnmanaged([]const u8) = .empty;
-	var at: usize = 0;
-	while (at < text.len) {
-		while (at < text.len and (text[at] == ' ' or text[at] == '\t')) : (at += 1) {}
-		if (at >= text.len) {
-			break;
-		}
-		if (text[at] == '"' or text[at] == '\'') {
-			const quote = text[at];
-			at += 1;
-			const start = at;
-			while (at < text.len and text[at] != quote) : (at += 1) {}
-			try out.append(arena, text[start..at]);
-			if (at < text.len) {
-				at += 1;
-			}
-			continue;
-		}
-		const start = at;
-		while (at < text.len and text[at] != ' ' and text[at] != '\t') : (at += 1) {}
-		try out.append(arena, text[start..at]);
-	}
-	return out.items;
-}
 
 // ------------------------------------------------------------------- cursor
 
@@ -1714,7 +1674,7 @@ test "a container and a prefix tell themselves apart" {
 }
 
 test "text is shown as text and everything else as bytes" {
-	try testing.expect(readable("ahoj, světe\n"));
-	try testing.expect(!readable(&.{ 0x89, 'P', 'N', 'G' }));
-	try testing.expect(!readable(&.{ 'a', 0x00 }));
+	try testing.expect(typed.readable("ahoj, světe\n"));
+	try testing.expect(!typed.readable(&.{ 0x89, 'P', 'N', 'G' }));
+	try testing.expect(!typed.readable(&.{ 'a', 0x00 }));
 }

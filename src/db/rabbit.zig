@@ -30,6 +30,7 @@
 
 const std = @import("std");
 const db = @import("db.zig");
+const typed = @import("typed.zig");
 const http = @import("http.zig");
 
 pub const api = @import("rabbit/api.zig");
@@ -904,7 +905,7 @@ pub const Db = struct {
 		var scratch = std.heap.ArenaAllocator.init(self.allocator);
 		defer scratch.deinit();
 		const arena = scratch.allocator();
-		const args = try splitCommand(arena, line);
+		const args = try typed.split(arena, line);
 		if (args.len == 0) {
 			return self.oneText("rabbitmq", "");
 		}
@@ -1270,33 +1271,6 @@ fn flat(value: ??[]const u8) ?[]const u8 {
 	return inner orelse null;
 }
 
-/// A command line as a list of arguments, with quotes honoured so a message may
-/// contain spaces.
-fn splitCommand(arena: std.mem.Allocator, line: []const u8) ![]const []const u8 {
-	var out: std.ArrayListUnmanaged([]const u8) = .empty;
-	var at: usize = 0;
-	while (at < line.len) {
-		while (at < line.len and (line[at] == ' ' or line[at] == '\t')) : (at += 1) {}
-		if (at >= line.len) {
-			break;
-		}
-		if (line[at] == '"' or line[at] == '\'') {
-			const quote_char = line[at];
-			at += 1;
-			const start = at;
-			while (at < line.len and line[at] != quote_char) : (at += 1) {}
-			try out.append(arena, line[start..at]);
-			if (at < line.len) {
-				at += 1;
-			}
-			continue;
-		}
-		const start = at;
-		while (at < line.len and line[at] != ' ' and line[at] != '\t') : (at += 1) {}
-		try out.append(arena, line[start..at]);
-	}
-	return out.items;
-}
 
 // ------------------------------------------------------------------- cursor
 
@@ -1458,11 +1432,11 @@ test "a command line comes apart the way a shell would do it" {
 	defer scratch.deinit();
 	const arena = scratch.allocator();
 
-	const args = try splitCommand(arena, "PUBLISH orders new.order \"ahoj, svete\"");
+	const args = try typed.split(arena, "PUBLISH orders new.order \"ahoj, svete\"");
 	try testing.expectEqual(@as(usize, 4), args.len);
 	try testing.expectEqualStrings("PUBLISH", args[0]);
 	try testing.expectEqualStrings("ahoj, svete", args[3]);
-	try testing.expectEqual(@as(usize, 0), (try splitCommand(arena, "  \t ")).len);
+	try testing.expectEqual(@as(usize, 0), (try typed.split(arena, "  \t ")).len);
 }
 
 test "the authorization header is the one the API wants" {

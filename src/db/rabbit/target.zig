@@ -13,6 +13,7 @@
 //! Text in, a structure out; no connection anywhere near it.
 
 const std = @import("std");
+const targets = @import("../targets.zig");
 const db = @import("../db.zig");
 
 const List = db.List;
@@ -90,7 +91,7 @@ pub fn parse(arena: std.mem.Allocator, target: []const u8) !Parts {
 		while (options.next()) |option| {
 			const equals = std.mem.indexOfScalar(u8, option, '=') orelse continue;
 			const name = option[0..equals];
-			const value = try unescape(arena, option[equals + 1 ..]);
+			const value = try targets.unescape(arena, option[equals + 1 ..]);
 			if (eql(name, "password")) {
 				self.password = value;
 			} else if (eql(name, "user") or eql(name, "username")) {
@@ -119,10 +120,10 @@ pub fn parse(arena: std.mem.Allocator, target: []const u8) !Parts {
 		const userinfo = authority[0..at];
 		authority = authority[at + 1 ..];
 		if (std.mem.indexOfScalar(u8, userinfo, ':')) |colon| {
-			self.user = try unescape(arena, userinfo[0..colon]);
-			self.password = try unescape(arena, userinfo[colon + 1 ..]);
+			self.user = try targets.unescape(arena, userinfo[0..colon]);
+			self.password = try targets.unescape(arena, userinfo[colon + 1 ..]);
 		} else if (userinfo.len != 0) {
-			self.user = try unescape(arena, userinfo);
+			self.user = try targets.unescape(arena, userinfo);
 		}
 	}
 
@@ -155,7 +156,7 @@ pub fn parse(arena: std.mem.Allocator, target: []const u8) !Parts {
 	}
 	// A path with nothing in it is the default vhost, which is a slash and not
 	// the empty string.
-	const named = try unescape(arena, path);
+	const named = try targets.unescape(arena, path);
 	if (named.len != 0) {
 		self.vhost = named;
 	}
@@ -166,35 +167,6 @@ fn eql(left: []const u8, right: []const u8) bool {
 	return std.ascii.eqlIgnoreCase(left, right);
 }
 
-/// %2F and the like, as a URL carries them. The default vhost is written `%2F`
-/// as often as `/`, so this is not decoration.
-fn unescape(arena: std.mem.Allocator, text: []const u8) ![]const u8 {
-	if (std.mem.indexOfScalar(u8, text, '%') == null) {
-		return text;
-	}
-	var out: List = .empty;
-	var at: usize = 0;
-	while (at < text.len) {
-		if (text[at] == '%' and at + 2 < text.len) {
-			const high = std.fmt.charToDigit(text[at + 1], 16) catch {
-				try out.append(arena, text[at]);
-				at += 1;
-				continue;
-			};
-			const low = std.fmt.charToDigit(text[at + 2], 16) catch {
-				try out.append(arena, text[at]);
-				at += 1;
-				continue;
-			};
-			try out.append(arena, high * 16 + low);
-			at += 3;
-			continue;
-		}
-		try out.append(arena, text[at]);
-		at += 1;
-	}
-	return out.items;
-}
 
 /// A path segment as the management API wants it: everything but the unreserved
 /// characters escaped, so the default vhost `/` becomes `%2F` and a queue called

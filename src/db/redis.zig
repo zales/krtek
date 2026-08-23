@@ -24,6 +24,7 @@
 
 const std = @import("std");
 const db = @import("db.zig");
+const typed = @import("typed.zig");
 
 const List = std.ArrayListUnmanaged(u8);
 
@@ -512,7 +513,7 @@ pub const Db = struct {
 	fn console(self: *Db, text: []const u8) db.Error!Rows {
 		var arena = std.heap.ArenaAllocator.init(self.allocator);
 		defer arena.deinit();
-		const args = try splitCommand(arena.allocator(), text);
+		const args = try typed.split(arena.allocator(), text);
 		if (args.len == 0) {
 			return self.oneText("reply", "");
 		}
@@ -1108,31 +1109,6 @@ fn flat(value: ??[]const u8) ?[]const u8 {
 	return text;
 }
 
-/// A command line as a list of arguments, with quotes honoured so a value may
-/// contain spaces.
-fn splitCommand(arena: std.mem.Allocator, text: []const u8) ![]const []const u8 {
-	var list: std.ArrayListUnmanaged([]const u8) = .empty;
-	var at: usize = 0;
-	while (at < text.len) {
-		while (at < text.len and (text[at] == ' ' or text[at] == '\t')) : (at += 1) {}
-		if (at >= text.len) {
-			break;
-		}
-		if (text[at] == '"' or text[at] == '\'') {
-			const quote = text[at];
-			at += 1;
-			const from = at;
-			while (at < text.len and text[at] != quote) : (at += 1) {}
-			try list.append(arena, text[from..at]);
-			at = @min(text.len, at + 1);
-			continue;
-		}
-		const from = at;
-		while (at < text.len and text[at] != ' ' and text[at] != '\t') : (at += 1) {}
-		try list.append(arena, text[from..at]);
-	}
-	return list.items;
-}
 
 // ------------------------------------------------------------------ the target
 
@@ -1291,7 +1267,7 @@ test "a change says which columns it sets, and NULL is not one of them" {
 test "a command line is split with quotes honoured" {
 	var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
 	defer arena.deinit();
-	const args = try splitCommand(arena.allocator(), "SET greeting \"hello world\"");
+	const args = try typed.split(arena.allocator(), "SET greeting \"hello world\"");
 	try std.testing.expectEqual(@as(usize, 3), args.len);
 	try std.testing.expectEqualStrings("SET", args[0]);
 	try std.testing.expectEqualStrings("greeting", args[1]);

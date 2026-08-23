@@ -11,6 +11,8 @@
 //! Text in, a structure out; no connection anywhere near it.
 
 const std = @import("std");
+const store = @import("../store.zig");
+const targets = @import("../targets.zig");
 const db = @import("../db.zig");
 const ssh = @import("../ssh.zig");
 
@@ -61,19 +63,19 @@ pub fn parse(arena: std.mem.Allocator, target: []const u8) !Parts {
 		while (options.next()) |option| {
 			const equals = std.mem.indexOfScalar(u8, option, '=') orelse continue;
 			const name = option[0..equals];
-			const value = try unescape(arena, option[equals + 1 ..]);
-			if (eql(name, "password")) {
+			const value = try targets.unescape(arena, option[equals + 1 ..]);
+			if (targets.eql(name, "password")) {
 				self.password = value;
-			} else if (eql(name, "user") or eql(name, "username")) {
+			} else if (targets.eql(name, "user") or targets.eql(name, "username")) {
 				self.user = value;
-			} else if (eql(name, "key") or eql(name, "identity") or eql(name, "keyfile")) {
+			} else if (targets.eql(name, "key") or targets.eql(name, "identity") or targets.eql(name, "keyfile")) {
 				self.key = value;
-			} else if (eql(name, "passphrase")) {
+			} else if (targets.eql(name, "passphrase")) {
 				self.passphrase = value;
-			} else if (eql(name, "path")) {
+			} else if (targets.eql(name, "path")) {
 				self.path = value;
-			} else if (eql(name, "insecure")) {
-				self.verify = eql(value, "0");
+			} else if (targets.eql(name, "insecure")) {
+				self.verify = targets.eql(value, "0");
 			}
 		}
 	}
@@ -83,16 +85,16 @@ pub fn parse(arena: std.mem.Allocator, target: []const u8) !Parts {
 		authority = rest[0..slash];
 		// The path is what follows the host, and it is absolute: `sftp://h/etc`
 		// means /etc, as scp and every other tool has it.
-		self.path = try unescape(arena, rest[slash..]);
+		self.path = try targets.unescape(arena, rest[slash..]);
 	}
 	if (std.mem.lastIndexOfScalar(u8, authority, '@')) |at| {
 		const userinfo = authority[0..at];
 		authority = authority[at + 1 ..];
 		if (std.mem.indexOfScalar(u8, userinfo, ':')) |colon| {
-			self.user = try unescape(arena, userinfo[0..colon]);
-			self.password = try unescape(arena, userinfo[colon + 1 ..]);
+			self.user = try targets.unescape(arena, userinfo[0..colon]);
+			self.password = try targets.unescape(arena, userinfo[colon + 1 ..]);
 		} else {
-			self.user = try unescape(arena, userinfo);
+			self.user = try targets.unescape(arena, userinfo);
 		}
 	}
 
@@ -108,7 +110,7 @@ pub fn parse(arena: std.mem.Allocator, target: []const u8) !Parts {
 	}
 	// No user named is this machine's user, which is what ssh does.
 	if (self.user.len == 0) {
-		self.user = getenv("USER") orelse getenv("LOGNAME") orelse "root";
+		self.user = targets.getenv("USER") orelse targets.getenv("LOGNAME") orelse "root";
 	}
 	if (self.key.len != 0) {
 		self.key = try expand(arena, self.key);
@@ -122,50 +124,11 @@ pub fn expand(arena: std.mem.Allocator, path: []const u8) ![]const u8 {
 	if (!std.mem.startsWith(u8, path, "~/")) {
 		return path;
 	}
-	const home = getenv("HOME") orelse return path;
+	const home = targets.getenv("HOME") orelse return path;
 	return std.fmt.allocPrint(arena, "{s}{s}", .{ home, path[1..] });
 }
 
 // ------------------------------------------------------------------- paths
-
-/// One path from two, without the doubled slash and without the missing one.
-pub fn join(arena: std.mem.Allocator, base: []const u8, name: []const u8) ![]const u8 {
-	if (name.len != 0 and name[0] == '/') {
-		return name;
-	}
-	if (base.len == 0) {
-		return std.fmt.allocPrint(arena, "/{s}", .{name});
-	}
-	const trimmed = if (base.len > 1) std.mem.trimEnd(u8, base, "/") else base;
-	if (name.len == 0) {
-		return trimmed;
-	}
-	if (std.mem.eql(u8, trimmed, "/")) {
-		return std.fmt.allocPrint(arena, "/{s}", .{name});
-	}
-	return std.fmt.allocPrint(arena, "{s}/{s}", .{ trimmed, name });
-}
-
-/// The directory above this one. The root is its own parent, which is what stops
-/// `..` from walking off the top.
-pub fn parent(path: []const u8) []const u8 {
-	const trimmed = if (path.len > 1) std.mem.trimEnd(u8, path, "/") else path;
-	const slash = std.mem.lastIndexOfScalar(u8, trimmed, '/') orelse return "/";
-	if (slash == 0) {
-		return "/";
-	}
-	return trimmed[0..slash];
-}
-
-/// The last part of a path, which is what a directory is called.
-pub fn basename(path: []const u8) []const u8 {
-	const trimmed = if (path.len > 1) std.mem.trimEnd(u8, path, "/") else path;
-	if (std.mem.eql(u8, trimmed, "/") or trimmed.len == 0) {
-		return "/";
-	}
-	const slash = std.mem.lastIndexOfScalar(u8, trimmed, '/') orelse return trimmed;
-	return trimmed[slash + 1 ..];
-}
 
 /// `drwxr-xr-x`, as every listing since 1971 has shown it.
 pub fn mode(into: *[10]u8, permissions: c_ulong) []const u8 {
@@ -226,43 +189,8 @@ pub fn stamp(arena: std.mem.Allocator, seconds: c_ulong) ![]const u8 {
 	});
 }
 
-fn eql(left: []const u8, right: []const u8) bool {
-	return std.ascii.eqlIgnoreCase(left, right);
-}
 
-fn getenv(name: [:0]const u8) ?[]const u8 {
-	const value = std.c.getenv(name.ptr) orelse return null;
-	const text = std.mem.sliceTo(value, 0);
-	return if (text.len == 0) null else text;
-}
 
-fn unescape(arena: std.mem.Allocator, text: []const u8) ![]const u8 {
-	if (std.mem.indexOfScalar(u8, text, '%') == null) {
-		return text;
-	}
-	var out: List = .empty;
-	var at: usize = 0;
-	while (at < text.len) {
-		if (text[at] == '%' and at + 2 < text.len) {
-			const high = std.fmt.charToDigit(text[at + 1], 16) catch {
-				try out.append(arena, text[at]);
-				at += 1;
-				continue;
-			};
-			const low = std.fmt.charToDigit(text[at + 2], 16) catch {
-				try out.append(arena, text[at]);
-				at += 1;
-				continue;
-			};
-			try out.append(arena, high * 16 + low);
-			at += 3;
-			continue;
-		}
-		try out.append(arena, text[at]);
-		at += 1;
-	}
-	return out.items;
-}
 
 // ------------------------------------------------------------------- tests
 
@@ -349,3 +277,11 @@ test "a timestamp is readable and in UTC" {
 	// Nothing said is nothing shown, rather than 1970.
 	try testing.expectEqualStrings("", try stamp(scratch.allocator(), 0));
 }
+
+// A remote path is a path: the same three questions the file layer asks about
+// one, asked here under the names this driver already calls them. Re-exported
+// rather than written out again - they were identical to the byte, and two
+// copies of a path function is two answers waiting to disagree.
+pub const join = store.join;
+pub const basename = store.basename;
+pub const parent = store.parent;
