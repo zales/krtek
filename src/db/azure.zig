@@ -414,7 +414,11 @@ pub const Db = struct {
 			try params.append(arena, .{ .name = "marker", .value = marker });
 		}
 		if (folded) {
-			try params.append(arena, .{ .name = "delimiter", .value = "%2F" });
+			// A slash, not `%2F`. What goes in the query is what gets signed, and
+			// the server signs what it decoded - so a value escaped here is signed
+			// escaped and checked unescaped, and every folded listing came back
+			// saying the signature was wrong. A slash is legal in a query as it is.
+			try params.append(arena, .{ .name = "delimiter", .value = "/" });
 		}
 		const response = try self.call(arena, .{ .container = container, .query = params.items });
 		if (!response.ok()) {

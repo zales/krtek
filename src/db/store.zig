@@ -508,12 +508,23 @@ pub const Writer = union(enum) {
 		}
 	}
 
+	/// End the file, and say whether the bytes landed. Closing is the last chance
+	/// anything has to report a full disk or a refused upload, so this is asked
+	/// rather than assumed.
+	///
+	/// It ends the writer either way. A `finish` that fails has already closed the
+	/// file, freed the held bytes, let go of the handle - whichever of those its
+	/// place does - so there is nothing left to abandon afterwards, and abandoning
+	/// anyway is a second `fclose`, a second `free`, a second close of a handle
+	/// somebody else may hold by then.
 	pub fn finish(self: *Writer) Error!void {
 		switch (self.*) {
 			inline else => |*one| return one.finish(),
 		}
 	}
 
+	/// End it without claiming the bytes landed, for a copy given up on partway.
+	/// The other ending: exactly one of these two is called, ever.
 	pub fn abandon(self: *Writer) void {
 		switch (self.*) {
 			inline else => |*one| one.abandon(),
@@ -566,7 +577,13 @@ pub fn copyFile(
 	var target = try to.openWrite(arena, to_path, size);
 	// A copy given up on halfway leaves a part of a file behind, and the one
 	// thing worse than no copy is half a copy that looks whole.
-	errdefer target.abandon();
+	//
+	// Up until `finish`, and not through it: finishing ends the writer whether it
+	// works or not, so abandoning a failed one is the second ending its place is
+	// not written for. Uploading to Azure through that path freed the held bytes
+	// twice and took the program with it.
+	var ending = false;
+	errdefer if (!ending) target.abandon();
 
 	const buffer = arena.alloc(u8, BLOCK) catch return error.OutOfMemory;
 	var done: u64 = 0;
@@ -584,6 +601,7 @@ pub fn copyFile(
 			}
 		}
 	}
+	ending = true;
 	try target.finish();
 	tally.files += 1;
 }

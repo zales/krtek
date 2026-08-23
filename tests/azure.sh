@@ -119,4 +119,50 @@ check "a container that is not there says so" "$ROOT/neexistuje" "ContainerNotFo
 check "a key that is not base64 is refused before it is used" \
 	"azure+http://$ACCOUNT:not-base64@127.0.0.1:10000/$ACCOUNT/photos" "could not be signed"
 
+# --- and the file manager, which is the only way the copying is reachable ---
+#
+# None of the above goes near it: the table listing and the file listing are two
+# different calls, and only the second asks for a delimiter. Which is how a
+# folded listing came to be signed wrong without a single check noticing.
+LOCAL=/tmp/krtek-azure-test-local
+rm -rf "$LOCAL"
+mkdir -p "$LOCAL"
+echo "ahoj z krtka" > "$LOCAL/jedna.txt"
+
+# The panes start local on the left and the account on the right, so one tab and
+# a step down and an enter is inside `photos`.
+#
+# Asked for as what should be there rather than as what should not: a listing
+# that failed says so in a sentence the screen is too narrow to hold, and a check
+# reading the visible half of an error message passes whatever happens.
+out=$(tests/screen.py "$ROOT" "{sleep}f{sleep}{tab}{sleep}{down}{enter}{sleep}{keep}" 2>&1 || true)
+printf '%s' "$out" | grep -q "2015 august trip.txt" || {
+	printf '%s\n' "$out" >&2
+	fail "a container should list in the file manager"
+}
+# And the delimiter is what turns names sharing a prefix into one directory.
+printf '%s' "$out" | grep -q "2015 *<dir>" || {
+	printf '%s\n' "$out" >&2
+	fail "blobs sharing a prefix should fold into a directory"
+}
+echo "ok: a container lists, and names sharing a prefix fold into a directory"
+
+# Up: a file from this machine into a container.
+tests/screen.py "$ROOT" "{sleep}f{sleep}/$LOCAL{enter}{sleep}{tab}{enter}{sleep}{tab}{down}c{sleep}{keep}" >/dev/null 2>&1 || true
+check "a file copied up arrives" "$ROOT/druhy" "jedna.txt" druhy
+echo "ok: a file goes up into a container"
+
+# And the same copy where a blob cannot go - the account itself, which has no
+# container to put one in. What matters is that it says so rather than falling
+# over: finishing an upload releases what it held, and abandoning it afterwards
+# released the same bytes twice.
+out=$(tests/screen.py "$ROOT" "{sleep}f{sleep}/$LOCAL{enter}{sleep}{down}c{sleep}{keep}" 2>&1 || true)
+printf '%s' "$out" | grep -q "jedna.txt:" || {
+	printf '%s\n' "$out" >&2
+	fail "a copy with nowhere to go should say so"
+}
+printf '%s' "$out" | grep -qi "panic\|abort\|segmentation" && fail "and should not take the program with it"
+echo "ok: a copy with nowhere to go says so and survives"
+rm -rf "$LOCAL"
+
 echo "all good"
