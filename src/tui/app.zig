@@ -110,7 +110,7 @@ pub const Palette = struct {
 	at: usize = 0,
 };
 
-pub const PromptKind = enum { command, filter, edit, confirm, password, new_dir, rename_file, remove_files, go_to, remove_rows };
+pub const PromptKind = enum { command, filter, edit, confirm, password, new_dir, rename_file, remove_files, overwrite, go_to, remove_rows };
 
 pub const Prompt = struct {
 	kind: PromptKind,
@@ -2005,7 +2005,73 @@ pub const App = struct {
 	}
 
 	/// Copy what is chosen in this pane to where the other one is looking.
+	/// Copy what is chosen to the other pane, asking first where that would write
+	/// over something.
+	///
+	/// A copy is the one thing here that destroys without saying so: the name is
+	/// the same on both sides, so the file that was there is simply gone and there
+	/// is nothing to undo it with. Removing already asks; this is the same
+	/// question about the same loss.
 	pub fn copyFiles(self: *App) !void {
+		const manager = self.files orelse return;
+		const from = manager.here();
+		const to = manager.there();
+
+		var scratch = std.heap.ArenaAllocator.init(self.allocator);
+		defer scratch.deinit();
+		const arena = scratch.allocator();
+
+		const chosen = try from.chosen(arena);
+		if (chosen.len == 0) {
+			self.complain("nothing to copy", .{});
+			return;
+		}
+
+		// What is already there, by name. Asked of the far side, which for a bucket
+		// or a server is a request each - so only for what is actually being
+		// copied, and only once.
+		//
+		// A file written over a file, and nothing else. An object store answers
+		// "directory" for any name it has not got, because a prefix is not a thing
+		// it keeps; and a directory copied onto a directory is a merge, where what
+		// would be lost is a file inside it and not the name being asked about.
+		var over: usize = 0;
+		var first: []const u8 = "";
+		for (chosen) |entry| {
+			if (entry.kind != .file) {
+				continue;
+			}
+			const target = try database.store.join(arena, to.where(), entry.name);
+			const there = to.place.stat(arena, target) catch continue;
+			if (there.kind != .file) {
+				continue;
+			}
+			if (over == 0) {
+				first = entry.name;
+			}
+			over += 1;
+		}
+		if (over != 0) {
+			try self.askOverwrite(over, first);
+			return;
+		}
+		try self.copyChosen();
+	}
+
+	fn askOverwrite(self: *App, over: usize, first: []const u8) !void {
+		if (self.typing.prompt) |*old| {
+			old.buffer.deinit(self.allocator);
+		}
+		self.typing.prompt = .{ .kind = .overwrite, .label = " type y to overwrite: " };
+		if (over == 1) {
+			self.complain("{s} is already there - write over it?", .{first});
+		} else {
+			self.complain("{d} of them are already there - write over them?", .{over});
+		}
+	}
+
+	/// The copy itself, once there is nothing left to ask.
+	pub fn copyChosen(self: *App) !void {
 		const manager = self.files orelse return;
 		const from = manager.here();
 		const to = manager.there();

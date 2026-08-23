@@ -1075,6 +1075,13 @@ fn typing(app: *App, key: Key) !void {
 						app.say("left alone", .{});
 					}
 				},
+				.overwrite => {
+					if (line.len != 0 and (line[0] == 'y' or line[0] == 'Y')) {
+						try app.copyChosen();
+					} else {
+						app.say("left alone", .{});
+					}
+				},
 				.remove_rows => {
 					if (line.len != 0 and (line[0] == 'y' or line[0] == 'Y')) {
 						try app.deleteRowsNow();

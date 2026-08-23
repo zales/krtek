@@ -175,6 +175,40 @@ if docker exec "$NAME" test -e /home/foo/upload/strom; then
 fi
 echo "ok: a tree is removed with everything under it"
 
+# A copy that would write over something asks first. This is the one thing here
+# that destroys without saying so - the name is the same on both sides, so the
+# file that was there is simply gone - and removing has always asked.
+#
+# On this side: .. dolu strom, and `strom` went up a moment ago, so sending it
+# again is a copy onto something that is there.
+rm -rf "$LOCAL/znovu"
+mkdir -p "$LOCAL/znovu"
+echo ahoj > "$LOCAL/znovu/jedna.txt"
+tests/screen.py "$TARGET" \
+	"{sleep}f{sleep}/$LOCAL/znovu{enter}{sleep}{down}c{sleep}" >/dev/null 2>&1
+out=$(tests/screen.py "$TARGET" \
+	"{sleep}f{sleep}/$LOCAL/znovu{enter}{sleep}{down}c{sleep}{keep}" 2>&1 || true)
+printf '%s' "$out" | grep -q "already there" || {
+	printf '%s\n' "$out" >&2
+	fail "a copy onto a file that is there should ask before writing over it"
+}
+echo "ok: a copy that would write over something asks first"
+
+# And a name that is not taken goes straight through, because a question nobody
+# needs is a question that teaches people to answer without reading.
+#
+# Named to sort before `jedna.txt`, so one step down is the free one whatever
+# order it was made in: a listing is alphabetical and a check that counts on
+# anything else is a check that fails the next time somebody adds a file.
+echo nazdar > "$LOCAL/znovu/a-nove.txt"
+out=$(tests/screen.py "$TARGET" \
+	"{sleep}f{sleep}/$LOCAL/znovu{enter}{sleep}{down}c{sleep}{keep}" 2>&1 || true)
+printf '%s' "$out" | grep -q "copied 1 file" || {
+	printf '%s\n' "$out" >&2
+	fail "a copy onto a free name should not ask"
+}
+echo "ok: a copy onto a free name does not ask"
+
 # --- what a refused login says, which has to come last ---
 #
 # Everything that fails to authenticate goes here, and nothing follows it: since
