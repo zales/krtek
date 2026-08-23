@@ -1487,11 +1487,22 @@ pub const App = struct {
 			self.complain("that is not something to run again on its own", .{});
 			return;
 		}
+		// Whether the newest line is the one being looked at. A log that is being
+		// followed should show its end - that is the whole reason for watching one
+		// - but only while whoever is watching is already there. Scrolling up to
+		// read something is not an invitation to be dragged back two seconds later.
+		const at_end = self.grid.rows.items.len == 0 or
+			self.cursor.row + 1 >= self.grid.rows.items.len;
+
 		// Its own copy: running it fills the grid, and filling the grid is what
 		// owns the memory this was read from.
 		const again = try self.allocator.dupe(u8, self.follow.statement.items);
 		defer self.allocator.free(again);
 		try self.runBatchStopping(again, true);
+
+		if (self.follow.ms != 0 and at_end and self.grid.rows.items.len != 0) {
+			self.cursor.row = self.grid.rows.items.len - 1;
+		}
 	}
 
 	/// Whether there is anything for `r` and the follow key to read again.
@@ -1509,6 +1520,17 @@ pub const App = struct {
 		if (ms != 0 and !self.screen.following()) {
 			self.follow.ms = 0;
 			self.complain("there is no timer to follow with", .{});
+			return;
+		}
+		// Following means "show me what arrives", so it starts by showing what has
+		// arrived already. A log opened at line one and followed from there would
+		// grow at the end nobody is looking at - which is what it did.
+		//
+		// A table needs no help here: it is asked for its last page instead, which
+		// is what `tail_from` is. This is for the rows a statement put on the grid,
+		// where the whole of it is already in hand.
+		if (ms != 0 and !self.hasTable() and self.grid.rows.items.len != 0) {
+			self.cursor.row = self.grid.rows.items.len - 1;
 		}
 	}
 

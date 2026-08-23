@@ -306,6 +306,41 @@ printf '%s' "$logged" | grep -q "listening on" || {
 }
 echo "ok: l on it shows that pod's log"
 
+# A log is read across, not down: the one column it has takes the room nobody
+# else wants, rather than the width a table column is clipped to.
+kubectl -n payments delete pod tikac --ignore-not-found >/dev/null 2>&1
+kubectl -n payments run tikac --image=busybox:1.36 --restart=Never -- \
+	sh -c 'i=1; while [ $i -le 200 ]; do echo "radek $i - dost dlouhy radek, aby se poznalo, jestli se orizne nebo ne"; i=$((i+1)); done; sleep 3600' >/dev/null
+for _ in $(seq 1 30); do
+	[ "$(kubectl -n payments get pod tikac -o jsonpath='{.status.phase}' 2>/dev/null)" = "Running" ] && break
+	sleep 2
+done
+
+wide=$(python3 tests/screen.py "$ROOT" 's' 'LOGS tikac' '{ctrl-s}' '{sleep}' '{keep}' 2>&1)
+printf '%s' "$wide" | grep -q "jestli se orizne nebo ne" || {
+	printf '%s\n' "$wide" >&2
+	fail "a log line should have the width of the screen, not of a table column"
+}
+echo "ok: a log line is as wide as there is room for"
+
+# And following one shows its end. A log opened at line one and followed from
+# there grows at the end nobody is looking at.
+#
+# Two hundred lines, which is more than any screen this runs on: a log shorter
+# than the window has no end to scroll to and would pass whatever this did.
+# Not through `screen`: that helper takes five keys and this needs the waiting
+# after `R` as well.
+followed=$(python3 tests/screen.py "$ROOT" 's' 'LOGS tikac' '{ctrl-s}' '{sleep}' \
+	'R' '{sleep}' '{sleep}' '{sleep}' '{keep}' 2>&1)
+first=$(printf '%s' "$followed" | grep -o 'radek [0-9]*' | head -1 | awk '{print $2}')
+test -n "$first" && [ "$first" -gt 1 ] || {
+	printf '%s\n' "$followed" >&2
+	fail "following a log should show the end of it, not the beginning"
+}
+echo "ok: following a log shows the end of it"
+
+kubectl -n payments delete pod tikac --ignore-not-found >/dev/null 2>&1
+
 # And the terminal is still there for something full screen.
 terminal=$(python3 tests/screen.py "$ROOT" 's' 'EXEC -t shellme' '{ctrl-s}' '{sleep}' \
 	'echo I-AM-$(hostname)' '{enter}' '{sleep}' '{keep}' 2>&1)

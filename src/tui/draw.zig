@@ -385,6 +385,22 @@ fn layout(app: *App, available: usize, columns: []usize, widths: []usize) Layout
 				columns[n] = columns[i];
 				widths[n] = @min(@max(app.grid.widths.items[columns[i]], 3), app.grid.text_limit);
 			}
+			// Whatever is left over goes to the last column, up to what it would
+			// have taken without a clip. `text_limit` is there to stop one wide
+			// column pushing the others off the screen - it has nothing to say
+			// about room nobody else wants, and a pod's log in a 44-column strip
+			// with half a screen of nothing beside it is what that came to.
+			if (n != 0) {
+				var used_now: usize = 0;
+				for (widths[0..n]) |w| {
+					used_now += w + 1;
+				}
+				if (used_now < available) {
+					const natural = @max(app.grid.widths.items[columns[n - 1]], 3);
+					const room = available - used_now;
+					widths[n - 1] += @min(room, natural -| widths[n - 1]);
+				}
+			}
 			return .{ .columns = columns[0..n], .widths = widths[0..n] };
 		}
 		app.cursor.col_scroll += 1;
