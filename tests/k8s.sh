@@ -306,12 +306,56 @@ printf '%s' "$logged" | grep -q "listening on" || {
 }
 echo "ok: l on it shows that pod's log"
 
+# The kinds a cluster has that Kubernetes does not. k3s ships four definitions of
+# its own, which is what makes this checkable without installing anything: their
+# columns come out of the definition, the way kubectl gets them.
+# In kube-system, which is where k3s keeps them - `$ROOT` is the payments
+# namespace and a kind is listed in the namespace being looked at.
+crd=$(python3 tests/screen.py "k8s://default/kube-system" 's' 'GET addons' '{ctrl-s}' '{sleep}' '{keep}' 2>&1)
+printf '%s' "$crd" | grep -q "coredns" || {
+	printf '%s\n' "$crd" >&2
+	fail "a custom resource should list like any other kind"
+}
+# `source` is a column the definition asks for, not one this program knows about.
+printf '%s' "$crd" | grep -q "source" || {
+	printf '%s\n' "$crd" >&2
+	fail "a custom resource should take its columns from its own definition"
+}
+echo "ok: a custom kind lists, with the columns its definition asks for"
+
+# Helm keeps a release as a secret of its own type, so this reads without
+# unzipping anything. Installed here where there is a helm to install it with -
+# the check is the same either way: the kind answers rather than erroring.
+if command -v helm >/dev/null 2>&1; then
+	work=$(mktemp -d)
+	mkdir -p "$work/templates"
+	printf 'apiVersion: v2\nname: pokus\nversion: 0.1.0\n' > "$work/Chart.yaml"
+	printf 'apiVersion: v1\nkind: ConfigMap\nmetadata: {name: pokus-config}\ndata: {a: b}\n' > "$work/templates/cm.yaml"
+	helm install pokus "$work" -n payments >/dev/null 2>&1
+	helm upgrade pokus "$work" -n payments >/dev/null 2>&1
+	rm -rf "$work"
+	out=$(python3 tests/screen.py "$ROOT" 's' 'GET releases' '{ctrl-s}' '{sleep}' '{keep}' 2>&1)
+	# Two revisions, and only the second is the one installed.
+	printf '%s' "$out" | grep -q "superseded" && printf '%s' "$out" | grep -q "deployed" || {
+		printf '%s\n' "$out" >&2
+		fail "a helm release should show its revisions and which one is installed"
+	}
+	echo "ok: helm releases are read out of the secrets helm keeps them in"
+else
+	out=$(python3 tests/screen.py "$ROOT" 's' 'GET releases' '{ctrl-s}' '{sleep}' 'm' '{sleep}' '{keep}' 2>&1)
+	printf '%s' "$out" | grep -qi "statement(s) failed" && fail "GET releases should answer even where there is nothing to list"
+	echo "ok: helm releases answer on a cluster with none (no helm to install one)"
+fi
+
 # Eighteen kinds is more than a list, so the list down the side is divided the
 # way a cluster is: workloads, then network, then config, then storage, access
 # and the cluster's own. Heading lines take room, so what is really being
 # checked is that moving over them still lands where the cursor says it does.
-side=$(python3 tests/screen.py "$ROOT" '{sleep}' '{keep}' 2>&1)
-for heading in workloads network config storage access cluster; do
+# A window tall enough for the whole list: there are more kinds than a default
+# terminal has rows, and a heading below the edge is not a heading that is
+# missing.
+side=$(SCREEN_ROWS=48 python3 tests/screen.py "$ROOT" '{sleep}' '{keep}' 2>&1)
+for heading in workloads network config storage access helm cluster custom; do
 	printf '%s' "$side" | grep -qE "^ $heading *\|" || printf '%s' "$side" | grep -q " $heading " || {
 		printf '%s\n' "$side" >&2
 		fail "the list should be divided, and should have a $heading heading"
@@ -319,11 +363,17 @@ for heading in workloads network config storage access cluster; do
 done
 echo "ok: the kinds are divided the way a cluster is"
 
-# Seventeen steps down from `pods` is `namespaces`, whatever headings are drawn
-# in between - and on a window too short to hold the list, so it has scrolled.
+# Moving down lands on the kind the cursor is on, whatever headings were drawn
+# between. How far down `namespaces` is comes from the list itself rather than
+# from a number written here: a count in a test is a count that goes stale the
+# next time a kind is added, which is what happened the first time.
+at=$(printf '%s' "$side" | grep -nE '^ (▪|~) ' | grep -n 'namespaces' | cut -d: -f1)
+test -n "$at" || fail "namespaces should be somewhere in the list"
 down=""
-i=0
-while [ $i -lt 17 ]; do down="$down{down}"; i=$((i + 1)); done
+i=1
+while [ $i -lt "$at" ]; do down="$down{down}"; i=$((i + 1)); done
+
+# On a window too short to hold the list, so it has scrolled as well.
 out=$(SCREEN_ROWS=14 python3 tests/screen.py "$ROOT" "{sleep}$down{enter}{sleep}{keep}" 2>&1)
 printf '%s' "$out" | grep -q "namespaces  1-" || {
 	printf '%s\n' "$out" >&2

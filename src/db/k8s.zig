@@ -157,6 +157,12 @@ pub const Db = struct {
 	last_error: List = .empty,
 	progress: ?db.Progress = null,
 	requests: usize = 0,
+	/// The kinds this cluster has that Kubernetes does not, from its custom
+	/// resource definitions. Asked for once: a cluster's CRDs do not change while
+	/// somebody is looking at it, and the alternative is a request every time the
+	/// list down the side is drawn.
+	custom: []const api.Resource = &.{},
+	asked_custom: bool = false,
 	/// The shell open in a container, if one is. One at a time and it stays open,
 	/// so `cd /var/log` and then `ls` mean what they say - which is the whole
 	/// difference between a shell and a way of running one command.
@@ -384,10 +390,12 @@ pub const Db = struct {
 	/// The path of a resource's list, in the namespace in use.
 	fn listPath(self: *Db, arena: std.mem.Allocator, resource: api.Resource, schema: []const u8) ![]const u8 {
 		const namespace = if (schema.len != 0) schema else self.namespace;
+		const what = if (resource.path.len != 0) resource.path else resource.name;
+		const mark = if (resource.query.len != 0) "?" else "";
 		if (!resource.namespaced or namespace.len == 0 or std.mem.eql(u8, namespace, "*")) {
-			return std.fmt.allocPrint(arena, "{s}/{s}", .{ resource.root, resource.name });
+			return std.fmt.allocPrint(arena, "{s}/{s}{s}{s}", .{ resource.root, what, mark, resource.query });
 		}
-		return std.fmt.allocPrint(arena, "{s}/namespaces/{s}/{s}", .{ resource.root, namespace, resource.name });
+		return std.fmt.allocPrint(arena, "{s}/namespaces/{s}/{s}{s}{s}", .{ resource.root, namespace, what, mark, resource.query });
 	}
 
 	fn objectPath(self: *Db, arena: std.mem.Allocator, resource: api.Resource, schema: []const u8, name: []const u8) ![]const u8 {
@@ -438,18 +446,153 @@ pub const Db = struct {
 		return out.items;
 	}
 
+	/// A kind by name, the cluster's own included.
+	fn kindOf(self: *Db, name: []const u8) ?api.Resource {
+		if (api.find(name)) |found| {
+			return found;
+		}
+		self.discover();
+		for (self.custom) |one| {
+			if (eq(one.name, name) or eq(one.kind, name) or eq(one.singular, name)) {
+				return one;
+			}
+		}
+        return null;
+	}
+
+	/// Read the cluster's custom resource definitions and make a kind of each.
+	///
+	/// Quietly where it cannot: a cluster that will not show its definitions - and
+	/// a token scoped to one namespace often will not - still has all its built-in
+	/// kinds, and a list that is shorter than it might be is better than an error
+	/// nobody asked for.
+	fn discover(self: *Db) void {
+		if (self.asked_custom) {
+			return;
+		}
+		self.asked_custom = true;
+		var scratch = std.heap.ArenaAllocator.init(self.allocator);
+		defer scratch.deinit();
+		const arena = scratch.allocator();
+		const home = self.home.allocator();
+
+		const items = self.fetch(arena, "/apis/apiextensions.k8s.io/v1/customresourcedefinitions", "definitions") catch return;
+		var out: std.ArrayListUnmanaged(api.Resource) = .empty;
+		for (items) |item| {
+			const group = textAt(item, "spec.group");
+			const many = textAt(item, "spec.names.plural");
+			if (group.len == 0 or many.len == 0) {
+				continue;
+			}
+			const serving = servedVersion(item) orelse continue;
+			out.append(home, .{
+				.name = home.dupe(u8, many) catch continue,
+				.kind = home.dupe(u8, textAt(item, "spec.names.kind")) catch continue,
+				.root = std.fmt.allocPrint(home, "/apis/{s}/{s}", .{ group, textAt(serving, "name") }) catch continue,
+				.singular = home.dupe(u8, blk: {
+					const one = textAt(item, "spec.names.singular");
+					break :blk if (one.len != 0) one else many;
+				}) catch continue,
+				.namespaced = eq(textAt(item, "spec.scope"), "Namespaced"),
+				.group = "custom",
+				.columns = printerColumns(home, serving) catch continue,
+			}) catch continue;
+		}
+		self.custom = out.items;
+	}
+
+	/// Which version of a custom kind to read. The one it is stored as, where it
+	/// says; otherwise the first it will serve, because a version that is not
+	/// served is a version that answers 404.
+	fn servedVersion(item: Json) ?Json {
+		const versions = api.at(item, "spec.versions") orelse return null;
+		if (versions != .array) {
+			return null;
+		}
+		var first: ?Json = null;
+		for (versions.array.items) |one| {
+			const served = api.at(one, "served") orelse Json{ .bool = true };
+			if (served == .bool and !served.bool) {
+				continue;
+			}
+			if (first == null) {
+                first = one;
+			}
+			const storage = api.at(one, "storage") orelse Json{ .bool = false };
+			if (storage == .bool and storage.bool) {
+				return one;
+			}
+		}
+		return first;
+	}
+
+	/// The columns a definition asks for, which is what kubectl shows for it.
+	///
+	/// Their paths are JSONPath and this reads the dotted ones - `.spec.replicas`
+	/// - which is what almost every definition uses. Anything with a filter or an
+	/// index in it is left out rather than guessed at: a column showing the wrong
+	/// field is worse than one that is not there.
+	fn printerColumns(home: std.mem.Allocator, serving: Json) ![]const api.Column {
+		var shown: std.ArrayListUnmanaged(api.Column) = .empty;
+		try shown.append(home, .{ .name = "name", .from = .{ .at = "metadata.name" } });
+		if (api.at(serving, "additionalPrinterColumns")) |extra| {
+			if (extra == .array) {
+				for (extra.array.items) |one| {
+					const path = textAt(one, "jsonPath");
+					const name = textAt(one, "name");
+					if (path.len < 2 or path[0] != '.' or name.len == 0) {
+						continue;
+					}
+					if (std.mem.indexOfAny(u8, path, "[]?*@()") != null) {
+						continue;
+					}
+					// kubectl's own age column, which this already has one of.
+					if (eq(name, "Age")) {
+						continue;
+					}
+					try shown.append(home, .{
+						.name = try lower(home, name),
+						.from = .{ .at = try home.dupe(u8, path[1..]) },
+					});
+				}
+			}
+		}
+		try shown.append(home, .{ .name = "age", .from = .age });
+		return shown.items;
+	}
+
+	/// Column names in the case the rest of them are in. A definition writes
+	/// `Ready`, and a heading that shouts among headings that do not is a heading
+	/// somebody reads twice.
+	fn lower(home: std.mem.Allocator, text: []const u8) ![]const u8 {
+		const copy = try home.dupe(u8, text);
+		for (copy) |*char| {
+			char.* = std.ascii.toLower(char.*);
+		}
+		return copy;
+	}
+
 	pub fn objects(self: *Db, arena: std.mem.Allocator, schema: []const u8) db.Error![]db.Object {
 		self.begin();
 		if (schema.len != 0) {
 			self.namespace = try self.home.allocator().dupe(u8, schema);
 		}
 		var out: std.ArrayListUnmanaged(db.Object) = .empty;
-		for (api.RESOURCES) |resource| {
+		for (api.RESOURCES) |one| {
 			try out.append(arena, .{
-				.name = try arena.dupe(u8, resource.name),
-				.group = resource.group,
+				.name = try arena.dupe(u8, one.name),
+				.group = one.group,
 				.kind = .table,
 				// A count would be a request each, for every kind, on every redraw.
+				.rows = null,
+			});
+		}
+		self.discover();
+		for (self.custom) |one| {
+			try out.append(arena, .{
+				.name = try arena.dupe(u8, one.name),
+				.group = one.group,
+				.kind = .table,
 				.rows = null,
 			});
 		}
@@ -458,7 +601,7 @@ pub const Db = struct {
 
 	pub fn columns(self: *Db, arena: std.mem.Allocator, table: db.Table) db.Error![]db.Column {
 		self.begin();
-		const resource = api.find(table.name) orelse {
+		const resource = self.kindOf(table.name) orelse {
 			self.complain("there is no resource called {s}", .{table.name});
 			return error.Driver;
 		};
@@ -487,7 +630,7 @@ pub const Db = struct {
 	/// to see there is the shape of the thing.
 	pub fn definition(self: *Db, arena: std.mem.Allocator, table: db.Table) db.Error!?[]const u8 {
 		self.begin();
-		const resource = api.find(table.name) orelse return null;
+		const resource = self.kindOf(table.name) orelse return null;
 		const items = self.fetch(arena, try self.listPath(arena, resource, table.schema), table.name) catch return null;
 		if (items.len == 0) {
 			return null;
@@ -532,8 +675,8 @@ pub const Db = struct {
 
 	/// A row is addressed by its name, which is what a name is for in Kubernetes:
 	/// unique within a kind and a namespace, and never reused while it exists.
-	pub fn rowKey(_: *Db, _: std.mem.Allocator, table: db.Table) db.Error!db.RowKey {
-		const resource = api.find(table.name) orelse return .{};
+	pub fn rowKey(self: *Db, _: std.mem.Allocator, table: db.Table) db.Error!db.RowKey {
+		const resource = self.kindOf(table.name) orelse return .{};
 		for (resource.columns) |column| {
 			if (std.mem.eql(u8, column.name, "name")) {
 				return .{ .columns = &[_][]const u8{"name"} };
@@ -549,7 +692,7 @@ pub const Db = struct {
 	/// what the cluster has said about it lately. Which is `WHY`, laid out as
 	/// facts rather than as rows, and for every kind rather than only for a pod.
 	pub fn rowDetail(self: *Db, arena: std.mem.Allocator, table: db.Table, name: []const u8) db.Error!?[]db.Setting {
-		const resource = api.find(table.name) orelse return null;
+		const resource = self.kindOf(table.name) orelse return null;
 		if (name.len == 0) {
 			return null;
 		}
@@ -619,8 +762,7 @@ pub const Db = struct {
 	/// console, so the interface runs what it is given and knows nothing about
 	/// what a log or a shell is.
 	pub fn rowActions(self: *Db, arena: std.mem.Allocator, table: db.Table, name: []const u8) db.Error![]db.Action {
-		_ = self;
-		const resource = api.find(table.name) orelse return &.{};
+		const resource = self.kindOf(table.name) orelse return &.{};
 		if (name.len == 0) {
 			return &.{};
 		}
@@ -957,7 +1099,7 @@ pub const Db = struct {
 
 	pub fn select(self: *Db, request: db.ask.Select) db.Error!?db.Rows {
 		self.begin();
-		const resource = api.find(request.table.name) orelse {
+		const resource = self.kindOf(request.table.name) orelse {
 			self.complain("there is no resource called {s}", .{request.table.name});
 			return error.Driver;
 		};
@@ -1032,7 +1174,7 @@ pub const Db = struct {
 	/// A resource is deleted, a workload is scaled, and nothing else is written.
 	pub fn apply(self: *Db, change: db.ask.Change) db.Error!void {
 		self.begin();
-		const resource = api.find(change.table.name) orelse {
+		const resource = self.kindOf(change.table.name) orelse {
 			self.complain("there is no resource called {s}", .{change.table.name});
 			return error.Driver;
 		};
@@ -1132,7 +1274,7 @@ pub const Db = struct {
 			return .{ .k8s = try self.top(arena, first) };
 		}
 		if (eq(verb, "GET")) {
-			if (api.find(first) == null) {
+			if (self.kindOf(first) == null) {
 				self.complain("there is nothing here called {s}", .{first});
 				return error.Driver;
 			}
@@ -1163,7 +1305,7 @@ pub const Db = struct {
 			return .{ .k8s = try self.applyManifest(arena, line) };
 		}
 		if (eq(verb, "DELETE")) {
-			const resource = api.find(first) orelse api.find(plural(first)) orelse {
+			const resource = self.kindOf(first) orelse self.kindOf(plural(first)) orelse {
 				self.complain("there is nothing here called {s}", .{first});
 				return error.Driver;
 			};
@@ -1232,7 +1374,7 @@ pub const Db = struct {
 	/// One object, whole, as JSON - which is what `describe` is for when the
 	/// alternative is a screenful of fields somebody chose for you.
 	fn describeOne(self: *Db, arena: std.mem.Allocator, kind: []const u8, name: []const u8) db.Error!Rows {
-		const resource = api.find(kind) orelse api.find(plural(kind)) orelse {
+		const resource = self.kindOf(kind) orelse self.kindOf(plural(kind)) orelse {
 			self.complain("there is nothing here called {s}", .{kind});
 			return error.Driver;
 		};
@@ -1768,7 +1910,7 @@ pub const Db = struct {
 	}
 
 	fn scale(self: *Db, arena: std.mem.Allocator, kind: []const u8, name: []const u8, howMany: []const u8) db.Error!void {
-		const resource = api.find(kind) orelse api.find(plural(kind)) orelse {
+		const resource = self.kindOf(kind) orelse self.kindOf(plural(kind)) orelse {
 			self.complain("there is nothing here called {s}", .{kind});
 			return error.Driver;
 		};
@@ -1795,7 +1937,7 @@ pub const Db = struct {
 	/// which the controller notices and rolls the pods for. There is no restart
 	/// verb in the API and there never was.
 	fn restart(self: *Db, arena: std.mem.Allocator, kind: []const u8, name: []const u8) db.Error!void {
-		const resource = api.find(kind) orelse api.find(plural(kind)) orelse {
+		const resource = self.kindOf(kind) orelse self.kindOf(plural(kind)) orelse {
 			self.complain("there is nothing here called {s}", .{kind});
 			return error.Driver;
 		};

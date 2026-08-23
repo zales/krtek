@@ -68,8 +68,15 @@ pub const Column = struct {
 };
 
 pub const Resource = struct {
-	/// What the table is called, which is what the API calls it.
+	/// What the table is called, which is what the API calls it - except where a
+	/// kind is a reading of something else, and then `path` says what to ask for.
 	name: []const u8,
+	/// The path segment to list, where it is not the name. Helm's releases are
+	/// secrets of a particular type, and `secrets` is what the API answers to.
+	path: []const u8 = "",
+	/// Narrowing the API does for us, as a query string. A field selector costs
+	/// nothing and saves reading every secret in a cluster to find four.
+	query: []const u8 = "",
 	/// What a manifest calls it. The `kind:` of a YAML document names this and
 	/// nothing else, so applying one has to come back the other way.
 	kind: []const u8,
@@ -291,12 +298,77 @@ pub const RESOURCES = [_]Resource{
 		},
 	},
 	.{
+		.name = "roles",
+		.kind = "Role",
+		.root = "/apis/rbac.authorization.k8s.io/v1",
+		.singular = "role",
+		.group = "access",
+		.columns = &.{ NAME, AGE },
+	},
+	.{
+		.name = "rolebindings",
+		.kind = "RoleBinding",
+		.root = "/apis/rbac.authorization.k8s.io/v1",
+		.singular = "role binding",
+		.group = "access",
+		.columns = &.{
+			NAME,
+			.{ .name = "role", .from = .{ .at = "roleRef.name" } },
+			AGE,
+		},
+	},
+	.{
+		.name = "clusterroles",
+		.kind = "ClusterRole",
+		.root = "/apis/rbac.authorization.k8s.io/v1",
+		.singular = "cluster role",
+		.namespaced = false,
+		.group = "access",
+		.columns = &.{ NAME, AGE },
+	},
+	.{
+		.name = "clusterrolebindings",
+		.kind = "ClusterRoleBinding",
+		.root = "/apis/rbac.authorization.k8s.io/v1",
+		.singular = "cluster role binding",
+		.namespaced = false,
+		.group = "access",
+		.columns = &.{
+			NAME,
+			.{ .name = "role", .from = .{ .at = "roleRef.name" } },
+			AGE,
+		},
+	},
+	.{
 		.name = "serviceaccounts",
 		.kind = "ServiceAccount",
 		.root = "/api/v1",
 		.singular = "service account",
 		.group = "access",
 		.columns = &.{ NAME, AGE },
+	},
+	.{
+		// Helm keeps a release as a secret of its own type, one per revision, and
+		// puts everything a listing needs in its labels - so this is a reading of
+		// secrets rather than a kind of its own, and needs nothing unzipped.
+		.name = "releases",
+		.kind = "Release",
+		.root = "/api/v1",
+		.path = "secrets",
+		.query = "fieldSelector=type%3Dhelm.sh%2Frelease.v1",
+		.singular = "release",
+		.remove = false,
+		.group = "helm",
+		.columns = &.{
+			.{ .name = "name", .from = .{ .at = "metadata.labels.name" } },
+			// Every revision is a row, and the one that is not superseded is the
+			// one installed. That is Helm's own history, which is more than a list
+			// of what is installed and answers the question after it.
+			.{ .name = "revision", .from = .{ .at = "metadata.labels.version" }, .numeric = true },
+			.{ .name = "status", .from = .{ .at = "metadata.labels.status" } },
+			.{ .name = "namespace", .from = .{ .at = "metadata.namespace" } },
+			AGE,
+		},
 	},
 	.{
 		.name = "events",
