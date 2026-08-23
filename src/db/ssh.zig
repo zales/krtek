@@ -357,7 +357,18 @@ pub fn connect(allocator: std.mem.Allocator, options: Options, why: *List) Error
 	libssh2_session_set_timeout(session, TIMEOUT_MS);
 
 	if (libssh2_session_handshake(session, stream.fd) != 0) {
-		try why.print(allocator, "the SSH handshake failed: {s}", .{lastError(session)});
+		const said = lastError(session);
+		// "Failed getting banner" is the far end taking the connection and then
+		// saying nothing at all, which reads as a broken program and is usually
+		// one of two ordinary things. The second is worth naming: OpenSSH 9.8 and
+		// later shut a source out for several seconds after a failed password, and
+		// drop what comes next before the banner - so the attempt right after a
+		// mistyped one fails in a way that has nothing to do with the password.
+		if (std.mem.indexOf(u8, said, "banner") != null) {
+			try why.print(allocator, "the server took the connection and said nothing: either it does not speak SSH, or it is shutting this address out for a moment after a refused password", .{});
+		} else {
+			try why.print(allocator, "the SSH handshake failed: {s}", .{said});
+		}
 		return error.Handshake;
 	}
 	try checkHost(allocator, session, options, why);

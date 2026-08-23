@@ -163,4 +163,44 @@ if docker exec "$NAME" test -e /home/foo/upload/strom; then
 fi
 echo "ok: a tree is removed with everything under it"
 
+# --- the password prompt, which is where those two messages end up ---
+#
+# The driver saying the right thing is only half of it: the interface decides
+# whether to ask for a password by looking for the word in the message, and both
+# "you gave me none" and "the one you gave me is wrong" have it. Answering the
+# second with "the server wants a password" is what a form that does not work
+# looks like from the outside.
+ASK="sftp://foo@127.0.0.1:$PORT/upload?insecure=1"
+
+out=$(tests/screen.py "$ASK" "{sleep}{keep}" 2>&1 || true)
+printf '%s' "$out" | grep -q "the server wants a password" || {
+	printf '%s\n' "$out" >&2
+	fail "nothing to log in with should ask for a password"
+}
+echo "ok: nothing to log in with asks for a password"
+
+out=$(tests/screen.py "$ASK" "{sleep}{sleep}spatne{enter}{sleep}{keep}" 2>&1 || true)
+printf '%s' "$out" | grep -q "was not accepted" || {
+	printf '%s\n' "$out" >&2
+	fail "a refused password should say it was refused, not ask again in silence"
+}
+printf '%s' "$out" | grep -q "password:" || fail "and should leave the prompt up to try again"
+echo "ok: a refused password says so, and can be typed again"
+
+# And the right password after a wrong one, which is the retry actually working:
+# the second attempt has to go in on its own, because adding a password to a
+# target that has one leaves both in it.
+#
+# The wait is OpenSSH's, not this test's. Since 9.8 it shuts a source out for
+# some seconds after a failed authentication and drops what comes next before
+# the banner, so an attempt made straight away fails for a reason that has
+# nothing to do with the password.
+sleep 25
+out=$(tests/screen.py "$ASK" "{sleep}heslo{enter}{sleep}{keep}" 2>&1 || true)
+printf '%s' "$out" | grep -q "SFTP (libssh2" || {
+	printf '%s\n' "$out" >&2
+	fail "the right password after a wrong one should get in"
+}
+echo "ok: the right password after a wrong one gets in"
+
 echo "all good"

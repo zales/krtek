@@ -21,6 +21,7 @@ import re
 import select
 import struct
 import sys
+import tempfile
 import termios
 import time
 import fcntl
@@ -217,6 +218,13 @@ BINARY = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))
 
 
 def run(database, script):
+	# A configuration of this test's own, unless whoever called set one up. The
+	# app remembers every connection it opens, so a test that opened one wrote
+	# into the list somebody actually uses - which is where `sftp://foo@…:2222`
+	# and `%2F` came from in a real person's saved connections.
+	if not os.environ.get("XDG_CONFIG_HOME"):
+		os.environ["XDG_CONFIG_HOME"] = tempfile.mkdtemp(prefix="krtek-screen-")
+
 	pid, fd = pty.fork()
 	if pid == 0:
 		os.execv(BINARY, ["krtek", database])

@@ -371,10 +371,28 @@ pub const App = struct {
 		const opened = database.Db.open(self.allocator, target, &report) catch {
 			// A missing password is worth asking for rather than just failing.
 			if (needsPassword(report.items)) {
+				var scratch = std.heap.ArenaAllocator.init(self.allocator);
+				defer scratch.deinit();
+				// What is asked again is the target without a password, not the one
+				// that was just refused: `withPassword` adds one rather than
+				// replacing it, so asking twice built `password=first&password=second`
+				// and every attempt after that made the target longer.
+				const bare = conns.withoutPassword(scratch.allocator(), target) catch target;
+				const sent = !std.mem.eql(u8, bare, target);
 				self.pending_target.clearRetainingCapacity();
-				try self.pending_target.appendSlice(self.allocator, target);
+				try self.pending_target.appendSlice(self.allocator, bare);
 				self.prompt = .{ .kind = .password, .label = " password: " };
-				self.say("the server wants a password", .{});
+				// A server with no password and a server with the wrong one both say
+				// `password`, and there is no telling those apart by their words.
+				// What can be told is whether one was sent - and answering somebody
+				// who has just typed a password with "the server wants a password" is
+				// indistinguishable from a form that does not work, which is what it
+				// was taken for.
+				if (sent) {
+					self.complain("{s}", .{report.items});
+				} else {
+					self.say("the server wants a password", .{});
+				}
 				return;
 			}
 			self.complain("{s}", .{if (report.items.len != 0) report.items else "cannot open it"});
