@@ -419,14 +419,14 @@ fn grid(app: *App, size: Size, side: usize, rows: usize) void {
 		if (app.order != null and app.descending) " desc" else "",
 	}) catch "";
 	used += write(app, summary, width - used);
-	if (app.follow_ms != 0) {
+	if (app.follow.ms != 0) {
 		// In green, the colour of something going well: this is the one thing on
 		// the line that is still happening, and it should be seen without being
 		// read.
 		screen.style(.{ .fg = C.ok, .bold = true });
 		var every: [24]u8 = undefined;
 		const text = std.fmt.bufPrint(&every, "   following {d:.1}s", .{
-			@as(f64, @floatFromInt(app.follow_ms)) / 1000.0,
+			@as(f64, @floatFromInt(app.follow.ms)) / 1000.0,
 		}) catch "   following";
 		used += write(app, text, width - used);
 		screen.style(.{ .fg = C.dim });
@@ -931,9 +931,9 @@ fn help(app: *App, size: Size, side: usize, rows: usize) void {
 	// The last body line is the strip that says where in the map this is; the
 	// entries have the rest.
 	const page = if (rows > 3) rows - 2 else 1;
-	app.help_page = page;
-	const scroll = @min(app.help_scroll, half -| page);
-	app.help_scroll = scroll;
+	app.help.page = page;
+	const scroll = @min(app.help.scroll, half -| page);
+	app.help.scroll = scroll;
 
 	var line: usize = 2;
 	var i: usize = scroll;
@@ -1001,7 +1001,7 @@ fn objectScreen(app: *App, size: Size, side: usize, rows: usize) void {
 	screen.moveTo(1, left);
 	screen.style(.{ .fg = C.accent, .bold = true });
 	var used: usize = write(app, " ", width);
-	used += write(app, app.object_title, width -| used);
+	used += write(app, app.object.title, width -| used);
 	screen.style(.{ .fg = C.dim });
 	if (app.currentTable()) |table| {
 		used += write(app, "   ", width -| used);
@@ -1011,19 +1011,19 @@ fn objectScreen(app: *App, size: Size, side: usize, rows: usize) void {
 
 	// The widest label there is, so the values line up without a magic number.
 	var label_width: usize = 8;
-	for (app.object_facts) |fact| {
+	for (app.object.facts) |fact| {
 		label_width = @max(label_width, term.width(fact.label));
 	}
 	label_width = @min(label_width, @max(12, width / 3));
 
 	const room = if (rows > 2) rows - 1 else 1;
-	if (app.object_scroll + room > app.object_facts.len) {
-		app.object_scroll = app.object_facts.len -| room;
+	if (app.object.scroll + room > app.object.facts.len) {
+		app.object.scroll = app.object.facts.len -| room;
 	}
 	var line: usize = 2;
-	var at = app.object_scroll;
-	while (at < app.object_facts.len and line <= rows) : (at += 1) {
-		const fact = app.object_facts[at];
+	var at = app.object.scroll;
+	while (at < app.object.facts.len and line <= rows) : (at += 1) {
+		const fact = app.object.facts[at];
 		screen.moveTo(line, left);
 		screen.clearToEol();
 		line += 1;
@@ -1372,7 +1372,7 @@ fn footerHints(app: *App) []const u8 {
 		// Not the palette here: in a form ctrl+k removes a row.
 		return " tab moves   ctrl+s saves   ctrl+u clears the field   esc cancels";
 	}
-	if (app.follow_ms != 0 and app.view == .grid) {
+	if (app.follow.ms != 0 and app.view == .grid) {
 		// The one key worth knowing while the grid moves on its own.
 		return " R stops following   ctrl+k commands   q quit";
 	}
@@ -1384,7 +1384,7 @@ fn footerHints(app: *App) []const u8 {
 	if (app.view == .object) {
 		var out: std.ArrayListUnmanaged(u8) = .empty;
 		const arena = app.screen.frame.allocator();
-		for (app.object_actions) |action| {
+		for (app.object.actions) |action| {
 			var key: [8]u8 = undefined;
 			const len = std.unicode.utf8Encode(action.key, &key) catch continue;
 			out.appendSlice(arena, if (out.items.len == 0) " " else "   ") catch break;

@@ -527,7 +527,7 @@ fn click(app: *App, mouse: term.Mouse, size: term.Size) !void {
 /// down where it was left would be a puzzle rather than a memory.
 fn openHelp(app: *App) void {
 	app.view = .help;
-	app.help_scroll = 0;
+	app.help.scroll = 0;
 }
 
 /// Moving about the key map. It is longer than a terminal is tall, and what did
@@ -538,7 +538,7 @@ fn openHelp(app: *App) void {
 /// The scroll is only ever moved here; it is clamped where it is drawn, which is
 /// the one place that knows how many lines there were.
 fn scrollHelp(app: *App, key: Key) bool {
-	const page: i32 = @intCast(@max(1, app.help_page));
+	const page: i32 = @intCast(@max(1, app.help.page));
 	const whole: i32 = @intCast(draw.HELP.len);
 	const by: i32 = switch (key) {
 		.char => |point| switch (point) {
@@ -568,9 +568,9 @@ fn scrollHelp(app: *App, key: Key) bool {
 		else => return false,
 	};
 	if (by < 0) {
-		app.help_scroll -|= @intCast(-by);
+		app.help.scroll -|= @intCast(-by);
 	} else {
-		app.help_scroll +|= @intCast(by);
+		app.help.scroll +|= @intCast(by);
 	}
 	return true;
 }
@@ -741,7 +741,7 @@ fn moveColumn(app: *App, delta: i32) void {
 /// which is where an append lands, so a Kafka topic can be watched filling up
 /// instead of being asked about again and again.
 fn toggleFollow(app: *App) !void {
-	if (app.follow_ms != 0) {
+	if (app.follow.ms != 0) {
 		app.setFollow(0);
 		app.say("no longer following", .{});
 		return;
@@ -764,7 +764,7 @@ fn movePage(app: *App, delta: i32) !void {
 	// Having turned a page, the user is asking to look somewhere other than the
 	// end, and the next tick would drag the view straight back: the following
 	// stops instead.
-	if (app.follow_ms != 0) {
+	if (app.follow.ms != 0) {
 		app.setFollow(0);
 		app.say("no longer following", .{});
 	}
@@ -815,7 +815,7 @@ fn onObject(app: *App, key: Key) !void {
 				app.quit = true;
 				return;
 			}
-			for (app.object_actions) |action| {
+			for (app.object.actions) |action| {
 				if (action.key != point) {
 					continue;
 				}
@@ -827,21 +827,21 @@ fn onObject(app: *App, key: Key) !void {
 				return;
 			}
 			switch (point) {
-				'j' => app.object_scroll += 1,
-				'k' => app.object_scroll -|= 1,
-				'g' => app.object_scroll = 0,
-				'G' => app.object_scroll = app.object_facts.len,
+				'j' => app.object.scroll += 1,
+				'k' => app.object.scroll -|= 1,
+				'g' => app.object.scroll = 0,
+				'G' => app.object.scroll = app.object.facts.len,
 				'r' => _ = try app.openRow(),
 				else => {},
 			}
 		},
-		.down => app.object_scroll += 1,
-		.up => app.object_scroll -|= 1,
-		.page_down => app.object_scroll += 10,
-		.page_up => app.object_scroll -|= 10,
+		.down => app.object.scroll += 1,
+		.up => app.object.scroll -|= 1,
+		.page_down => app.object.scroll += 10,
+		.page_up => app.object.scroll -|= 10,
 		.mouse => |mouse| switch (mouse.button) {
-			.wheel_down => app.object_scroll += 3,
-			.wheel_up => app.object_scroll -|= 3,
+			.wheel_down => app.object.scroll += 3,
+			.wheel_up => app.object.scroll -|= 3,
 			else => {},
 		},
 		.ctrl => |code| switch (code) {

@@ -172,6 +172,69 @@ const Waiter = struct {
 	}
 };
 
+/// The object screen: what is known about the row that was opened, what can be
+/// done to it, and which row it was.
+///
+/// An arena of its own, because all three are the engine's strings and they last
+/// exactly as long as the screen does.
+const Opened = struct {
+	arena: std.heap.ArenaAllocator,
+	title: []const u8 = "",
+	facts: []const database.Setting = &.{},
+	actions: []const database.Action = &.{},
+	scroll: usize = 0,
+};
+
+/// Reading a table again on a clock.
+///
+/// Following is what makes a log readable: the page stays on the end of the
+/// table and records appear under the cursor as they are written, which for
+/// Kafka is the difference between a topic and a transcript of one.
+const Follow = struct {
+	/// How often, in milliseconds, or 0 when the grid is not following at all.
+	ms: u64 = 0,
+	/// The interval the follow key turns on, and what `:follow` changes.
+	every: u64 = 2000,
+	/// While following, the window is counted from the end of the table instead
+	/// of from a page boundary: the newest `limit` rows, always that many of them.
+	/// Paged, the row that fills a page up would appear alone at the top of the
+	/// next one - everything it followed pushed off the screen at exactly the
+	/// moment somebody watching wants the context. Worked out by every reload, so
+	/// it is never left over from an older one.
+	tail_from: ?usize = null,
+	/// The statement whose rows are on the grid, where a statement put them there
+	/// rather than a table. Kept so the grid can be filled again - by `r`, and by
+	/// the follow key on a clock - and only ever re-run where the engine says
+	/// running it twice is the same as running it once.
+	statement: std.ArrayListUnmanaged(u8) = .empty,
+};
+
+/// Where the key map is scrolled to, and how many of its lines a screen holds.
+///
+/// The map is longer than a terminal is tall, and what did not fit used simply
+/// not to be drawn - no mark, no mention, just an end that was not the end. The
+/// page size is worked out while drawing, because only the drawing code knows
+/// how many lines it had.
+const Help = struct {
+	scroll: usize = 0,
+	page: usize = 10,
+};
+
+/// While something long is happening: when it started, when the spinner was last
+/// drawn, which frame it is on, and whether the user has asked to stop.
+///
+/// A copy keeps its own clock. It is a different kind of long wait - one with an
+/// end that can be estimated - and sharing the statement's would have the two
+/// interrupt each other's spinners.
+const Running = struct {
+	started: f64 = 0,
+	ticked: f64 = 0,
+	frame: usize = 0,
+	cancelled: bool = false,
+	copy_started: f64 = 0,
+	copy_ticked: f64 = 0,
+};
+
 pub const App = struct {
 	allocator: std.mem.Allocator,
 	arena: std.heap.ArenaAllocator, // the loaded page of rows
@@ -213,34 +276,8 @@ pub const App = struct {
 	limit: usize = 200,
 	order: ?[]const u8 = null,
 	descending: bool = false,
-	/// The object screen: what is known about the row that was opened, what can
-	/// be done to it, and which row it was. Held in an arena of its own, because
-	/// all three are the engine's strings and they last exactly as long as the
-	/// screen does.
-	object_arena: std.heap.ArenaAllocator,
-	object_title: []const u8 = "",
-	object_facts: []const database.Setting = &.{},
-	object_actions: []const database.Action = &.{},
-	object_scroll: usize = 0,
-	/// The statement whose rows are on the grid, where a statement put them there
-	/// rather than a table. Kept so the grid can be filled again - by `r`, and by
-	/// the follow key on a clock - and only ever re-run where the engine says
-	/// running it twice is the same as running it once.
-	last_statement: std.ArrayListUnmanaged(u8) = .empty,
-	/// How often the grid reads its table again, in milliseconds, or 0 when it
-	/// does not. Following is what makes a log readable: the page stays on the
-	/// end of the table and records appear under the cursor as they are written,
-	/// which for Kafka is the difference between a topic and a transcript of one.
-	follow_ms: u64 = 0,
-	/// The interval the follow key turns on, and what `:follow` changes.
-	follow_every: u64 = 2000,
-	/// While following, the window is counted from the end of the table instead
-	/// of from a page boundary: the newest `limit` rows, always that many of them.
-	/// Paged, the row that fills a page up would appear alone at the top of the
-	/// next one - everything it followed pushed off the screen at exactly the
-	/// moment somebody watching wants the context. Worked out by every reload, so
-	/// it is never left over from an older one.
-	tail_from: ?usize = null,
+	object: Opened,
+	follow: Follow = .{},
 
 	cursor_row: usize = 0,
 	cursor_col: usize = 0,
@@ -261,13 +298,7 @@ pub const App = struct {
 	/// The last reload could not be answered, and has said why. Whoever asked for
 	/// it must not then report a count as though it had worked.
 	grid_failed: bool = false,
-	/// Where the key map is scrolled to, and how many of its lines a screen
-	/// holds. The map is longer than a terminal is tall, and what did not fit used
-	/// simply not to be drawn - no mark, no mention, just an end that was not the
-	/// end. The page size is worked out while drawing, because only the drawing
-	/// code knows how many lines it had.
-	help_scroll: usize = 0,
-	help_page: usize = 10,
+	help: Help = .{},
 	text_limit: usize = 44, // widest column in the grid
 	history: std.ArrayListUnmanaged([]const u8) = .empty,
 	reports: std.ArrayListUnmanaged(Report) = .empty,
@@ -303,14 +334,7 @@ pub const App = struct {
 	/// the drawing code knows where a field ended up, and read at the end of the
 	/// frame to put the terminal's own cursor there.
 	type_cursor: ?Spot = null,
-	/// While a statement is running: when it started, when the spinner was last
-	/// drawn, which frame it is on, and whether the user has asked to stop.
-	run_started: f64 = 0,
-	/// The same clock for a copy, which is a different kind of long wait.
-	copy_started: f64 = 0,
-	copy_ticked: f64 = 0,	run_ticked: f64 = 0,
-	run_frame: usize = 0,
-	cancelled: bool = false,
+	running: Running = .{},
 	/// Set once the App sits at its final address. `init` connects while the
 	/// struct is still being built and returned by value, so the pointer handed
 	/// to the driver then would dangle - the watch is armed from `main` instead,
@@ -328,7 +352,7 @@ pub const App = struct {
 			.allocator = allocator,
 			.arena = std.heap.ArenaAllocator.init(allocator),
 			.reports_arena = std.heap.ArenaAllocator.init(allocator),
-			.object_arena = std.heap.ArenaAllocator.init(allocator),
+			.object = .{ .arena = std.heap.ArenaAllocator.init(allocator) },
 			.form_arena = std.heap.ArenaAllocator.init(allocator),
 			.screen = try Term.init(allocator, io, env),
 			.conn = undefined,
@@ -559,11 +583,11 @@ pub const App = struct {
 	/// A statement is starting: the clock for the spinner starts with it.
 	fn beginStatement(context: *anyopaque) void {
 		const self: *App = @ptrCast(@alignCast(context));
-		self.run_started = monotonicMs();
+		self.running.started = monotonicMs();
 		// Far enough back that the first tick is not held off by the rate limit.
-		self.run_ticked = self.run_started - 1000;
-		self.run_frame = 0;
-		self.cancelled = false;
+		self.running.ticked = self.running.started - 1000;
+		self.running.frame = 0;
+		self.running.cancelled = false;
 	}
 
 	/// Asked by the driver, every so often, whether to carry on. Draws the
@@ -572,34 +596,34 @@ pub const App = struct {
 	fn keepGoing(context: *anyopaque) bool {
 		const self: *App = @ptrCast(@alignCast(context));
 		const now = monotonicMs();
-		if (now - self.run_ticked < 90) {
-			return !self.cancelled;
+		if (now - self.running.ticked < 90) {
+			return !self.running.cancelled;
 		}
-		self.run_ticked = now;
+		self.running.ticked = now;
 		if (self.screen.interrupted()) {
-			self.cancelled = true;
+			self.running.cancelled = true;
 			self.say("stopping...", .{});
 		}
 		// Anything under a third of a second should not flash a spinner at all.
-		if (now - self.run_started > 300) {
-			self.drawSpinner(now - self.run_started);
+		if (now - self.running.started > 300) {
+			self.drawSpinner(now - self.running.started);
 		}
-		return !self.cancelled;
+		return !self.running.cancelled;
 	}
 
 	/// One line at the bottom, over the frame that is already on screen: vaxis
 	/// writes only the cells that changed, so nothing else is touched.
 	fn drawSpinner(self: *App, elapsed: f64) void {
 		const frames = [_][]const u8{ "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏" };
-		self.run_frame = (self.run_frame + 1) % frames.len;
+		self.running.frame = (self.running.frame + 1) % frames.len;
 		const size = self.screen.size();
 		var line: [160]u8 = undefined;
 		const text = std.fmt.bufPrint(&line, " {s} running {d:.1}s   ctrl+c stops it", .{
-			frames[self.run_frame],
+			frames[self.running.frame],
 			elapsed / 1000.0,
 		}) catch return;
 		self.screen.moveTo(size.rows - 2, 0);
-		self.screen.style(.{ .bg = C.bar, .fg = if (self.cancelled) C.warn else C.accent, .bold = true });
+		self.screen.style(.{ .bg = C.bar, .fg = if (self.running.cancelled) C.warn else C.accent, .bold = true });
 		self.screen.put(text);
 		self.screen.clearToEol();
 		self.screen.reset();
@@ -988,7 +1012,7 @@ pub const App = struct {
 		self.rows.deinit(self.allocator);
 		self.title.deinit(self.allocator);
 		self.status.deinit(self.allocator);
-		self.last_statement.deinit(self.allocator);
+		self.follow.statement.deinit(self.allocator);
 		self.reports.deinit(self.allocator);
 		self.marked.deinit(self.allocator);
 		self.pending.deinit(self.allocator);
@@ -1021,7 +1045,7 @@ pub const App = struct {
 		self.allocator.free(self.owned_path);
 		self.arena.deinit();
 		self.reports_arena.deinit();
-		self.object_arena.deinit();
+		self.object.arena.deinit();
 		self.form_arena.deinit();
 	}
 
@@ -1042,7 +1066,7 @@ pub const App = struct {
 		// A table on the grid is not a statement's rows any more, so nothing is
 		// left behind for `r` to run instead of reading the table.
 		if (name != null) {
-			self.last_statement.clearRetainingCapacity();
+			self.follow.statement.clearRetainingCapacity();
 		}
 	}
 
@@ -1204,11 +1228,11 @@ pub const App = struct {
 		// grows: the end of it, or the beginning when the order is reversed and the
 		// end is drawn at the top. An engine that cannot count has no end to go to,
 		// so its view is left where it is.
-		self.tail_from = null;
-		if (self.follow_ms != 0 and self.counted) {
+		self.follow.tail_from = null;
+		if (self.follow.ms != 0 and self.counted) {
 			self.page = if (self.descending) 0 else page_count - 1;
 			if (!self.descending) {
-				self.tail_from = @intCast(@max(0, self.total - @as(i64, @intCast(self.limit))));
+				self.follow.tail_from = @intCast(@max(0, self.total - @as(i64, @intCast(self.limit))));
 			}
 		} else if (self.page >= page_count) {
 			self.page = page_count - 1;
@@ -1242,7 +1266,7 @@ pub const App = struct {
 			self.complain("{s}", .{self.conn.message()});
 			return;
 		};
-		if (self.follow_ms != 0) {
+		if (self.follow.ms != 0) {
 			// On the newest row, so the grid scrolls to it and the record just
 			// written is the one under the cursor.
 			self.cursor_row = if (self.descending) 0 else self.rows.items.len -| 1;
@@ -1264,13 +1288,13 @@ pub const App = struct {
 			return false;
 		}
 		const name = self.rowName() orelse return false;
-		_ = self.object_arena.reset(.retain_capacity);
-		const arena = self.object_arena.allocator();
+		_ = self.object.arena.reset(.retain_capacity);
+		const arena = self.object.arena.allocator();
 		const facts = (self.conn.rowDetail(arena, table, name) catch null) orelse return false;
-		self.object_facts = facts;
-		self.object_actions = self.conn.rowActions(arena, table, name) catch &.{};
-		self.object_title = try std.fmt.allocPrint(arena, "{s}", .{name});
-		self.object_scroll = 0;
+		self.object.facts = facts;
+		self.object.actions = self.conn.rowActions(arena, table, name) catch &.{};
+		self.object.title = try std.fmt.allocPrint(arena, "{s}", .{name});
+		self.object.scroll = 0;
 		self.view = .object;
 		return true;
 	}
@@ -1317,9 +1341,9 @@ pub const App = struct {
 	}
 
 	pub fn closeObject(self: *App) void {
-		self.object_facts = &.{};
-		self.object_actions = &.{};
-		self.object_title = "";
+		self.object.facts = &.{};
+		self.object.actions = &.{};
+		self.object.title = "";
 		self.view = .grid;
 	}
 
@@ -1398,11 +1422,11 @@ pub const App = struct {
 	/// once: a console with `PRODUCE` and `SCALE` in it has statements that must
 	/// happen exactly as often as they were typed.
 	fn reloadStatement(self: *App) !void {
-		if (self.last_statement.items.len == 0) {
+		if (self.follow.statement.items.len == 0) {
 			return;
 		}
-		if (!self.conn.repeatable(self.last_statement.items)) {
-			if (self.follow_ms != 0) {
+		if (!self.conn.repeatable(self.follow.statement.items)) {
+			if (self.follow.ms != 0) {
 				self.setFollow(0);
 			}
 			self.complain("that is not something to run again on its own", .{});
@@ -1410,7 +1434,7 @@ pub const App = struct {
 		}
 		// Its own copy: running it fills the grid, and filling the grid is what
 		// owns the memory this was read from.
-		const again = try self.allocator.dupe(u8, self.last_statement.items);
+		const again = try self.allocator.dupe(u8, self.follow.statement.items);
 		defer self.allocator.free(again);
 		try self.runBatchStopping(again, true);
 	}
@@ -1418,17 +1442,17 @@ pub const App = struct {
 	/// Whether there is anything for `r` and the follow key to read again.
 	pub fn hasRows(self: *App) bool {
 		return self.hasTable() or
-			(self.last_statement.items.len != 0 and self.conn.repeatable(self.last_statement.items));
+			(self.follow.statement.items.len != 0 and self.conn.repeatable(self.follow.statement.items));
 	}
 
 	/// Read the open table every `ms` milliseconds, or stop with 0. The timer
 	/// itself lives in the screen, because waking the key loop is the one thing
 	/// only the screen can do.
 	pub fn setFollow(self: *App, ms: u64) void {
-		self.follow_ms = ms;
+		self.follow.ms = ms;
 		self.screen.follow(ms);
 		if (ms != 0 and !self.screen.following()) {
-			self.follow_ms = 0;
+			self.follow.ms = 0;
 			self.complain("there is no timer to follow with", .{});
 		}
 	}
@@ -1438,7 +1462,7 @@ pub const App = struct {
 	/// whatever is already there - and anything modal is left alone, because a
 	/// grid that reloads under a half-typed form is worse than one that waits.
 	pub fn followTick(self: *App) void {
-		if (self.follow_ms == 0 or self.view != .grid or !self.hasRows()) {
+		if (self.follow.ms == 0 or self.view != .grid or !self.hasRows()) {
 			return;
 		}
 		if (self.prompt != null or self.form != null or self.editor != null or self.files != null or self.detail) {
@@ -1725,7 +1749,7 @@ pub const App = struct {
 	/// Which row of the table the grid starts at, counting from 1. Normally the
 	/// top of the page; the tail of it while following.
 	pub fn firstRow(self: *App) usize {
-		return (self.tail_from orelse self.page * self.limit) + 1;
+		return (self.follow.tail_from orelse self.page * self.limit) + 1;
 	}
 
 	pub fn pages(self: *App) usize {
@@ -1824,7 +1848,7 @@ pub const App = struct {
 			}
 			// A statement the user gave up on ends the batch: carrying on with the
 			// rest of it is never what stopping meant.
-			if (self.cancelled) {
+			if (self.running.cancelled) {
 				break;
 			}
 		}
@@ -1837,8 +1861,8 @@ pub const App = struct {
 
 		// A statement that was given up on is not run a second time to fill the
 		// grid, which is what showing a result normally takes.
-		if (self.cancelled) {
-			self.cancelled = false;
+		if (self.running.cancelled) {
+			self.running.cancelled = false;
 			try self.loadObjects();
 			self.complain("stopped{s}", .{if (rolled_back) ", rolled back" else ""});
 			return;
@@ -1855,8 +1879,8 @@ pub const App = struct {
 			self.clampCursor();
 			self.total = @intCast(self.rows.items.len);
 			// The last statement of the batch is the one that filled the grid.
-			self.last_statement.clearRetainingCapacity();
-			self.last_statement.appendSlice(self.allocator, last_shown) catch {};
+			self.follow.statement.clearRetainingCapacity();
+			self.follow.statement.appendSlice(self.allocator, last_shown) catch {};
 			self.setTitle("query result", .{});
 			self.view = .grid;
 			self.focus = .main;
@@ -1941,9 +1965,9 @@ pub const App = struct {
 			return;
 		}
 
-		self.copy_started = monotonicMs();
-		self.copy_ticked = self.copy_started - 1000;
-		self.cancelled = false;
+		self.running.copy_started = monotonicMs();
+		self.running.copy_ticked = self.running.copy_started - 1000;
+		self.running.cancelled = false;
 		var total = database.store.Tally{};
 		for (chosen) |entry| {
 			const source = try database.store.join(arena, from.where(), entry.name);
@@ -1964,7 +1988,7 @@ pub const App = struct {
 				const from_why = from.place.message();
 				self.complain("{s}: {s}", .{
 					entry.name,
-					if (self.cancelled) "stopped" else if (why.len != 0) why else from_why,
+					if (self.running.cancelled) "stopped" else if (why.len != 0) why else from_why,
 				});
 				to.reload(self.allocator);
 				return;
@@ -2000,15 +2024,15 @@ pub const App = struct {
 	fn copyStep(context: *anyopaque, name: []const u8, done: u64, whole: u64) bool {
 		const self: *App = @ptrCast(@alignCast(context));
 		const now = monotonicMs();
-		if (now - self.copy_ticked < 90) {
-			return !self.cancelled;
+		if (now - self.running.copy_ticked < 90) {
+			return !self.running.cancelled;
 		}
-		self.copy_ticked = now;
+		self.running.copy_ticked = now;
 		if (self.screen.interrupted()) {
-			self.cancelled = true;
+			self.running.cancelled = true;
 		}
 		self.drawCopying(name, done, whole);
-		return !self.cancelled;
+		return !self.running.cancelled;
 	}
 
 	fn drawCopying(self: *App, name: []const u8, done: u64, whole: u64) void {
@@ -2022,7 +2046,7 @@ pub const App = struct {
 			Files.size(&all, whole),
 		}) catch return;
 		self.screen.moveTo(size.rows - 2, 0);
-		self.screen.style(.{ .bg = C.bar, .fg = if (self.cancelled) C.warn else C.accent, .bold = true });
+		self.screen.style(.{ .bg = C.bar, .fg = if (self.running.cancelled) C.warn else C.accent, .bold = true });
 		self.screen.put(text);
 		self.screen.clearToEol();
 		self.screen.reset();
@@ -2234,7 +2258,7 @@ pub const App = struct {
 			self.say("no longer following", .{});
 			return;
 		}
-		self.follow_every = @intFromFloat(@max(200, @min(3_600_000, seconds * 1000)));
+		self.follow.every = @intFromFloat(@max(200, @min(3_600_000, seconds * 1000)));
 		try self.startFollowing();
 	}
 
@@ -2245,14 +2269,14 @@ pub const App = struct {
 			self.complain("open a table, or run something worth watching, to follow it", .{});
 			return;
 		}
-		self.setFollow(self.follow_every);
-		if (self.follow_ms == 0) {
+		self.setFollow(self.follow.every);
+		if (self.follow.ms == 0) {
 			return;
 		}
 		try self.reload();
 		self.say("following {s}, every {d:.1}s", .{
 			if (self.hasTable()) self.title.items else "it",
-			@as(f64, @floatFromInt(self.follow_every)) / 1000.0,
+			@as(f64, @floatFromInt(self.follow.every)) / 1000.0,
 		});
 	}
 
