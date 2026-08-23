@@ -46,7 +46,12 @@ jobs:
             pkg-config libpq-dev libmariadb-dev libssl-dev libssh2-1-dev
 
       - run: ./fetch-sqlite.sh
-      - run: zig build
+
+      # ReleaseSafe, as everywhere else in CI, and not only for the speed: a
+      # Debug build here crashes the compiler itself with a SEGV. That is Zig
+      # 0.16's own x86_64 backend, which a Debug build uses instead of LLVM -
+      # arm64 does not do it, which is why nobody building on a Mac has seen it.
+      - run: zig build -Doptimize=ReleaseSafe
 
       # The yardstick the Kubernetes suite measures against. On the runner image
       # already, but it is one line to be sure rather than to find out.
