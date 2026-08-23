@@ -1,0 +1,82 @@
+name: servers
+
+# The tests that need a server. Every one of them brings its own up in a
+# container, checks the driver against it, and takes it down again - which is why
+# they can run here at all, and why they are not in the build workflow: that one
+# answers "does it compile and does it start" in a couple of minutes, and this
+# one answers "does it still work" in rather more.
+#
+# Worth the minutes. Every bug found in these drivers lately was found by one of
+# these scripts and by nothing else: a listing signed the way the server does not
+# check it, an upload freed twice on the way out, a password prompt that repeated
+# itself instead of saying the password was refused. None of that is reachable
+# from a unit test, because none of it is wrong until something answers back.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  against:
+    name: ${{ matrix.suite }}
+    runs-on: ubuntu-24.04
+    # One suite failing should not hide what the others did, and none of them
+    # should be able to sit here for an hour: a server that never comes up is a
+    # failure, not a wait.
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [sqlite, azure, s3, rabbit, sftp, kafka, k8s]
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+
+      # Built against the distribution's own libraries rather than statically:
+      # what is being tested here is the driver talking to a server, and a static
+      # link is the release's concern, checked in the build workflow.
+      - name: the client libraries
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            pkg-config libpq-dev libmariadb-dev libssl-dev libssh2-1-dev
+
+      - run: ./fetch-sqlite.sh
+      - run: zig build
+
+      # The yardstick the Kubernetes suite measures against. On the runner image
+      # already, but it is one line to be sure rather than to find out.
+      - name: kubectl, for the suite that compares against it
+        if: matrix.suite == 'k8s'
+        run: |
+          command -v kubectl >/dev/null && exit 0
+          version=$(curl -fsSL https://dl.k8s.io/release/stable.txt)
+          sudo curl -fsSLo /usr/local/bin/kubectl \
+            "https://dl.k8s.io/release/$version/bin/linux/amd64/kubectl"
+          sudo chmod +x /usr/local/bin/kubectl
+
+      # The one suite with no server to bring up: it is here so that the thing
+      # every other suite depends on - the binary starting and drawing a frame -
+      # is checked in this workflow too rather than only in the other one.
+      - name: ${{ matrix.suite }}
+        run: |
+          if [ "${{ matrix.suite }}" = sqlite ]; then
+            ./tests/smoke.sh
+          else
+            ./tests/${{ matrix.suite }}.sh
+          fi
+
+      # What a failing suite drew, which is most of what there is to go on when
+      # the failure is in a frame rather than in a message.
+      - name: what was left behind
+        if: failure()
+        run: |
+          docker ps -a --filter name=krtek- --format '{{.Names}}\t{{.Status}}'
+          for name in $(docker ps -aq --filter name=krtek-); do
+            echo "=== $(docker inspect -f '{{.Name}}' "$name")"
+            docker logs --tail 50 "$name" 2>&1 || true
+          done
