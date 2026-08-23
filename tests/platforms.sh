@@ -32,7 +32,10 @@ comptime {
     _ = &db.net.startTls;
     _ = &db.net.Stream.readNow;
     _ = &db.k8s_config.find;
-    _ = &db.k8s_config.readFile;
+    // Reading a small file the target or the environment named, which every
+    // driver that has one of those does through libc.
+    _ = &db.targets.readFile;
+    _ = &db.targets.getenv;
     _ = &store.Local.list;
     _ = &store.Local.stat;
     _ = &store.Local.openRead;
