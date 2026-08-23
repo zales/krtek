@@ -291,27 +291,43 @@ const Typing = struct {
 	built_for: conns.Engine = .sqlite,
 };
 
-pub const App = struct {
-	allocator: std.mem.Allocator,
-	arena: std.heap.ArenaAllocator, // the loaded page of rows
-	screen: *Term,
-	conn: database.Db,
-	/// False while the connection list is on screen and nothing is open.
-	connected: bool = false,
-	path: []const u8,
-	owned_path: []u8,
-
+/// The list down the left: every table and view the connection has, what has
+/// been typed to narrow it, which one the cursor is on and where it is scrolled
+/// to.
+const Sidebar = struct {
 	objects: std.ArrayListUnmanaged(Object) = .empty,
 	filter: std.ArrayListUnmanaged(u8) = .empty,
 	selected: usize = 0,
-	scroll: usize = 0, // first visible object
+	/// The first one visible, which is what scrolling a list means.
+	scroll: usize = 0,
+};
 
-	view: View = .grid,
-	focus: Focus = .sidebar,
-	detail: bool = false,
+/// Where the cursor is in the grid, what is scrolled off either edge of it, and
+/// what has been picked out by hand.
+///
+/// A row can be ticked with space and a column can be put away, and both are
+/// about this view of the table rather than about the table: they are forgotten
+/// the moment a different one is opened.
+const Cursor = struct {
+	row: usize = 0,
+	col: usize = 0,
+	row_scroll: usize = 0,
+	col_scroll: usize = 0,
+	/// Row indexes ticked with space.
+	marked: std.ArrayListUnmanaged(usize) = .empty,
+	/// Column indexes put away, by index into the grid's own columns.
+	hidden: std.ArrayListUnmanaged(usize) = .empty,
+};
 
+/// The table on the screen: which one it is, what its columns are, the page
+/// of rows in hand and how that page was asked for.
+///
+/// Everything here is about one view of one table. Opening another replaces
+/// all of it, which is why it is one struct rather than seventeen fields that
+/// have to be cleared in the right order.
+const Grid = struct {
 	/// null while a query result is shown. Owned by the app.
-	table_name: ?[]const u8 = null,
+	name: ?[]const u8 = null,
 	schema: std.ArrayListUnmanaged(u8) = .empty,
 	title: std.ArrayListUnmanaged(u8) = .empty,
 	cols: std.ArrayListUnmanaged([]const u8) = .empty,
@@ -323,22 +339,10 @@ pub const App = struct {
 	/// the honest thing to draw; `of 0` was a lie.
 	counted: bool = true,
 	editable: bool = false,
-
 	page: usize = 0,
 	limit: usize = 200,
 	order: ?[]const u8 = null,
 	descending: bool = false,
-	object: Opened,
-	follow: Follow = .{},
-
-	cursor_row: usize = 0,
-	cursor_col: usize = 0,
-	row_scroll: usize = 0,
-	col_scroll: usize = 0,
-
-	typing: Typing,
-	marked: std.ArrayListUnmanaged(usize) = .empty, // row indexes ticked with space
-	hidden: std.ArrayListUnmanaged(usize) = .empty, // column indexes hidden from the grid
 	/// What the filter form put together: conditions an engine of any kind can
 	/// honour. The strings are owned.
 	conditions: std.ArrayListUnmanaged(database.ask.Filter) = .empty,
@@ -346,9 +350,35 @@ pub const App = struct {
 	where_text: std.ArrayListUnmanaged(u8) = .empty,
 	/// The last reload could not be answered, and has said why. Whoever asked for
 	/// it must not then report a count as though it had worked.
-	grid_failed: bool = false,
-	help: Help = .{},
+	failed: bool = false,
 	text_limit: usize = 44, // widest column in the grid
+};
+
+pub const App = struct {
+	allocator: std.mem.Allocator,
+	arena: std.heap.ArenaAllocator, // the loaded page of rows
+	screen: *Term,
+	conn: database.Db,
+	/// False while the connection list is on screen and nothing is open.
+	connected: bool = false,
+	path: []const u8,
+	owned_path: []u8,
+
+	sidebar: Sidebar = .{},
+	grid: Grid = .{},
+
+	view: View = .grid,
+	focus: Focus = .sidebar,
+	detail: bool = false,
+
+
+	object: Opened,
+	follow: Follow = .{},
+
+	cursor: Cursor = .{},
+
+	typing: Typing,
+	help: Help = .{},
 	history: std.ArrayListUnmanaged([]const u8) = .empty,
 	report: Reporting,
 
@@ -470,14 +500,14 @@ pub const App = struct {
 		self.owned_path = try self.allocator.dupe(u8, try conns.withoutPassword(scratch.allocator(), target));
 		self.path = self.owned_path;
 		try self.setTable(null);
-		self.schema.clearRetainingCapacity();
+		self.grid.schema.clearRetainingCapacity();
 		try self.firstSchema();
 		self.clearConditions();
-		self.where_text.clearRetainingCapacity();
-		self.hidden.clearRetainingCapacity();
-		self.marked.clearRetainingCapacity();
-		self.selected = 0;
-		self.page = 0;
+		self.grid.where_text.clearRetainingCapacity();
+		self.cursor.hidden.clearRetainingCapacity();
+		self.cursor.marked.clearRetainingCapacity();
+		self.sidebar.selected = 0;
+		self.grid.page = 0;
 		self.view = .grid;
 		try self.loadObjects();
 		if (self.current()) |object| {
@@ -584,10 +614,10 @@ pub const App = struct {
 		defer arena.deinit();
 		const scratch = arena.allocator();
 		var names: std.ArrayListUnmanaged([]const u8) = .empty;
-		for (self.objects.items) |object| {
+		for (self.sidebar.objects.items) |object| {
 			try names.append(scratch, object.name);
 		}
-		for (self.cols.items) |column| {
+		for (self.grid.cols.items) |column| {
 			try names.append(scratch, column);
 		}
 		try names.appendSlice(scratch, sql_syntax.keywords());
@@ -1030,16 +1060,16 @@ pub const App = struct {
 		}
 		self.deinitConnection();
 		self.freeObjects();
-		self.objects.deinit(self.allocator);
-		self.filter.deinit(self.allocator);
-		self.cols.deinit(self.allocator);
-		self.widths.deinit(self.allocator);
-		self.rows.deinit(self.allocator);
-		self.title.deinit(self.allocator);
+		self.sidebar.objects.deinit(self.allocator);
+		self.sidebar.filter.deinit(self.allocator);
+		self.grid.cols.deinit(self.allocator);
+		self.grid.widths.deinit(self.allocator);
+		self.grid.rows.deinit(self.allocator);
+		self.grid.title.deinit(self.allocator);
 		self.report.status.deinit(self.allocator);
 		self.follow.statement.deinit(self.allocator);
 		self.report.list.deinit(self.allocator);
-		self.marked.deinit(self.allocator);
+		self.cursor.marked.deinit(self.allocator);
 		self.typing.pending.deinit(self.allocator);
 		self.saved.list.deinit();
 		self.saved.path.deinit(self.allocator);
@@ -1048,22 +1078,22 @@ pub const App = struct {
 			open.query.deinit(self.allocator);
 		}
 		self.closeEditor();
-		self.hidden.deinit(self.allocator);
+		self.cursor.hidden.deinit(self.allocator);
 		self.clearConditions();
-		self.conditions.deinit(self.allocator);
-		self.where_text.deinit(self.allocator);
+		self.grid.conditions.deinit(self.allocator);
+		self.grid.where_text.deinit(self.allocator);
 		self.closeForm();
 		for (self.history.items) |entry| {
 			self.allocator.free(entry);
 		}
 		self.history.deinit(self.allocator);
-		if (self.order) |value| {
+		if (self.grid.order) |value| {
 			self.allocator.free(value);
 		}
-		if (self.table_name) |value| {
+		if (self.grid.name) |value| {
 			self.allocator.free(value);
 		}
-		self.schema.deinit(self.allocator);
+		self.grid.schema.deinit(self.allocator);
 		if (self.typing.prompt) |*prompt| {
 			prompt.buffer.deinit(self.allocator);
 		}
@@ -1076,18 +1106,18 @@ pub const App = struct {
 
 	/// The table on screen, with the schema it lives in.
 	pub fn currentTable(self: *App) ?database.Table {
-		return .{ .schema = self.schema.items, .name = self.table_name orelse return null };
+		return .{ .schema = self.grid.schema.items, .name = self.grid.name orelse return null };
 	}
 
 	pub fn hasTable(self: *App) bool {
-		return self.table_name != null;
+		return self.grid.name != null;
 	}
 
 	fn setTable(self: *App, name: ?[]const u8) !void {
-		if (self.table_name) |old| {
+		if (self.grid.name) |old| {
 			self.allocator.free(old);
 		}
-		self.table_name = if (name) |value| try self.allocator.dupe(u8, value) else null;
+		self.grid.name = if (name) |value| try self.allocator.dupe(u8, value) else null;
 		// A table on the grid is not a statement's rows any more, so nothing is
 		// left behind for `r` to run instead of reading the table.
 		if (name != null) {
@@ -1107,26 +1137,26 @@ pub const App = struct {
 	}
 
 	fn setTitle(self: *App, comptime fmt: []const u8, args: anytype) void {
-		self.title.clearRetainingCapacity();
-		self.title.print(self.allocator, fmt, args) catch {};
+		self.grid.title.clearRetainingCapacity();
+		self.grid.title.print(self.allocator, fmt, args) catch {};
 	}
 
 	// -------------------------------------------------------------- schema
 
 	fn freeObjects(self: *App) void {
-		for (self.objects.items) |object| {
+		for (self.sidebar.objects.items) |object| {
 			self.allocator.free(object.name);
 			self.allocator.free(object.kind);
 		}
-		self.objects.clearRetainingCapacity();
+		self.sidebar.objects.clearRetainingCapacity();
 	}
 
 	pub fn loadObjects(self: *App) !void {
 		self.freeObjects();
 		var arena = std.heap.ArenaAllocator.init(self.allocator);
 		defer arena.deinit();
-		for (try self.conn.objects(arena.allocator(), self.schema.items)) |object| {
-			try self.objects.append(self.allocator, .{
+		for (try self.conn.objects(arena.allocator(), self.grid.schema.items)) |object| {
+			try self.sidebar.objects.append(self.allocator, .{
 				.name = try self.allocator.dupe(u8, object.name),
 				.kind = try self.allocator.dupe(u8, if (object.kind == .view) "view" else "table"),
 				.rows = object.rows,
@@ -1134,9 +1164,9 @@ pub const App = struct {
 		}
 		// An engine that only estimates gets an exact count, which is what the
 		// sidebar promises.
-		for (self.objects.items) |*object| {
+		for (self.sidebar.objects.items) |*object| {
 			if (object.rows == null or object.rows.? < 0) {
-				object.rows = self.conn.rowCount(.{ .schema = self.schema.items, .name = object.name });
+				object.rows = self.conn.rowCount(.{ .schema = self.grid.schema.items, .name = object.name });
 			}
 		}
 	}
@@ -1144,22 +1174,22 @@ pub const App = struct {
 	pub fn matches(self: *App, index: usize) bool {
 		// The same fuzzy match as the command palette: `usr` finds `users`, and
 		// `ordit` finds `order_items`.
-		return self.filter.items.len == 0 or
-			fuzzy.match(self.objects.items[index].name, self.filter.items, null) != null;
+		return self.sidebar.filter.items.len == 0 or
+			fuzzy.match(self.sidebar.objects.items[index].name, self.sidebar.filter.items, null) != null;
 	}
 
 	/// Which letters of an object's name the filter matched, for the sidebar.
 	pub fn filterHit(self: *App, name: []const u8) fuzzy.Hit {
 		var hit = fuzzy.Hit{};
-		if (self.filter.items.len != 0) {
-			_ = fuzzy.match(name, self.filter.items, &hit);
+		if (self.sidebar.filter.items.len != 0) {
+			_ = fuzzy.match(name, self.sidebar.filter.items, &hit);
 		}
 		return hit;
 	}
 
 	pub fn visibleCount(self: *App) usize {
 		var count: usize = 0;
-		for (0..self.objects.items.len) |i| {
+		for (0..self.sidebar.objects.items.len) |i| {
 			count += @intFromBool(self.matches(i));
 		}
 		return count;
@@ -1168,12 +1198,12 @@ pub const App = struct {
 	/// The object shown at visible position `n`.
 	pub fn visibleAt(self: *App, n: usize) ?Object {
 		var seen: usize = 0;
-		for (0..self.objects.items.len) |i| {
+		for (0..self.sidebar.objects.items.len) |i| {
 			if (!self.matches(i)) {
 				continue;
 			}
 			if (seen == n) {
-				return self.objects.items[i];
+				return self.sidebar.objects.items[i];
 			}
 			seen += 1;
 		}
@@ -1181,7 +1211,7 @@ pub const App = struct {
 	}
 
 	pub fn current(self: *App) ?Object {
-		return self.visibleAt(self.selected);
+		return self.visibleAt(self.sidebar.selected);
 	}
 
 	/// The first value of the first row as text; null when there is none.
@@ -1203,38 +1233,38 @@ pub const App = struct {
 	/// Column names in order, for the forms and the dumps.
 	pub fn columnsOf(self: *App, arena: std.mem.Allocator, name: []const u8) ![]const []const u8 {
 		var list: std.ArrayListUnmanaged([]const u8) = .empty;
-		for (try self.conn.columns(arena, .{ .schema = self.schema.items, .name = name })) |column| {
+		for (try self.conn.columns(arena, .{ .schema = self.grid.schema.items, .name = name })) |column| {
 			try list.append(arena, column.name);
 		}
 		return list.items;
 	}
 
 	pub fn columnDefs(self: *App, arena: std.mem.Allocator, name: []const u8) ![]database.Column {
-		return self.conn.columns(arena, .{ .schema = self.schema.items, .name = name });
+		return self.conn.columns(arena, .{ .schema = self.grid.schema.items, .name = name });
 	}
 
 	pub fn foreignKeyDefs(self: *App, arena: std.mem.Allocator, name: []const u8) ![]database.ForeignKey {
-		return self.conn.foreignKeys(arena, .{ .schema = self.schema.items, .name = name });
+		return self.conn.foreignKeys(arena, .{ .schema = self.grid.schema.items, .name = name });
 	}
 
 	// ----------------------------------------------------------- data load
 
 	pub fn openTable(self: *App, name: []const u8) !void {
 		try self.setTable(name);
-		self.page = 0;
-		self.cursor_row = 0;
-		self.cursor_col = 0;
-		self.row_scroll = 0;
-		self.col_scroll = 0;
-		if (self.order) |value| {
+		self.grid.page = 0;
+		self.cursor.row = 0;
+		self.cursor.col = 0;
+		self.cursor.row_scroll = 0;
+		self.cursor.col_scroll = 0;
+		if (self.grid.order) |value| {
 			self.allocator.free(value);
-			self.order = null;
+			self.grid.order = null;
 		}
-		self.descending = false;
-		self.marked.clearRetainingCapacity();
-		self.hidden.clearRetainingCapacity();
+		self.grid.descending = false;
+		self.cursor.marked.clearRetainingCapacity();
+		self.cursor.hidden.clearRetainingCapacity();
 		self.clearConditions();
-		self.where_text.clearRetainingCapacity();
+		self.grid.where_text.clearRetainingCapacity();
 		self.view = .grid;
 		try self.reload();
 	}
@@ -1245,8 +1275,8 @@ pub const App = struct {
 			self.conn.rowCount(table)
 		else
 			self.conn.count(self.filtered(table));
-		self.counted = counted != null;
-		self.total = counted orelse 0;
+		self.grid.counted = counted != null;
+		self.grid.total = counted orelse 0;
 
 		const page_count = self.pages();
 		// Following means staying where new rows land, and that moves as the table
@@ -1254,13 +1284,13 @@ pub const App = struct {
 		// end is drawn at the top. An engine that cannot count has no end to go to,
 		// so its view is left where it is.
 		self.follow.tail_from = null;
-		if (self.follow.ms != 0 and self.counted) {
-			self.page = if (self.descending) 0 else page_count - 1;
-			if (!self.descending) {
-				self.follow.tail_from = @intCast(@max(0, self.total - @as(i64, @intCast(self.limit))));
+		if (self.follow.ms != 0 and self.grid.counted) {
+			self.grid.page = if (self.grid.descending) 0 else page_count - 1;
+			if (!self.grid.descending) {
+				self.follow.tail_from = @intCast(@max(0, self.grid.total - @as(i64, @intCast(self.grid.limit))));
 			}
-		} else if (self.page >= page_count) {
-			self.page = page_count - 1;
+		} else if (self.grid.page >= page_count) {
+			self.grid.page = page_count - 1;
 		}
 
 		// A key that is not part of the row has to be asked for by name; that is
@@ -1274,27 +1304,27 @@ pub const App = struct {
 			request.extra = key.expression;
 			request.extra_as = "__key";
 		}
-		if (self.order) |column| {
+		if (self.grid.order) |column| {
 			request.order = column;
-			request.descending = self.descending;
+			request.descending = self.grid.descending;
 		}
-		request.limit = self.limit;
+		request.limit = self.grid.limit;
 		request.offset = self.firstRow() - 1;
 
-		self.grid_failed = false;
+		self.grid.failed = false;
 		self.loadSelect(request, table, hidden_key) catch {
-			self.cols.clearRetainingCapacity();
-			self.rows.clearRetainingCapacity();
-			self.widths.clearRetainingCapacity();
-			self.total = 0;
-			self.grid_failed = true;
+			self.grid.cols.clearRetainingCapacity();
+			self.grid.rows.clearRetainingCapacity();
+			self.grid.widths.clearRetainingCapacity();
+			self.grid.total = 0;
+			self.grid.failed = true;
 			self.complain("{s}", .{self.conn.message()});
 			return;
 		};
 		if (self.follow.ms != 0) {
 			// On the newest row, so the grid scrolls to it and the record just
 			// written is the one under the cursor.
-			self.cursor_row = if (self.descending) 0 else self.rows.items.len -| 1;
+			self.cursor.row = if (self.grid.descending) 0 else self.grid.rows.items.len -| 1;
 		}
 		self.setTitle("{s}", .{table.name});
 	}
@@ -1309,7 +1339,7 @@ pub const App = struct {
 	/// events, its logs and a shell - none of which is in the row.
 	pub fn openRow(self: *App) !bool {
 		const table = self.currentTable() orelse return false;
-		if (self.cursor_row >= self.rows.items.len) {
+		if (self.cursor.row >= self.grid.rows.items.len) {
 			return false;
 		}
 		const name = self.rowName() orelse return false;
@@ -1326,7 +1356,7 @@ pub const App = struct {
 
 	/// What the row the cursor is on is called, by the key the engine gave it.
 	fn rowName(self: *App) ?[]const u8 {
-		const row = self.rows.items[self.cursor_row];
+		const row = self.grid.rows.items[self.cursor.row];
 		if (row.key) |key| {
 			if (database.ask.only(key, "name")) |name| {
 				return name;
@@ -1335,7 +1365,7 @@ pub const App = struct {
 				return key[0].value;
 			}
 		}
-		for (self.cols.items, 0..) |column, i| {
+		for (self.grid.cols.items, 0..) |column, i| {
 			if (std.mem.eql(u8, column, "name") and i < row.cells.len) {
 				return row.cells[i].text;
 			}
@@ -1496,7 +1526,7 @@ pub const App = struct {
 		self.reload() catch {};
 		// A table that cannot be read now will not read any better in two seconds,
 		// and reload has already said why: stop rather than say it again forever.
-		if (self.grid_failed) {
+		if (self.grid.failed) {
 			self.setFollow(0);
 		}
 	}
@@ -1507,40 +1537,40 @@ pub const App = struct {
 	fn filtered(self: *App, table: database.Table) database.ask.Select {
 		return .{
 			.table = table,
-			.where = self.conditions.items,
-			.where_text = self.where_text.items,
+			.where = self.grid.conditions.items,
+			.where_text = self.grid.where_text.items,
 		};
 	}
 
 	/// Whether the grid is showing part of a table rather than all of it.
 	pub fn isFiltered(self: *App) bool {
-		return self.conditions.items.len != 0 or self.where_text.items.len != 0;
+		return self.grid.conditions.items.len != 0 or self.grid.where_text.items.len != 0;
 	}
 
 	fn clearConditions(self: *App) void {
-		for (self.conditions.items) |condition| {
+		for (self.grid.conditions.items) |condition| {
 			self.allocator.free(condition.column);
 			self.allocator.free(condition.value);
 		}
-		self.conditions.clearRetainingCapacity();
+		self.grid.conditions.clearRetainingCapacity();
 	}
 
 	pub fn isHidden(self: *App, column: usize) bool {
-		return std.mem.indexOfScalar(usize, self.hidden.items, column) != null;
+		return std.mem.indexOfScalar(usize, self.cursor.hidden.items, column) != null;
 	}
 
 	pub fn isMarked(self: *App, row: usize) bool {
-		return std.mem.indexOfScalar(usize, self.marked.items, row) != null;
+		return std.mem.indexOfScalar(usize, self.cursor.marked.items, row) != null;
 	}
 
 	pub fn toggleMark(self: *App) !void {
-		if (self.cursor_row >= self.rows.items.len) {
+		if (self.cursor.row >= self.grid.rows.items.len) {
 			return;
 		}
-		if (std.mem.indexOfScalar(usize, self.marked.items, self.cursor_row)) |at| {
-			_ = self.marked.orderedRemove(at);
+		if (std.mem.indexOfScalar(usize, self.cursor.marked.items, self.cursor.row)) |at| {
+			_ = self.cursor.marked.orderedRemove(at);
 		} else {
-			try self.marked.append(self.allocator, self.cursor_row);
+			try self.cursor.marked.append(self.allocator, self.cursor.row);
 		}
 	}
 
@@ -1550,15 +1580,15 @@ pub const App = struct {
 	/// saying "read-only" for both sent someone looking for a bug that was not
 	/// there.
 	fn noRowHere(self: *App) bool {
-		if (self.rows.items.len == 0) {
+		if (self.grid.rows.items.len == 0) {
 			self.complain("there is no row here", .{});
 			return true;
 		}
-		if (!self.editable) {
+		if (!self.grid.editable) {
 			self.complain("these rows cannot be addressed, so they are read-only", .{});
 			return true;
 		}
-		if (self.cursor_row >= self.rows.items.len) {
+		if (self.cursor.row >= self.grid.rows.items.len) {
 			self.complain("move onto a row first", .{});
 			return true;
 		}
@@ -1566,11 +1596,11 @@ pub const App = struct {
 	}
 
 	pub fn deleteRows(self: *App) !void {
-		if (self.rows.items.len != 0 and !self.editable) {
+		if (self.grid.rows.items.len != 0 and !self.grid.editable) {
 			self.complain("these rows cannot be addressed, so they are read-only", .{});
 			return;
 		}
-		if (self.rows.items.len == 0) {
+		if (self.grid.rows.items.len == 0) {
 			self.complain("there is no row here", .{});
 			return;
 		}
@@ -1579,7 +1609,7 @@ pub const App = struct {
 		// always has, because a transaction is there to take it out of.
 		const caps = self.conn.caps();
 		if (self.conn.files() != null or caps.final_deletes) {
-			const count = if (self.marked.items.len != 0) self.marked.items.len else @as(usize, 1);
+			const count = if (self.cursor.marked.items.len != 0) self.cursor.marked.items.len else @as(usize, 1);
 			const noun = if (self.conn.files() != null) "file" else caps.row_noun;
 			if (self.typing.prompt) |*old| {
 				old.buffer.deinit(self.allocator);
@@ -1595,23 +1625,23 @@ pub const App = struct {
 		const table = self.currentTable() orelse return;
 		var targets: std.ArrayListUnmanaged(usize) = .empty;
 		defer targets.deinit(self.allocator);
-		if (self.marked.items.len != 0) {
-			try targets.appendSlice(self.allocator, self.marked.items);
-		} else if (self.cursor_row < self.rows.items.len) {
-			try targets.append(self.allocator, self.cursor_row);
+		if (self.cursor.marked.items.len != 0) {
+			try targets.appendSlice(self.allocator, self.cursor.marked.items);
+		} else if (self.cursor.row < self.grid.rows.items.len) {
+			try targets.append(self.allocator, self.cursor.row);
 		} else {
 			return;
 		}
 		var deleted: usize = 0;
 		for (targets.items) |index| {
-			if (index >= self.rows.items.len) {
+			if (index >= self.grid.rows.items.len) {
 				continue;
 			}
-			const key = self.rows.items[index].key orelse continue;
+			const key = self.grid.rows.items[index].key orelse continue;
 			try self.change(.{ .kind = .delete, .table = table, .where = key }) orelse return;
 			deleted += 1;
 		}
-		self.marked.clearRetainingCapacity();
+		self.cursor.marked.clearRetainingCapacity();
 		try self.loadObjects();
 		try self.reload();
 		self.say("{d} row(s) deleted", .{deleted});
@@ -1640,10 +1670,10 @@ pub const App = struct {
 
 	fn fill(self: *App, cursor_in: *database.Rows, source: ?database.Table, hidden_key: bool) !void {
 		const arena = self.arena.allocator();
-		self.cols.clearRetainingCapacity();
-		self.widths.clearRetainingCapacity();
-		self.rows.clearRetainingCapacity();
-		self.editable = false;
+		self.grid.cols.clearRetainingCapacity();
+		self.grid.widths.clearRetainingCapacity();
+		self.grid.rows.clearRetainingCapacity();
+		self.grid.editable = false;
 
 		var raw: std.ArrayListUnmanaged([]Cell) = .empty;
 		var origins: std.ArrayListUnmanaged([]const u8) = .empty;
@@ -1656,8 +1686,8 @@ pub const App = struct {
 			const skip: usize = if (hidden_key and count > 0) 1 else 0;
 			for (skip..count) |i| {
 				const name = try arena.dupe(u8, cursor.name(i));
-				try self.cols.append(self.allocator, name);
-				try self.widths.append(self.allocator, term.width(name));
+				try self.grid.cols.append(self.allocator, name);
+				try self.grid.widths.append(self.allocator, term.width(name));
 				try origins.append(arena, try arena.dupe(u8, cursor.sourceColumn(i)));
 			}
 			if (from == null) {
@@ -1678,12 +1708,12 @@ pub const App = struct {
 					}
 				}
 				if (single) |name| {
-					from = .{ .schema = self.schema.items, .name = name };
+					from = .{ .schema = self.grid.schema.items, .name = name };
 				}
 			}
 			var loaded: usize = 0;
 			while (try cursor.next()) {
-				if (loaded >= self.limit) {
+				if (loaded >= self.grid.limit) {
 					break;
 				}
 				loaded += 1;
@@ -1692,7 +1722,7 @@ pub const App = struct {
 					cells[i] = try formatCell(arena, cursor.value(i), cursor.isNumeric(i));
 				}
 				for (cells[skip..], 0..) |cell, i| {
-					self.widths.items[i] = @max(self.widths.items[i], term.width(cell.text));
+					self.grid.widths.items[i] = @max(self.grid.widths.items[i], term.width(cell.text));
 				}
 				try raw.append(arena, cells);
 			}
@@ -1703,14 +1733,14 @@ pub const App = struct {
 		var keys: std.ArrayListUnmanaged(Position) = .empty;
 		if (hidden_key) {
 			try keys.append(arena, .{ .name = "__key", .at = 0 });
-			self.editable = true;
+			self.grid.editable = true;
 		} else if (from) |table| {
 			const key = self.conn.rowKey(arena, table) catch database.RowKey{};
 			var complete = key.usable() and !key.hidden;
 			for (key.columns) |column| {
 				var found: ?usize = null;
 				for (origins.items, 0..) |origin, i| {
-					if (std.mem.eql(u8, origin, column) or std.mem.eql(u8, self.cols.items[i], column)) {
+					if (std.mem.eql(u8, origin, column) or std.mem.eql(u8, self.grid.cols.items[i], column)) {
 						found = i + skip;
 						break;
 					}
@@ -1721,7 +1751,7 @@ pub const App = struct {
 					complete = false;
 				}
 			}
-			self.editable = complete;
+			self.grid.editable = complete;
 		}
 
 		// The engine's own name for a hidden key, asked for once rather than per row.
@@ -1731,11 +1761,11 @@ pub const App = struct {
 			hidden_name = found.expression;
 		}
 		for (raw.items) |cells| {
-			const identity: ?[]const database.ask.Filter = if (self.editable)
+			const identity: ?[]const database.ask.Filter = if (self.grid.editable)
 				try identityOf(arena, keys.items, cells, hidden_name)
 			else
 				null;
-			try self.rows.append(self.allocator, .{ .cells = cells[skip..], .key = identity });
+			try self.grid.rows.append(self.allocator, .{ .cells = cells[skip..], .key = identity });
 		}
 		self.clampCursor();
 	}
@@ -1763,27 +1793,27 @@ pub const App = struct {
 	}
 
 	pub fn clampCursor(self: *App) void {
-		if (self.cursor_row >= self.rows.items.len) {
-			self.cursor_row = if (self.rows.items.len == 0) 0 else self.rows.items.len - 1;
+		if (self.cursor.row >= self.grid.rows.items.len) {
+			self.cursor.row = if (self.grid.rows.items.len == 0) 0 else self.grid.rows.items.len - 1;
 		}
-		if (self.cursor_col >= self.cols.items.len) {
-			self.cursor_col = if (self.cols.items.len == 0) 0 else self.cols.items.len - 1;
+		if (self.cursor.col >= self.grid.cols.items.len) {
+			self.cursor.col = if (self.grid.cols.items.len == 0) 0 else self.grid.cols.items.len - 1;
 		}
 	}
 
 	/// Which row of the table the grid starts at, counting from 1. Normally the
 	/// top of the page; the tail of it while following.
 	pub fn firstRow(self: *App) usize {
-		return (self.follow.tail_from orelse self.page * self.limit) + 1;
+		return (self.follow.tail_from orelse self.grid.page * self.grid.limit) + 1;
 	}
 
 	pub fn pages(self: *App) usize {
 		// Without a count there is no last page: there is this one, and another one
 		// if this one filled up.
-		if (!self.counted) {
-			return self.page + 1 + @intFromBool(self.rows.items.len >= self.limit);
+		if (!self.grid.counted) {
+			return self.grid.page + 1 + @intFromBool(self.grid.rows.items.len >= self.grid.limit);
 		}
-		return @max(1, divCeil(@intCast(@max(0, self.total)), self.limit));
+		return @max(1, divCeil(@intCast(@max(0, self.grid.total)), self.grid.limit));
 	}
 
 	// ------------------------------------------------------------ commands
@@ -1831,7 +1861,7 @@ pub const App = struct {
 						self.fill(&rows, null, false) catch {
 							failure = try arena.dupe(u8, self.conn.message());
 						};
-						produced = @intCast(self.rows.items.len);
+						produced = @intCast(self.grid.rows.items.len);
 						shown = failure == null;
 						if (shown) {
 							last_shown = statement.sql;
@@ -1896,13 +1926,13 @@ pub const App = struct {
 		if (shown) {
 			// The rows are already on the grid; what is left is to look at them.
 			try self.setTable(null);
-			self.page = 0;
-			self.cursor_row = 0;
-			self.cursor_col = 0;
-			self.row_scroll = 0;
-			self.col_scroll = 0;
+			self.grid.page = 0;
+			self.cursor.row = 0;
+			self.cursor.col = 0;
+			self.cursor.row_scroll = 0;
+			self.cursor.col_scroll = 0;
 			self.clampCursor();
-			self.total = @intCast(self.rows.items.len);
+			self.grid.total = @intCast(self.grid.rows.items.len);
 			// The last statement of the batch is the one that filled the grid.
 			self.follow.statement.clearRetainingCapacity();
 			self.follow.statement.appendSlice(self.allocator, last_shown) catch {};
@@ -2180,18 +2210,18 @@ pub const App = struct {
 		self.typing.pending.clearRetainingCapacity();
 		try self.runBatch(statement);
 		try self.loadObjects();
-		if (self.table_name) |name| {
+		if (self.grid.name) |name| {
 			// The table may be gone now.
 			var still_there = false;
-			for (self.objects.items) |object| {
+			for (self.sidebar.objects.items) |object| {
 				still_there = still_there or std.mem.eql(u8, object.name, name);
 			}
 			if (still_there) {
 				try self.reload();
 			} else {
 				try self.setTable(null);
-				self.cols.clearRetainingCapacity();
-				self.rows.clearRetainingCapacity();
+				self.grid.cols.clearRetainingCapacity();
+				self.grid.rows.clearRetainingCapacity();
 				self.setTitle("", .{});
 				if (self.current()) |object| {
 					try self.openTable(object.name);
@@ -2212,9 +2242,9 @@ pub const App = struct {
 				self.complain(":limit needs a number", .{});
 				return;
 			};
-			self.limit = @max(1, @min(100000, value));
+			self.grid.limit = @max(1, @min(100000, value));
 			self.reload() catch {};
-			self.say("{d} rows per page", .{self.limit});
+			self.say("{d} rows per page", .{self.grid.limit});
 		} else if (std.mem.eql(u8, verb, "follow")) {
 			try self.followCommand(argument);
 		} else if (std.mem.eql(u8, verb, "export")) {
@@ -2226,8 +2256,8 @@ pub const App = struct {
 				self.complain(":text needs a number", .{});
 				return;
 			};
-			self.text_limit = @max(4, @min(200, value));
-			self.say("columns clipped at {d} characters", .{self.text_limit});
+			self.grid.text_limit = @max(4, @min(200, value));
+			self.say("columns clipped at {d} characters", .{self.grid.text_limit});
 		} else if (std.mem.eql(u8, verb, "analyze")) {
 			self.conn.exec("ANALYZE") catch {
 				self.complain("{s}", .{self.conn.message()});
@@ -2300,7 +2330,7 @@ pub const App = struct {
 		}
 		try self.reload();
 		self.say("following {s}, every {d:.1}s", .{
-			if (self.hasTable()) self.title.items else "it",
+			if (self.hasTable()) self.grid.title.items else "it",
 			@as(f64, @floatFromInt(self.follow.every)) / 1000.0,
 		});
 	}
@@ -2321,7 +2351,7 @@ pub const App = struct {
 	pub fn writeGrid(self: *App, path: []const u8, separator: u8) !void {
 		var out: std.ArrayListUnmanaged(u8) = .empty;
 		defer out.deinit(self.allocator);
-		for (self.cols.items, 0..) |name, i| {
+		for (self.grid.cols.items, 0..) |name, i| {
 			if (self.isHidden(i)) {
 				continue;
 			}
@@ -2331,7 +2361,7 @@ pub const App = struct {
 			try csv.writeField(&out, self.allocator, name, separator);
 		}
 		try out.appendSlice(self.allocator, "\r\n");
-		for (self.rows.items) |row| {
+		for (self.grid.rows.items) |row| {
 			var written: usize = 0;
 			for (row.cells, 0..) |cell, i| {
 				if (self.isHidden(i)) {
@@ -2351,12 +2381,12 @@ pub const App = struct {
 			self.complain("cannot write {s}: {s}", .{ path, @errorName(err) });
 			return;
 		};
-		self.say("{d} row(s) written to {s}", .{ self.rows.items.len, path });
+		self.say("{d} row(s) written to {s}", .{ self.grid.rows.items.len, path });
 	}
 
 	/// A whole table, not just the page on screen.
 	pub fn writeQuery(self: *App, path: []const u8, name: []const u8, separator: u8) !void {
-		const table = database.Table{ .schema = self.schema.items, .name = name };
+		const table = database.Table{ .schema = self.grid.schema.items, .name = name };
 		var out: std.ArrayListUnmanaged(u8) = .empty;
 		defer out.deinit(self.allocator);
 		var cursor = (try self.conn.select(self.filtered(table))) orelse return;
@@ -2411,7 +2441,7 @@ pub const App = struct {
 		try out.print(self.allocator, "-- krtek dump of {s}, {s}\n", .{ self.conn.describe(), self.conn.version() });
 
 		var written: usize = 0;
-		for (try self.conn.objects(scratch, self.schema.items)) |object| {
+		for (try self.conn.objects(scratch, self.grid.schema.items)) |object| {
 			if (only) |wanted| {
 				if (!std.mem.eql(u8, object.name, wanted)) {
 					continue;
@@ -2588,13 +2618,13 @@ pub const App = struct {
 
 	/// The full, unflattened value under the cursor, for the detail view.
 	pub fn cellDetail(self: *App, arena: std.mem.Allocator) !?[]const u8 {
-		if (self.cursor_row >= self.rows.items.len or self.cursor_col >= self.cols.items.len) {
+		if (self.cursor.row >= self.grid.rows.items.len or self.cursor.col >= self.grid.cols.items.len) {
 			return null;
 		}
-		const row = self.rows.items[self.cursor_row];
-		const table = self.currentTable() orelse return try arena.dupe(u8, row.cells[self.cursor_col].text);
-		const key = row.key orelse return try arena.dupe(u8, row.cells[self.cursor_col].text);
-		const column = self.cols.items[self.cursor_col];
+		const row = self.grid.rows.items[self.cursor.row];
+		const table = self.currentTable() orelse return try arena.dupe(u8, row.cells[self.cursor.col].text);
+		const key = row.key orelse return try arena.dupe(u8, row.cells[self.cursor.col].text);
+		const column = self.grid.cols.items[self.cursor.col];
 		var cursor = (try self.conn.select(.{
 			.table = table,
 			.columns = &.{column},
@@ -2630,13 +2660,13 @@ pub const App = struct {
 	/// The row under the cursor, as tab separated text, which is what a
 	/// spreadsheet and every editor understand.
 	pub fn copyRow(self: *App) !void {
-		if (self.cursor_row >= self.rows.items.len) {
+		if (self.cursor.row >= self.grid.rows.items.len) {
 			self.complain("there is no row under the cursor", .{});
 			return;
 		}
 		var out: std.ArrayListUnmanaged(u8) = .empty;
 		defer out.deinit(self.allocator);
-		for (self.rows.items[self.cursor_row].cells, 0..) |cell, i| {
+		for (self.grid.rows.items[self.cursor.row].cells, 0..) |cell, i| {
 			if (self.isHidden(i)) {
 				continue;
 			}
@@ -2654,7 +2684,7 @@ pub const App = struct {
 		var out: std.ArrayListUnmanaged(u8) = .empty;
 		defer out.deinit(self.allocator);
 		var written: usize = 0;
-		for (self.cols.items, 0..) |name, i| {
+		for (self.grid.cols.items, 0..) |name, i| {
 			if (self.isHidden(i)) {
 				continue;
 			}
@@ -2665,7 +2695,7 @@ pub const App = struct {
 			written += 1;
 		}
 		try out.append(self.allocator, '\n');
-		for (self.rows.items) |row| {
+		for (self.grid.rows.items) |row| {
 			written = 0;
 			for (row.cells, 0..) |cell, i| {
 				if (self.isHidden(i)) {
@@ -2680,7 +2710,7 @@ pub const App = struct {
 			try out.append(self.allocator, '\n');
 		}
 		try self.screen.copy(out.items);
-		self.say("{d} row(s) copied as CSV", .{self.rows.items.len});
+		self.say("{d} row(s) copied as CSV", .{self.grid.rows.items.len});
 	}
 
 	/// The last statement that was run, so a query built in the app can be
@@ -2704,8 +2734,8 @@ pub const App = struct {
 		if (self.noRowHere()) {
 			return;
 		}
-		const key = self.rows.items[self.cursor_row].key orelse return;
-		const column = self.cols.items[self.cursor_col];
+		const key = self.grid.rows.items[self.cursor.row].key orelse return;
+		const column = self.grid.cols.items[self.cursor.col];
 		try self.change(.{
 			.kind = .update,
 			.table = table,
@@ -2780,7 +2810,7 @@ pub const App = struct {
 		if (self.noRowHere()) {
 			return;
 		}
-		const key = self.rows.items[self.cursor_row].key orelse return;
+		const key = self.grid.rows.items[self.cursor.row].key orelse return;
 		try self.change(.{ .kind = .delete, .table = table, .where = key }) orelse return;
 		try self.loadObjects();
 		try self.reload();
@@ -2808,14 +2838,14 @@ pub const App = struct {
 		self.owned_path = try self.allocator.dupe(u8, try conns.withoutPassword(scratch.allocator(), target));
 		self.path = self.owned_path;
 		try self.setTable(null);
-		self.schema.clearRetainingCapacity();
+		self.grid.schema.clearRetainingCapacity();
 		try self.firstSchema();
 		self.clearConditions();
-		self.where_text.clearRetainingCapacity();
-		self.hidden.clearRetainingCapacity();
-		self.marked.clearRetainingCapacity();
-		self.selected = 0;
-		self.page = 0;
+		self.grid.where_text.clearRetainingCapacity();
+		self.cursor.hidden.clearRetainingCapacity();
+		self.cursor.marked.clearRetainingCapacity();
+		self.sidebar.selected = 0;
+		self.grid.page = 0;
 		try self.loadObjects();
 		if (self.current()) |object| {
 			try self.openTable(object.name);
@@ -2829,19 +2859,19 @@ pub const App = struct {
 		defer arena.deinit();
 		const list = self.conn.schemas(arena.allocator()) catch return;
 		if (list.len != 0) {
-			self.schema.clearRetainingCapacity();
-			try self.schema.appendSlice(self.allocator, list[0]);
+			self.grid.schema.clearRetainingCapacity();
+			try self.grid.schema.appendSlice(self.allocator, list[0]);
 		}
 	}
 
 	/// Switch to another schema.
 	pub fn useSchema(self: *App, name: []const u8) !void {
-		self.schema.clearRetainingCapacity();
-		try self.schema.appendSlice(self.allocator, name);
+		self.grid.schema.clearRetainingCapacity();
+		try self.grid.schema.appendSlice(self.allocator, name);
 		try self.setTable(null);
-		self.selected = 0;
+		self.sidebar.selected = 0;
 		self.clearConditions();
-		self.where_text.clearRetainingCapacity();
+		self.grid.where_text.clearRetainingCapacity();
 		try self.loadObjects();
 		if (self.current()) |object| {
 			try self.openTable(object.name);
@@ -2882,7 +2912,7 @@ pub const App = struct {
 	/// single-column UNIQUE constraints, which only exist as indexes.
 	fn tableNames(self: *App, arena: std.mem.Allocator, last: []const u8) ![]const []const u8 {
 		var list: std.ArrayListUnmanaged([]const u8) = .empty;
-		for (self.objects.items) |object| {
+		for (self.sidebar.objects.items) |object| {
 			if (std.mem.eql(u8, object.kind, "table") and !std.mem.eql(u8, object.name, last)) {
 				try list.append(arena, try arena.dupe(u8, object.name));
 			}
@@ -2937,7 +2967,7 @@ pub const App = struct {
 		}, "an empty value with a DEFAULT is left to the engine");
 		form.table = try form.arena.allocator().dupe(u8, table.name);
 		if (mode == .edit) {
-			form.key = if (self.rows.items[self.cursor_row].key) |key|
+			form.key = if (self.grid.rows.items[self.cursor.row].key) |key|
 				try copyFilters(form.arena.allocator(), key)
 			else
 				null;
@@ -2947,11 +2977,11 @@ pub const App = struct {
 			var initial: []const u8 = "";
 			var is_null = mode == .insert and column.dflt == null and !column.notnull;
 			if (mode != .insert) {
-				for (self.cols.items, 0..) |name, i| {
+				for (self.grid.cols.items, 0..) |name, i| {
 					if (!std.mem.eql(u8, name, column.name)) {
 						continue;
 					}
-					const cell = self.rows.items[self.cursor_row].cells[i];
+					const cell = self.grid.rows.items[self.cursor.row].cells[i];
 					is_null = cell.kind == .nul;
 					initial = if (is_null) "" else cell.text;
 				}
@@ -2992,7 +3022,7 @@ pub const App = struct {
 			self.complain("open a table first", .{});
 			return;
 		}
-		const table_label = if (alter) (self.table_name orelse "") else "";
+		const table_label = if (alter) (self.grid.name orelse "") else "";
 		const form = try self.newForm(
 			if (alter) .alter_table else .create_table,
 			if (alter) "alter table" else "create table",
@@ -3089,7 +3119,7 @@ pub const App = struct {
 		var suggested: std.ArrayListUnmanaged(u8) = .empty;
 		try suggested.print(form.arena.allocator(), "{s}_idx", .{table.name});
 		try form.text("index name", suggested.items, 30);
-		try form.text("columns", if (self.cols.items.len > 0) self.cols.items[self.cursor_col] else "", 40);
+		try form.text("columns", if (self.grid.cols.items.len > 0) self.grid.cols.items[self.cursor.col] else "", 40);
 		try form.toggle("unique", false);
 		try form.text("partial WHERE", "", 40);
 	}
@@ -3102,7 +3132,7 @@ pub const App = struct {
 		const form = try self.newForm(.foreign_key, "add foreign key", "the table is rebuilt");
 		form.table = try form.arena.allocator().dupe(u8, table.name);
 		const targets = try self.tableNames(form.arena.allocator(), table.name);
-		try form.text("column", if (self.cols.items.len > 0) self.cols.items[self.cursor_col] else "", 24);
+		try form.text("column", if (self.grid.cols.items.len > 0) self.grid.cols.items[self.cursor.col] else "", 24);
 		try form.choice("references", targets, 0);
 		try form.text("target column", "", 24);
 		try form.choice("on update", &Form.ACTIONS, 0);
@@ -3116,7 +3146,7 @@ pub const App = struct {
 	}
 
 	pub fn openTriggerForm(self: *App) !void {
-		const table_label = self.table_name orelse "";
+		const table_label = self.grid.name orelse "";
 		const form = try self.newForm(.trigger, "create trigger", "");
 		form.table = try form.arena.allocator().dupe(u8, table_label);
 		try form.text("trigger name", "", 30);
@@ -3178,15 +3208,15 @@ pub const App = struct {
 			try form.text("value", "", 22);
 			form.sameLine();
 		}
-		try form.text("raw WHERE", self.where_text.items, 50);
+		try form.text("raw WHERE", self.grid.where_text.items, 50);
 	}
 
 	pub fn openColumnForm(self: *App) !void {
-		if (self.cols.items.len == 0) {
+		if (self.grid.cols.items.len == 0) {
 			return;
 		}
 		const form = try self.newForm(.columns, "visible columns", "space toggles one, ctrl+s applies them");
-		for (self.cols.items, 0..) |name, i| {
+		for (self.grid.cols.items, 0..) |name, i| {
 			try form.toggle(name, !self.isHidden(i));
 		}
 	}
@@ -3211,7 +3241,7 @@ pub const App = struct {
 		const form = try self.newForm(.import_data, "import", "");
 		try form.choice("kind", &[_][]const u8{ "sql script", "csv into a table" }, 0);
 		try form.text("file", "", 40);
-		try form.text("into table", self.table_name orelse "", 30);
+		try form.text("into table", self.grid.name orelse "", 30);
 		try form.toggle("first line is a header", true);
 		try form.choice("separator", &[_][]const u8{ ",", ";", "tab" }, 0);
 	}
@@ -3230,7 +3260,7 @@ pub const App = struct {
 		}
 		var at: usize = 0;
 		for (list, 0..) |name, i| {
-			if (std.mem.eql(u8, name, self.schema.items)) {
+			if (std.mem.eql(u8, name, self.grid.schema.items)) {
 				at = i;
 			}
 		}
@@ -3282,7 +3312,7 @@ pub const App = struct {
 					self.complain("name at least one column", .{});
 					return;
 				}
-				try self.conn.ddl().createIndex(&sql, a, .{ .schema = self.schema.items, .name = form.table }, form.valueOf(0), columns.items, form.isOn(2), form.valueOf(3));
+				try self.conn.ddl().createIndex(&sql, a, .{ .schema = self.grid.schema.items, .name = form.table }, form.valueOf(0), columns.items, form.isOn(2), form.valueOf(3));
 			},
 			.foreign_key => {
 				const columns = try self.columnDefs(a, form.table);
@@ -3305,7 +3335,7 @@ pub const App = struct {
 					.on_update = form.valueOf(3),
 					.on_delete = form.valueOf(4),
 				});
-				const target = database.Table{ .schema = self.schema.items, .name = form.table };
+				const target = database.Table{ .schema = self.grid.schema.items, .name = form.table };
 				const context = try self.conn.alterContext(a, target, columns);
 				try self.conn.ddl().addForeignKey(&sql, a, target, .{
 					.column = form.valueOf(0),
@@ -3315,7 +3345,7 @@ pub const App = struct {
 					.on_delete = form.valueOf(4),
 				}, context);
 			},
-			.view => try self.conn.ddl().createView(&sql, a, .{ .schema = self.schema.items, .name = form.valueOf(0) }, form.valueOf(1)),
+			.view => try self.conn.ddl().createView(&sql, a, .{ .schema = self.grid.schema.items, .name = form.valueOf(0) }, form.valueOf(1)),
 			.trigger => {
 				try sql.appendSlice(a, "CREATE TRIGGER ");
 				try database.quoteName(&sql, a, form.valueOf(0));
@@ -3326,22 +3356,22 @@ pub const App = struct {
 				}
 				try sql.print(a, " BEGIN {s}; END", .{form.valueOf(5)});
 			},
-			.rename_table => try self.conn.ddl().renameTable(&sql, a, .{ .schema = self.schema.items, .name = form.table }, form.valueOf(0)),
-			.copy_table => try self.conn.ddl().copyTable(&sql, a, .{ .schema = self.schema.items, .name = form.table }, form.valueOf(0), form.isOn(1)),
+			.rename_table => try self.conn.ddl().renameTable(&sql, a, .{ .schema = self.grid.schema.items, .name = form.table }, form.valueOf(0)),
+			.copy_table => try self.conn.ddl().copyTable(&sql, a, .{ .schema = self.grid.schema.items, .name = form.table }, form.valueOf(0), form.isOn(1)),
 			.filter => {
 				try self.applyFilter(form);
 				self.closeForm();
 				return;
 			},
 			.columns => {
-				self.hidden.clearRetainingCapacity();
+				self.cursor.hidden.clearRetainingCapacity();
 				for (form.fields.items, 0..) |field, i| {
 					if (!field.on) {
-						try self.hidden.append(self.allocator, i);
+						try self.cursor.hidden.append(self.allocator, i);
 					}
 				}
 				self.closeForm();
-				self.say("{d} column(s) hidden", .{self.hidden.items.len});
+				self.say("{d} column(s) hidden", .{self.cursor.hidden.items.len});
 				return;
 			},
 			.search_all => {
@@ -3498,7 +3528,7 @@ pub const App = struct {
 		return .{
 			.kind = if (form.key == null) .insert else .update,
 			.table = .{
-				.schema = try a.dupe(u8, self.schema.items),
+				.schema = try a.dupe(u8, self.grid.schema.items),
 				.name = try a.dupe(u8, form.table),
 			},
 			.cells = cells.items,
@@ -3537,19 +3567,19 @@ pub const App = struct {
 			return;
 		}
 		if (form.purpose == .create_table) {
-			try self.conn.ddl().createTable(sql, a, .{ .schema = self.schema.items, .name = name }, columns.items, &.{});
+			try self.conn.ddl().createTable(sql, a, .{ .schema = self.grid.schema.items, .name = name }, columns.items, &.{});
 			return;
 		}
 		// Whatever this engine has to preserve across an alter - on SQLite the
 		// foreign keys and the indexes, with the renames applied.
-		const target = database.Table{ .schema = self.schema.items, .name = form.table };
+		const target = database.Table{ .schema = self.grid.schema.items, .name = form.table };
 		const context = try self.conn.alterContext(a, target, columns.items);
 		try self.conn.ddl().alterTable(sql, a, target, name, columns.items, context);
 	}
 
 	fn applyFilter(self: *App, form: *Form.Form) !void {
 		self.clearConditions();
-		self.where_text.clearRetainingCapacity();
+		self.grid.where_text.clearRetainingCapacity();
 		var i: usize = 0;
 		while (i < 9) : (i += 3) {
 			const column = form.valueOf(i);
@@ -3566,7 +3596,7 @@ pub const App = struct {
 			else
 				try self.allocator.dupe(u8, value);
 			errdefer self.allocator.free(text);
-			try self.conditions.append(self.allocator, .{
+			try self.grid.conditions.append(self.allocator, .{
 				.column = try self.allocator.dupe(u8, column),
 				.op = op,
 				.value = text,
@@ -3574,24 +3604,24 @@ pub const App = struct {
 		}
 		const raw = form.valueOf(9);
 		if (raw.len != 0) {
-			try self.where_text.appendSlice(self.allocator, raw);
+			try self.grid.where_text.appendSlice(self.allocator, raw);
 		}
-		self.page = 0;
-		self.cursor_row = 0;
+		self.grid.page = 0;
+		self.cursor.row = 0;
 		self.reload() catch |err| {
 			self.complain("{s}", .{@errorName(err)});
 			return;
 		};
-		if (self.grid_failed) {
+		if (self.grid.failed) {
 			return; // the reason is already on screen
 		}
 		if (!self.isFiltered()) {
 			self.say("filter cleared", .{});
-		} else if (self.counted) {
-			self.say("{d} row(s) match", .{self.total});
+		} else if (self.grid.counted) {
+			self.say("{d} row(s) match", .{self.grid.total});
 		} else {
 			self.say("{d} row(s) on this page; {s} cannot count the rest without reading it", .{
-				self.rows.items.len,
+				self.grid.rows.items.len,
 				self.conn.caps().label,
 			});
 		}
@@ -3616,7 +3646,7 @@ pub const App = struct {
 		try pattern.append(a, '%');
 
 		var parts: usize = 0;
-		for (self.objects.items) |object| {
+		for (self.sidebar.objects.items) |object| {
 			if (!std.mem.eql(u8, object.kind, "table")) {
 				continue;
 			}
@@ -3651,23 +3681,23 @@ pub const App = struct {
 			self.complain("nothing to search in", .{});
 			return;
 		}
-		try sql.print(a, "\nLIMIT {d}", .{self.limit});
+		try sql.print(a, "\nLIMIT {d}", .{self.grid.limit});
 		try self.setTable(null);
 		self.clearConditions();
-		self.where_text.clearRetainingCapacity();
-		self.hidden.clearRetainingCapacity();
-		self.page = 0;
-		self.cursor_row = 0;
-		self.cursor_col = 0;
+		self.grid.where_text.clearRetainingCapacity();
+		self.cursor.hidden.clearRetainingCapacity();
+		self.grid.page = 0;
+		self.cursor.row = 0;
+		self.cursor.col = 0;
 		self.load(sql.items, null, false) catch {
 			self.complain("{s}", .{self.conn.message()});
 			return;
 		};
-		self.total = @intCast(self.rows.items.len);
+		self.grid.total = @intCast(self.grid.rows.items.len);
 		self.setTitle("search: {s}", .{needle});
 		self.view = .grid;
 		self.focus = .main;
-		self.say("{d} hit(s) in {d} column(s)", .{ self.rows.items.len, parts });
+		self.say("{d} hit(s) in {d} column(s)", .{ self.grid.rows.items.len, parts });
 	}
 
 	fn runExport(self: *App, form: *Form.Form) !void {
@@ -3683,7 +3713,7 @@ pub const App = struct {
 				self.complain("a grid can only go out as csv or tsv", .{});
 				return;
 			}
-			const only = if (std.mem.eql(u8, what, "this table")) self.table_name else null;
+			const only = if (std.mem.eql(u8, what, "this table")) self.grid.name else null;
 			try self.dumpTo(path, only, form.isOn(2), form.isOn(3));
 			return;
 		}
@@ -3692,7 +3722,7 @@ pub const App = struct {
 			try self.writeGrid(path, separator);
 			return;
 		}
-		const table = if (std.mem.eql(u8, what, "this table")) (self.table_name orelse "") else "";
+		const table = if (std.mem.eql(u8, what, "this table")) (self.grid.name orelse "") else "";
 		if (table.len == 0) {
 			self.complain("csv exports one table at a time", .{});
 			return;
@@ -3742,7 +3772,7 @@ pub const App = struct {
 	) !void {
 		// The name lives in the form's memory, which is freed before the report.
 		const table = database.Table{
-			.schema = self.schema.items,
+			.schema = self.grid.schema.items,
 			.name = try a.dupe(u8, wanted),
 		};
 		const columns = try self.columnDefs(a, table.name);

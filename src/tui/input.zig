@@ -88,9 +88,9 @@ pub fn handle(app: *App, key: Key, size: term.Size) !void {
 		.escape => {
 			if (app.view != .grid) {
 				app.view = .grid;
-			} else if (app.filter.items.len > 0) {
-				app.filter.clearRetainingCapacity();
-				app.selected = 0;
+			} else if (app.sidebar.filter.items.len > 0) {
+				app.sidebar.filter.clearRetainingCapacity();
+				app.sidebar.selected = 0;
 			}
 		},
 		.up => try move(app, -1),
@@ -101,17 +101,17 @@ pub fn handle(app: *App, key: Key, size: term.Size) !void {
 		.page_down => try movePage(app, 1),
 		.home => {
 			if (app.focus == .sidebar) {
-				app.selected = 0;
+				app.sidebar.selected = 0;
 			} else {
-				app.cursor_row = 0;
+				app.cursor.row = 0;
 			}
 		},
 		.end => {
 			if (app.focus == .sidebar) {
 				const count = app.visibleCount();
-				app.selected = if (count == 0) 0 else count - 1;
+				app.sidebar.selected = if (count == 0) 0 else count - 1;
 			} else {
-				app.cursor_row = if (app.rows.items.len == 0) 0 else app.rows.items.len - 1;
+				app.cursor.row = if (app.grid.rows.items.len == 0) 0 else app.grid.rows.items.len - 1;
 			}
 		},
 		.enter => try open(app),
@@ -483,9 +483,9 @@ fn click(app: *App, mouse: term.Mouse, size: term.Size) !void {
 		if (mouse.row < 2) {
 			return;
 		}
-		const at = app.scroll + (mouse.row - 2);
+		const at = app.sidebar.scroll + (mouse.row - 2);
 		if (at < app.visibleCount()) {
-			app.selected = at;
+			app.sidebar.selected = at;
 			app.focus = .sidebar;
 			if (app.current()) |object| {
 				try app.openTable(object.name);
@@ -498,21 +498,21 @@ fn click(app: *App, mouse: term.Mouse, size: term.Size) !void {
 		return;
 	}
 	app.focus = .main;
-	const row = app.row_scroll + (mouse.row - 3);
-	if (row < app.rows.items.len) {
-		app.cursor_row = row;
+	const row = app.cursor.row_scroll + (mouse.row - 3);
+	if (row < app.grid.rows.items.len) {
+		app.cursor.row = row;
 	}
 	// Walk the visible columns to find which one the click landed in.
 	var x: usize = side;
-	var index = app.col_scroll;
+	var index = app.cursor.col_scroll;
 	var seen: usize = 0;
-	while (index < app.cols.items.len) : (index += 1) {
+	while (index < app.grid.cols.items.len) : (index += 1) {
 		if (app.isHidden(index)) {
 			continue;
 		}
-		const w = @min(@max(app.widths.items[index], 3), app.text_limit) + 1;
+		const w = @min(@max(app.grid.widths.items[index], 3), app.grid.text_limit) + 1;
 		if (mouse.col >= x and mouse.col < x + w) {
-			app.cursor_col = index;
+			app.cursor.col = index;
 			break;
 		}
 		x += w;
@@ -604,17 +604,17 @@ fn letter(app: *App, point: u21, size: term.Size) !void {
 		'l' => moveColumn(app, 1),
 		'g' => {
 			if (app.focus == .sidebar) {
-				app.selected = 0;
+				app.sidebar.selected = 0;
 			} else {
-				app.cursor_row = 0;
+				app.cursor.row = 0;
 			}
 		},
 		'G' => {
 			if (app.focus == .sidebar) {
 				const count = app.visibleCount();
-				app.selected = if (count == 0) 0 else count - 1;
+				app.sidebar.selected = if (count == 0) 0 else count - 1;
 			} else {
-				app.cursor_row = if (app.rows.items.len == 0) 0 else app.rows.items.len - 1;
+				app.cursor.row = if (app.grid.rows.items.len == 0) 0 else app.grid.rows.items.len - 1;
 			}
 		},
 		'n' => try movePage(app, 1),
@@ -647,7 +647,7 @@ fn letter(app: *App, point: u21, size: term.Size) !void {
 		'o' => try sort(app),
 		'e' => try edit(app),
 		'v' => {
-			if (app.focus == .main and app.rows.items.len > 0) {
+			if (app.focus == .main and app.grid.rows.items.len > 0) {
 				app.detail = true;
 			}
 		},
@@ -689,25 +689,25 @@ fn move(app: *App, delta: i32) !void {
 		if (count == 0) {
 			return;
 		}
-		app.selected = step(app.selected, delta, count);
+		app.sidebar.selected = step(app.sidebar.selected, delta, count);
 		return;
 	}
-	if (app.rows.items.len == 0) {
+	if (app.grid.rows.items.len == 0) {
 		return;
 	}
 	// Stepping past the end of a page turns to the next one.
-	if (delta > 0 and app.cursor_row + 1 >= app.rows.items.len and app.page + 1 < app.pages()) {
-		app.cursor_row = 0;
-		app.row_scroll = 0;
+	if (delta > 0 and app.cursor.row + 1 >= app.grid.rows.items.len and app.grid.page + 1 < app.pages()) {
+		app.cursor.row = 0;
+		app.cursor.row_scroll = 0;
 		try movePage(app, 1);
 		return;
 	}
-	if (delta < 0 and app.cursor_row == 0 and app.page > 0) {
+	if (delta < 0 and app.cursor.row == 0 and app.grid.page > 0) {
 		try movePage(app, -1);
-		app.cursor_row = if (app.rows.items.len == 0) 0 else app.rows.items.len - 1;
+		app.cursor.row = if (app.grid.rows.items.len == 0) 0 else app.grid.rows.items.len - 1;
 		return;
 	}
-	app.cursor_row = step(app.cursor_row, delta, app.rows.items.len);
+	app.cursor.row = step(app.cursor.row, delta, app.grid.rows.items.len);
 }
 
 fn moveColumn(app: *App, delta: i32) void {
@@ -715,17 +715,17 @@ fn moveColumn(app: *App, delta: i32) void {
 		app.focus = if (delta > 0) .main else .sidebar;
 		return;
 	}
-	if (app.cols.items.len == 0) {
+	if (app.grid.cols.items.len == 0) {
 		return;
 	}
-	if (delta < 0 and app.cursor_col == 0) {
+	if (delta < 0 and app.cursor.col == 0) {
 		app.focus = .sidebar;
 		return;
 	}
 	// Step over the columns the user hid.
-	var next = app.cursor_col;
+	var next = app.cursor.col;
 	while (true) {
-		const moved = step(next, delta, app.cols.items.len);
+		const moved = step(next, delta, app.grid.cols.items.len);
 		if (moved == next) {
 			break;
 		}
@@ -734,7 +734,7 @@ fn moveColumn(app: *App, delta: i32) void {
 			break;
 		}
 	}
-	app.cursor_col = next;
+	app.cursor.col = next;
 }
 
 /// `r` reads the table once; this keeps reading it. The view stays at the end,
@@ -754,10 +754,10 @@ fn movePage(app: *App, delta: i32) !void {
 		return;
 	}
 	const pages = app.pages();
-	if (delta > 0 and app.page + 1 < pages) {
-		app.page += 1;
-	} else if (delta < 0 and app.page > 0) {
-		app.page -= 1;
+	if (delta > 0 and app.grid.page + 1 < pages) {
+		app.grid.page += 1;
+	} else if (delta < 0 and app.grid.page > 0) {
+		app.grid.page -= 1;
 	} else {
 		return;
 	}
@@ -789,7 +789,7 @@ fn open(app: *App) !void {
 		}
 		return;
 	}
-	if (app.rows.items.len == 0) {
+	if (app.grid.rows.items.len == 0) {
 		return;
 	}
 	// A row the engine has more to say about opens on what it has to say. Where
@@ -873,7 +873,7 @@ fn drop(app: *App) !void {
 		&sql,
 		app.allocator,
 		if (std.mem.eql(u8, object.kind, "view")) .view else .table,
-		.{ .schema = app.schema.items, .name = object.name },
+		.{ .schema = app.grid.schema.items, .name = object.name },
 	);
 	try app.confirm(std.mem.trimEnd(u8, sql.items, ";\n"), "drop");
 }
@@ -887,39 +887,39 @@ fn truncate(app: *App) !void {
 }
 
 fn sort(app: *App) !void {
-	if (!app.hasTable() or app.cursor_col >= app.cols.items.len) {
+	if (!app.hasTable() or app.cursor.col >= app.grid.cols.items.len) {
 		return;
 	}
-	const column = app.cols.items[app.cursor_col];
-	if (app.order) |current| {
+	const column = app.grid.cols.items[app.cursor.col];
+	if (app.grid.order) |current| {
 		if (std.mem.eql(u8, current, column)) {
-			if (!app.descending) {
-				app.descending = true;
+			if (!app.grid.descending) {
+				app.grid.descending = true;
 			} else {
 				app.allocator.free(current);
-				app.order = null;
-				app.descending = false;
+				app.grid.order = null;
+				app.grid.descending = false;
 			}
 			try app.reload();
 			return;
 		}
 		app.allocator.free(current);
 	}
-	app.order = try app.allocator.dupe(u8, column);
-	app.descending = false;
-	app.page = 0;
+	app.grid.order = try app.allocator.dupe(u8, column);
+	app.grid.descending = false;
+	app.grid.page = 0;
 	try app.reload();
 }
 
 fn edit(app: *App) !void {
-	if (app.focus != .main or app.cursor_row >= app.rows.items.len or app.cols.items.len == 0) {
+	if (app.focus != .main or app.cursor.row >= app.grid.rows.items.len or app.grid.cols.items.len == 0) {
 		return;
 	}
 	if (!app.hasTable()) {
 		app.complain("a query result cannot be edited - open the table itself", .{});
 		return;
 	}
-	if (!app.editable) {
+	if (!app.grid.editable) {
 		app.complain("these rows cannot be addressed, so they are read-only", .{});
 		return;
 	}
@@ -931,7 +931,7 @@ fn edit(app: *App) !void {
 		return;
 	}
 	try ask(app, .edit, " value: ");
-	const cell = app.rows.items[app.cursor_row].cells[app.cursor_col];
+	const cell = app.grid.rows.items[app.cursor.row].cells[app.cursor.col];
 	if (cell.kind != .nul) {
 		try app.typing.prompt.?.buffer.appendSlice(app.allocator, cell.text);
 	}
@@ -1024,8 +1024,8 @@ fn ask(app: *App, kind: PromptKind, label: []const u8) !void {
 		old.buffer.deinit(app.allocator);
 	}
 	app.typing.prompt = .{ .kind = kind, .label = label };
-	if (kind == .filter and app.filter.items.len > 0) {
-		try app.typing.prompt.?.buffer.appendSlice(app.allocator, app.filter.items);
+	if (kind == .filter and app.sidebar.filter.items.len > 0) {
+		try app.typing.prompt.?.buffer.appendSlice(app.allocator, app.sidebar.filter.items);
 	}
 }
 
@@ -1041,8 +1041,8 @@ fn typing(app: *App, key: Key) !void {
 	switch (key) {
 		.escape => {
 			if (prompt.kind == .filter) {
-				app.filter.clearRetainingCapacity();
-				app.selected = 0;
+				app.sidebar.filter.clearRetainingCapacity();
+				app.sidebar.selected = 0;
 			}
 			close(app);
 		},
@@ -1137,10 +1137,10 @@ fn refilter(app: *App) !void {
 	if (prompt.kind != .filter) {
 		return;
 	}
-	app.filter.clearRetainingCapacity();
-	try app.filter.appendSlice(app.allocator, prompt.buffer.items);
-	app.selected = 0;
-	app.scroll = 0;
+	app.sidebar.filter.clearRetainingCapacity();
+	try app.sidebar.filter.appendSlice(app.allocator, prompt.buffer.items);
+	app.sidebar.selected = 0;
+	app.sidebar.scroll = 0;
 }
 
 test "a match says which letters it landed on" {

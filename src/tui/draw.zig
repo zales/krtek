@@ -214,7 +214,7 @@ fn header(app: *App, size: Size) void {
 	screen.style(.{ .bg = C.bar, .fg = C.dim });
 	var buf: [96]u8 = undefined;
 	const right = if (app.connected)
-		std.fmt.bufPrint(&buf, "{s}  {d} objects ", .{ app.conn.version(), app.objects.items.len }) catch ""
+		std.fmt.bufPrint(&buf, "{s}  {d} objects ", .{ app.conn.version(), app.sidebar.objects.items.len }) catch ""
 	else
 		"no connection ";
 	const right_width = term.width(right);
@@ -232,11 +232,11 @@ fn sidebar(app: *App, width: usize, rows: usize) void {
 	const visible = app.visibleCount();
 	// Keep the selection on screen.
 	const list_rows = if (rows > 1) rows - 1 else 1;
-	if (app.selected < app.scroll) {
-		app.scroll = app.selected;
+	if (app.sidebar.selected < app.sidebar.scroll) {
+		app.sidebar.scroll = app.sidebar.selected;
 	}
-	if (app.selected >= app.scroll + list_rows) {
-		app.scroll = app.selected - list_rows + 1;
+	if (app.sidebar.selected >= app.sidebar.scroll + list_rows) {
+		app.sidebar.scroll = app.sidebar.selected - list_rows + 1;
 	}
 
 	screen.moveTo(1, 0);
@@ -245,11 +245,11 @@ fn sidebar(app: *App, width: usize, rows: usize) void {
 		_ = write(app, " filter: ", width);
 		screen.style(.{ .fg = C.accent });
 		_ = write(app, app.typing.prompt.?.buffer.items, width - 9);
-	} else if (app.filter.items.len > 0) {
+	} else if (app.sidebar.filter.items.len > 0) {
 		_ = write(app, " /", width);
 		screen.style(.{ .fg = C.accent });
-		_ = write(app, app.filter.items, width - 2);
-	} else if (app.schema.items.len != 0) {
+		_ = write(app, app.sidebar.filter.items, width - 2);
+	} else if (app.grid.schema.items.len != 0) {
 		// The engine's own word for it, and the key that changes it out at the
 		// right - the same way the filter header shows the `/` that made it, and
 		// the palette puts a key beside every action it lists. A header that says
@@ -263,7 +263,7 @@ fn sidebar(app: *App, width: usize, rows: usize) void {
 		used += write(app, heading, width -| used -| 3);
 		used += write(app, " ", width -| used -| 2);
 		screen.style(.{ .fg = C.accent });
-		used += write(app, app.schema.items, width -| used -| 2);
+		used += write(app, app.grid.schema.items, width -| used -| 2);
 		if (width > used + 1) {
 			screen.style(.{ .fg = C.faint });
 			fill(app, ' ', width - used - 2);
@@ -277,21 +277,21 @@ fn sidebar(app: *App, width: usize, rows: usize) void {
 	if (visible == 0) {
 		screen.moveTo(2, 1);
 		screen.style(.{ .fg = C.faint, .italic = true });
-		_ = write(app, if (app.filter.items.len > 0) "nothing matches" else "no tables yet", width - 1);
-		if (app.filter.items.len == 0) {
+		_ = write(app, if (app.sidebar.filter.items.len > 0) "nothing matches" else "no tables yet", width - 1);
+		if (app.sidebar.filter.items.len == 0) {
 			screen.moveTo(3, 1);
 			_ = write(app, "c creates one", width - 1);
 		}
 		screen.reset();
 	}
 	var line: usize = 2;
-	var n = app.scroll;
+	var n = app.sidebar.scroll;
 	while (line < rows + 1 and n < visible) : ({
 		line += 1;
 		n += 1;
 	}) {
 		const object = app.visibleAt(n) orelse break;
-		const selected = n == app.selected;
+		const selected = n == app.sidebar.selected;
 		screen.moveTo(line, 0);
 		if (selected) {
 			screen.style(.{ .bg = C.selected, .fg = if (app.focus == .sidebar) C.accent else C.text, .bold = app.focus == .sidebar });
@@ -338,14 +338,14 @@ fn sidebar(app: *App, width: usize, rows: usize) void {
 
 /// Which columns the grid shows on this frame, and how wide each one is.
 const Layout = struct {
-	columns: []const usize, // indexes into app.cols
+	columns: []const usize, // indexes into app.grid.cols
 	widths: []const usize,
 };
 
 fn layout(app: *App, available: usize, columns: []usize, widths: []usize) Layout {
 	// Hidden columns take no part in the layout at all.
 	var shown: usize = 0;
-	for (0..app.cols.items.len) |i| {
+	for (0..app.grid.cols.items.len) |i| {
 		if (!app.isHidden(i) and shown < columns.len) {
 			columns[shown] = i;
 			shown += 1;
@@ -357,37 +357,37 @@ fn layout(app: *App, available: usize, columns: []usize, widths: []usize) Layout
 	// The cursor's position among the visible columns drives the scrolling.
 	var at: usize = 0;
 	for (columns[0..shown], 0..) |index, n| {
-		if (index == app.cursor_col) {
+		if (index == app.cursor.col) {
 			at = n;
 		}
 	}
-	if (at < app.col_scroll) {
-		app.col_scroll = at;
+	if (at < app.cursor.col_scroll) {
+		app.cursor.col_scroll = at;
 	}
 	while (true) {
 		var used: usize = 0;
-		var last = app.col_scroll;
+		var last = app.cursor.col_scroll;
 		while (last < shown) {
-			const w = @min(@max(app.widths.items[columns[last]], 3), app.text_limit);
-			if (used + w + 1 > available and last > app.col_scroll) {
+			const w = @min(@max(app.grid.widths.items[columns[last]], 3), app.grid.text_limit);
+			if (used + w + 1 > available and last > app.cursor.col_scroll) {
 				break;
 			}
 			used += w + 1;
 			last += 1;
 		}
-		if (at < last or app.col_scroll + 1 >= shown) {
+		if (at < last or app.cursor.col_scroll + 1 >= shown) {
 			var n: usize = 0;
-			var i = app.col_scroll;
+			var i = app.cursor.col_scroll;
 			while (i < last and n < widths.len) : ({
 				i += 1;
 				n += 1;
 			}) {
 				columns[n] = columns[i];
-				widths[n] = @min(@max(app.widths.items[columns[i]], 3), app.text_limit);
+				widths[n] = @min(@max(app.grid.widths.items[columns[i]], 3), app.grid.text_limit);
 			}
 			return .{ .columns = columns[0..n], .widths = widths[0..n] };
 		}
-		app.col_scroll += 1;
+		app.cursor.col_scroll += 1;
 	}
 }
 
@@ -399,24 +399,24 @@ fn grid(app: *App, size: Size, side: usize, rows: usize) void {
 	// Title line: table, paging, sort.
 	screen.moveTo(1, left);
 	screen.style(.{ .fg = C.accent, .bold = true });
-	var used: usize = write(app, " ", width) + write(app, app.title.items, width - 2);
+	var used: usize = write(app, " ", width) + write(app, app.grid.title.items, width - 2);
 	screen.style(.{ .fg = C.dim });
 	var buf: [160]u8 = undefined;
-	const first: usize = if (app.rows.items.len == 0) 0 else app.firstRow();
+	const first: usize = if (app.grid.rows.items.len == 0) 0 else app.firstRow();
 	var counted: [24]u8 = undefined;
-	const total = if (app.counted)
-		std.fmt.bufPrint(&counted, "{d}", .{app.total}) catch "?"
+	const total = if (app.grid.counted)
+		std.fmt.bufPrint(&counted, "{d}", .{app.grid.total}) catch "?"
 	else
 		"?";
 	const summary = std.fmt.bufPrint(&buf, "  {d}-{d} of {s}   page {d}/{d}{s}{s}{s}", .{
 		first,
-		app.firstRow() - 1 + app.rows.items.len,
+		app.firstRow() - 1 + app.grid.rows.items.len,
 		total,
-		app.page + 1,
+		app.grid.page + 1,
 		app.pages(),
-		if (app.order != null) "   order " else "",
-		if (app.order) |column| column else "",
-		if (app.order != null and app.descending) " desc" else "",
+		if (app.grid.order != null) "   order " else "",
+		if (app.grid.order) |column| column else "",
+		if (app.grid.order != null and app.grid.descending) " desc" else "",
 	}) catch "";
 	used += write(app, summary, width - used);
 	if (app.follow.ms != 0) {
@@ -431,7 +431,7 @@ fn grid(app: *App, size: Size, side: usize, rows: usize) void {
 		used += write(app, text, width - used);
 		screen.style(.{ .fg = C.dim });
 	}
-	if (!app.editable and app.rows.items.len > 0) {
+	if (!app.grid.editable and app.grid.rows.items.len > 0) {
 		screen.style(.{ .fg = C.faint });
 		used += write(app, "   read-only", width - used);
 	}
@@ -447,10 +447,10 @@ fn grid(app: *App, size: Size, side: usize, rows: usize) void {
 	var x: usize = 0;
 	for (plan.widths, 0..) |w, n| {
 		const index = plan.columns[n];
-		const sorted = app.order != null and std.mem.eql(u8, app.order.?, app.cols.items[index]);
+		const sorted = app.grid.order != null and std.mem.eql(u8, app.grid.order.?, app.grid.cols.items[index]);
 		screen.style(.{ .bg = C.bar, .fg = if (sorted) C.accent else C.dim, .bold = true });
 		screen.put(" ");
-		pad(app, app.cols.items[index], w, false);
+		pad(app, app.grid.cols.items[index], w, false);
 		x += w + 1;
 	}
 	screen.style(.{ .bg = C.bar });
@@ -461,30 +461,30 @@ fn grid(app: *App, size: Size, side: usize, rows: usize) void {
 
 	// Rows.
 	const list_rows = if (rows > 2) rows - 2 else 1;
-	if (app.cursor_row < app.row_scroll) {
-		app.row_scroll = app.cursor_row;
+	if (app.cursor.row < app.cursor.row_scroll) {
+		app.cursor.row_scroll = app.cursor.row;
 	}
-	if (app.cursor_row >= app.row_scroll + list_rows) {
-		app.row_scroll = app.cursor_row - list_rows + 1;
+	if (app.cursor.row >= app.cursor.row_scroll + list_rows) {
+		app.cursor.row_scroll = app.cursor.row - list_rows + 1;
 	}
 	var line: usize = 3;
-	var r = app.row_scroll;
+	var r = app.cursor.row_scroll;
 	while (line < rows + 1) : (line += 1) {
 		screen.moveTo(line, left);
-		if (r >= app.rows.items.len) {
+		if (r >= app.grid.rows.items.len) {
 			screen.reset();
 			screen.clearToEol();
 			continue;
 		}
-		const row = app.rows.items[r];
-		const on_row = r == app.cursor_row and app.focus == .main;
+		const row = app.grid.rows.items[r];
+		const on_row = r == app.cursor.row and app.focus == .main;
 		for (plan.widths, 0..) |w, n| {
 			const index = plan.columns[n];
 			if (index >= row.cells.len) {
 				break;
 			}
 			const cell = row.cells[index];
-			const on_cell = on_row and index == app.cursor_col;
+			const on_cell = on_row and index == app.cursor.col;
 			screen.style(.{
 				.bg = if (on_cell) C.accent else if (on_row) C.selected else null,
 				.fg = if (on_cell) 16 else cell.colour(),
@@ -497,7 +497,7 @@ fn grid(app: *App, size: Size, side: usize, rows: usize) void {
 		screen.clearToEol();
 		r += 1;
 	}
-	if (app.rows.items.len == 0) {
+	if (app.grid.rows.items.len == 0) {
 		screen.moveTo(4, left + 2);
 		screen.style(.{ .fg = C.faint });
 		// An empty table and a filter that matches nothing look the same on
@@ -505,7 +505,7 @@ fn grid(app: *App, size: Size, side: usize, rows: usize) void {
 		const filtered = app.isFiltered();
 		_ = write(app, if (filtered)
 			"nothing matches the filter - W changes it, esc clears it"
-		else if (app.editable and app.conn.caps().no_insert.len == 0)
+		else if (app.grid.editable and app.conn.caps().no_insert.len == 0)
 			"no rows yet - i inserts one"
 		else
 			"no rows", width);
@@ -1075,11 +1075,11 @@ fn looksLikeImage(app: *App, bytes: []const u8) bool {
 
 /// Did the database call the cell under the cursor a BLOB?
 fn isBlobCell(app: *App) bool {
-	if (app.cursor_row >= app.rows.items.len) {
+	if (app.cursor.row >= app.grid.rows.items.len) {
 		return false;
 	}
-	const row = app.rows.items[app.cursor_row];
-	return app.cursor_col < row.cells.len and row.cells[app.cursor_col].kind == .blob;
+	const row = app.grid.rows.items[app.cursor.row];
+	return app.cursor.col < row.cells.len and row.cells[app.cursor.col].kind == .blob;
 }
 
 fn detail(app: *App, size: Size, side: usize, rows: usize) !void {
@@ -1099,7 +1099,7 @@ fn detail(app: *App, size: Size, side: usize, rows: usize) !void {
 	// One row for each of the frame's edges, on top of the value itself.
 	const height: usize = @max(4, @min(@min(rows - 2, 15), lines + 1));
 
-	const column = if (app.cursor_col < app.cols.items.len) app.cols.items[app.cursor_col] else "";
+	const column = if (app.cursor.col < app.grid.cols.items.len) app.grid.cols.items[app.cursor.col] else "";
 
 	// A picture is shown as a picture, where the terminal can do that. The bytes
 	// come back from the database as they are, so this is the real BLOB, not a
@@ -2090,7 +2090,7 @@ fn relations(app: *App, size: Size, side: usize, rows: usize) void {
 	defer arena.deinit();
 	var line: usize = 2;
 	var found: usize = 0;
-	for (app.objects.items) |object| {
+	for (app.sidebar.objects.items) |object| {
 		if (!std.mem.eql(u8, object.kind, "table")) {
 			continue;
 		}
