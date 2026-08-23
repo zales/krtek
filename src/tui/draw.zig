@@ -114,17 +114,17 @@ fn connections(app: *App, size: Size, rows: usize) void {
 	const top: usize = 2;
 	var line: usize = top + 1;
 
-	if (app.saved.items.items.len == 0) {
+	if (app.saved.list.items.items.len == 0) {
 		screen.moveTo(line, left);
 		screen.style(.{ .fg = C.dim });
 		_ = write(app, "  Nothing saved yet.", width);
 		line += 2;
 	} else {
-		for (app.saved.items.items, 0..) |item, i| {
+		for (app.saved.list.items.items, 0..) |item, i| {
 			if (line + 3 > rows) {
 				break;
 			}
-			const on = i == app.saved_at;
+			const on = i == app.saved.at;
 			screen.moveTo(line, left);
 			screen.style(.{ .bg = if (on) C.selected else null, .fg = if (on) C.accent else C.text, .bold = on });
 			_ = write(app, if (on) "  > " else "    ", width);
@@ -192,11 +192,11 @@ fn connections(app: *App, size: Size, rows: usize) void {
 		_ = write(app, "    file keeps the password in plain text; keychain lets macOS guard it", width -| 2);
 		line += 1;
 	}
-	if (line <= rows and app.saved_path.items.len != 0) {
+	if (line <= rows and app.saved.path.items.len != 0) {
 		screen.moveTo(line, left);
 		screen.style(.{ .fg = C.faint });
 		_ = write(app, "    saved in ", width -| 2);
-		_ = write(app, app.saved_path.items, if (width > 19) width - 19 else 0);
+		_ = write(app, app.saved.path.items, if (width > 19) width - 19 else 0);
 		line += 1;
 	}
 	screen.reset();
@@ -813,7 +813,7 @@ fn messages(app: *App, size: Size, side: usize, rows: usize) void {
 	screen.clearToEol();
 
 	var line: usize = 2;
-	for (app.reports.items, 0..) |report, n| {
+	for (app.report.list.items, 0..) |report, n| {
 		if (line + 1 > rows) {
 			break;
 		}
@@ -844,7 +844,7 @@ fn messages(app: *App, size: Size, side: usize, rows: usize) void {
 			line += 1;
 		}
 	}
-	if (app.reports.items.len == 0) {
+	if (app.report.list.items.len == 0) {
 		note(app, left, width, "nothing has been run yet");
 		line = 3;
 	}
@@ -1318,9 +1318,9 @@ fn keyName(buffer: []u8, key: u21) []const u8 {
 fn status(app: *App, size: Size) void {
 	const screen = app.screen;
 	screen.moveTo(size.rows - 2, 0);
-	screen.style(.{ .bg = C.bar, .fg = if (app.status_error) C.danger else C.ok });
+	screen.style(.{ .bg = C.bar, .fg = if (app.report.status_error) C.danger else C.ok });
 	var used: usize = write(app, " ", size.cols);
-	used += write(app, app.status.items, size.cols - 1);
+	used += write(app, app.report.status.items, size.cols - 1);
 	screen.style(.{ .bg = C.bar });
 	if (size.cols > used) {
 		fill(app, ' ', size.cols - used);

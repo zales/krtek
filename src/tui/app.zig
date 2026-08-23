@@ -235,10 +235,37 @@ const Running = struct {
 	copy_ticked: f64 = 0,
 };
 
+/// What the program has told whoever is watching, and what it would say if
+/// asked for more.
+///
+/// The line along the bottom is one sentence at a time; the reports behind it
+/// are every statement of the last run, which `m` opens. They share an arena
+/// because they are made and thrown away together, once per run.
+const Reporting = struct {
+	arena: std.heap.ArenaAllocator,
+	list: std.ArrayListUnmanaged(Report) = .empty,
+	/// The line itself, and whether it is a complaint - which is the difference
+	/// between a colour somebody reads past and one they stop at.
+	status: std.ArrayListUnmanaged(u8) = .empty,
+	status_error: bool = false,
+};
+
+/// Saved connections, where they live, and which of them is being worked on.
+const Saved = struct {
+	list: conns.List,
+	path: std.ArrayListUnmanaged(u8) = .empty,
+	/// The cursor in the connection list.
+	at: usize = 0,
+	/// The connection a password is being asked for.
+	pending: std.ArrayListUnmanaged(u8) = .empty,
+	/// Which saved connection the open form is editing, so changing both its name
+	/// and its target replaces that entry instead of adding a second one.
+	editing: ?usize = null,
+};
+
 pub const App = struct {
 	allocator: std.mem.Allocator,
 	arena: std.heap.ArenaAllocator, // the loaded page of rows
-	reports_arena: std.heap.ArenaAllocator,
 	/// What the connection form is holding: it is built again whenever the engine
 	/// changes, so what was typed has to outlive the form it was typed into.
 	form_arena: std.heap.ArenaAllocator,
@@ -301,21 +328,11 @@ pub const App = struct {
 	help: Help = .{},
 	text_limit: usize = 44, // widest column in the grid
 	history: std.ArrayListUnmanaged([]const u8) = .empty,
-	reports: std.ArrayListUnmanaged(Report) = .empty,
+	report: Reporting,
 
-	status: std.ArrayListUnmanaged(u8) = .empty,
-	status_error: bool = false,
 	quit: bool = false,
 
-	/// Saved connections and where they live.
-	saved: conns.List,
-	saved_path: std.ArrayListUnmanaged(u8) = .empty,
-	saved_at: usize = 0, // cursor in the connection list
-	/// The connection a password is being asked for.
-	pending_target: std.ArrayListUnmanaged(u8) = .empty,
-	/// Which saved connection the open form is editing, so changing both its name
-	/// and its target replaces that entry instead of adding a second one.
-	editing_saved: ?usize = null,
+	saved: Saved,
 	/// Which engine the open connection form was built for: when the choice at the
 	/// top of it changes, the fields under it are somebody else's.
 	built_engine: conns.Engine = .sqlite,
@@ -351,7 +368,7 @@ pub const App = struct {
 		var self = App{
 			.allocator = allocator,
 			.arena = std.heap.ArenaAllocator.init(allocator),
-			.reports_arena = std.heap.ArenaAllocator.init(allocator),
+			.report = .{ .arena = std.heap.ArenaAllocator.init(allocator) },
 			.object = .{ .arena = std.heap.ArenaAllocator.init(allocator) },
 			.form_arena = std.heap.ArenaAllocator.init(allocator),
 			.screen = try Term.init(allocator, io, env),
@@ -359,29 +376,29 @@ pub const App = struct {
 			.connected = false,
 			.path = "",
 			.owned_path = try allocator.alloc(u8, 0),
-			.saved = conns.List.init(allocator),
+			.saved = .{ .list = conns.List.init(allocator) },
 			.env = env,
 		};
 		var buffer: [std.fs.max_path_bytes]u8 = undefined;
 		if (conns.path(&buffer, env)) |file| {
-			try self.saved_path.appendSlice(allocator, file);
-			conns.load(&self.saved, file) catch {};
+			try self.saved.path.appendSlice(allocator, file);
+			conns.load(&self.saved.list, file) catch {};
 		}
 		self.offerFound();
 		self.view = .connections;
 		if (target.len != 0) {
 			self.connect(target, true) catch {};
-		} else if (self.saved.items.items.len == 0) {
+		} else if (self.saved.list.items.items.len == 0) {
 			self.say("no saved connections yet - press a to add one", .{});
 		} else {
-			const found = self.saved.items.items.len - self.saved.savedCount();
+			const found = self.saved.list.items.items.len - self.saved.list.savedCount();
 			if (found != 0) {
 				self.say("{d} saved, {d} from the kubeconfig - enter connects, a adds, d removes", .{
-					self.saved.savedCount(),
+					self.saved.list.savedCount(),
 					found,
 				});
 			} else {
-				self.say("{d} saved connection(s) - enter connects, a adds, d removes", .{self.saved.items.items.len});
+				self.say("{d} saved connection(s) - enter connects, a adds, d removes", .{self.saved.list.items.items.len});
 			}
 		}
 		return self;
@@ -406,8 +423,8 @@ pub const App = struct {
 				// and every attempt after that made the target longer.
 				const bare = conns.withoutPassword(scratch.allocator(), target) catch target;
 				const sent = !std.mem.eql(u8, bare, target);
-				self.pending_target.clearRetainingCapacity();
-				try self.pending_target.appendSlice(self.allocator, bare);
+				self.saved.pending.clearRetainingCapacity();
+				try self.saved.pending.appendSlice(self.allocator, bare);
 				self.prompt = .{ .kind = .password, .label = " password: " };
 				// A server with no password and a server with the wrong one both say
 				// `password`, and there is no telling those apart by their words.
@@ -638,32 +655,32 @@ pub const App = struct {
 		var scratch = std.heap.ArenaAllocator.init(self.allocator);
 		defer scratch.deinit();
 		for (database.k8s.contexts(scratch.allocator())) |context| {
-			self.saved.offer(context.name, context.target) catch return;
+			self.saved.list.offer(context.name, context.target) catch return;
 		}
 	}
 
 	/// Keep a connection in the list, under a name derived from the target.
 	fn rememberConnection(self: *App, target: []const u8) !void {
-		if (self.saved_path.items.len == 0) {
+		if (self.saved.path.items.len == 0) {
 			return;
 		}
 		var scratch = std.heap.ArenaAllocator.init(self.allocator);
 		defer scratch.deinit();
 		const clean = try conns.withoutPassword(scratch.allocator(), target);
-		if (self.saved.find(clean)) |at| {
-			self.saved.touch(at);
+		if (self.saved.list.find(clean)) |at| {
+			self.saved.list.touch(at);
 		} else {
-			try self.saved.add(try conns.suggestName(scratch.allocator(), clean), clean, null, "");
+			try self.saved.list.add(try conns.suggestName(scratch.allocator(), clean), clean, null, "");
 		}
-		conns.save(&self.saved, self.saved_path.items) catch {};
+		conns.save(&self.saved.list, self.saved.path.items) catch {};
 	}
 
 	/// Connect to the entry the cursor is on.
 	pub fn connectSaved(self: *App) !void {
-		if (self.saved_at >= self.saved.items.items.len) {
+		if (self.saved.at >= self.saved.list.items.items.len) {
 			return;
 		}
-		const entry = self.saved.items.items[self.saved_at];
+		const entry = self.saved.list.items.items[self.saved.at];
 		var scratch = std.heap.ArenaAllocator.init(self.allocator);
 		defer scratch.deinit();
 		// A connection that keeps its password connects with it and never asks. The
@@ -682,9 +699,9 @@ pub const App = struct {
 		// A found connection has no place in the file to be moved to the front of,
 		// and touching it would only shuffle it among the ones that do.
 		if (!entry.found) {
-			self.saved.touch(self.saved_at);
-			self.saved_at = 0;
-			conns.save(&self.saved, self.saved_path.items) catch {};
+			self.saved.list.touch(self.saved.at);
+			self.saved.at = 0;
+			conns.save(&self.saved.list, self.saved.path.items) catch {};
 		}
 		try self.connect(target, false);
 	}
@@ -692,15 +709,15 @@ pub const App = struct {
 	/// Try again with the password that was just typed. It is used once and is
 	/// not written anywhere.
 	pub fn connectWithPassword(self: *App, password: []const u8) !void {
-		if (self.pending_target.items.len == 0) {
+		if (self.saved.pending.items.len == 0) {
 			return;
 		}
 		var scratch = std.heap.ArenaAllocator.init(self.allocator);
 		defer scratch.deinit();
-		const target = try conns.withPassword(scratch.allocator(), self.pending_target.items, password);
-		const clean = try self.allocator.dupe(u8, self.pending_target.items);
+		const target = try conns.withPassword(scratch.allocator(), self.saved.pending.items, password);
+		const clean = try self.allocator.dupe(u8, self.saved.pending.items);
 		defer self.allocator.free(clean);
-		self.pending_target.clearRetainingCapacity();
+		self.saved.pending.clearRetainingCapacity();
 		try self.connect(target, false);
 		if (!self.connected) {
 			return;
@@ -708,18 +725,18 @@ pub const App = struct {
 		try self.rememberConnection(clean);
 		// The entry is at the front after rememberConnection; if it keeps its
 		// password somewhere, this is the password to put there.
-		if (self.saved.items.items.len == 0) {
+		if (self.saved.list.items.items.len == 0) {
 			return;
 		}
-		switch (self.saved.items.items[0].keeps) {
+		switch (self.saved.list.items.items[0].keeps) {
 			.ask => {},
 			.file => {
-				try self.saved.keep(0, .file, password);
-				conns.save(&self.saved, self.saved_path.items) catch {};
-				self.say("connected, and the password is now in {s}", .{self.saved_path.items});
+				try self.saved.list.keep(0, .file, password);
+				conns.save(&self.saved.list, self.saved.path.items) catch {};
+				self.say("connected, and the password is now in {s}", .{self.saved.path.items});
 			},
 			.keychain => {
-				const target_now = self.saved.items.items[0].target;
+				const target_now = self.saved.list.items.items[0].target;
 				if (keychain.store(target_now, password)) |_| {
 					self.say("connected, and the password is now in the keychain", .{});
 				} else |_| {
@@ -730,28 +747,28 @@ pub const App = struct {
 	}
 
 	pub fn forgetSaved(self: *App) !void {
-		if (self.saved_at >= self.saved.items.items.len) {
+		if (self.saved.at >= self.saved.list.items.items.len) {
 			return;
 		}
 		// Nothing here put it in the list, so nothing here takes it out: the file
 		// it came from is where it lives.
-		if (self.saved.items.items[self.saved_at].found) {
+		if (self.saved.list.items.items[self.saved.at].found) {
 			self.complain("{s} comes from the kubeconfig - remove the context there", .{
-				self.saved.items.items[self.saved_at].name,
+				self.saved.list.items.items[self.saved.at].name,
 			});
 			return;
 		}
 		var name: [128]u8 = undefined;
-		const label = std.fmt.bufPrint(&name, "{s}", .{self.saved.items.items[self.saved_at].name}) catch "it";
-		const going = self.saved.items.items[self.saved_at];
+		const label = std.fmt.bufPrint(&name, "{s}", .{self.saved.list.items.items[self.saved.at].name}) catch "it";
+		const going = self.saved.list.items.items[self.saved.at];
 		if (going.keeps == .keychain) {
 			keychain.remove(going.target);
 		}
-		_ = self.saved.items.orderedRemove(self.saved_at);
-		if (self.saved_at >= self.saved.items.items.len and self.saved_at > 0) {
-			self.saved_at -= 1;
+		_ = self.saved.list.items.orderedRemove(self.saved.at);
+		if (self.saved.at >= self.saved.list.items.items.len and self.saved.at > 0) {
+			self.saved.at -= 1;
 		}
-		conns.save(&self.saved, self.saved_path.items) catch {};
+		conns.save(&self.saved.list, self.saved.path.items) catch {};
 		self.say("{s} removed from the list", .{label});
 	}
 
@@ -760,31 +777,31 @@ pub const App = struct {
 		// Editing one would have to write it somewhere, and the only place it
 		// could go is this program's own file - which would leave two answers to
 		// what that cluster is called. `a` is how to make one of your own.
-		if (edit and self.saved_at < self.saved.items.items.len and
-			self.saved.items.items[self.saved_at].found)
+		if (edit and self.saved.at < self.saved.list.items.items.len and
+			self.saved.list.items.items[self.saved.at].found)
 		{
 			self.complain("{s} comes from the kubeconfig - a adds one of your own, with its own name", .{
-				self.saved.items.items[self.saved_at].name,
+				self.saved.list.items.items[self.saved.at].name,
 			});
 			return;
 		}
-		self.editing_saved = null;
+		self.saved.editing = null;
 		_ = self.form_arena.reset(.retain_capacity);
 		var name: []const u8 = "";
 		var target: []const u8 = "";
 		var secret: []const u8 = "";
 		var keeps: conns.Keeps = .ask;
 		if (edit) {
-			if (self.saved_at >= self.saved.items.items.len) {
+			if (self.saved.at >= self.saved.list.items.items.len) {
 				self.complain("there is nothing to edit yet - press a to add one", .{});
 				return;
 			}
-			const entry = self.saved.items.items[self.saved_at];
+			const entry = self.saved.list.items.items[self.saved.at];
 			name = entry.name;
 			target = entry.target;
 			keeps = entry.keeps;
 			secret = entry.secret;
-			self.editing_saved = self.saved_at;
+			self.saved.editing = self.saved.at;
 		}
 		// A target that cannot be taken apart and put back together identically is
 		// left as the one field it always was.
@@ -804,7 +821,7 @@ pub const App = struct {
 	fn showConnectionForm(self: *App, shape: conns.Shape, name: []const u8, keeps: conns.Keeps, secret: []const u8) !void {
 		const form = try self.newForm(
 			.connection,
-			if (self.editing_saved != null) "edit connection" else "add connection",
+			if (self.saved.editing != null) "edit connection" else "add connection",
 			"pick the engine, fill in what it needs",
 		);
 		self.built_engine = shape.engine;
@@ -1011,14 +1028,14 @@ pub const App = struct {
 		self.widths.deinit(self.allocator);
 		self.rows.deinit(self.allocator);
 		self.title.deinit(self.allocator);
-		self.status.deinit(self.allocator);
+		self.report.status.deinit(self.allocator);
 		self.follow.statement.deinit(self.allocator);
-		self.reports.deinit(self.allocator);
+		self.report.list.deinit(self.allocator);
 		self.marked.deinit(self.allocator);
 		self.pending.deinit(self.allocator);
-		self.saved.deinit();
-		self.saved_path.deinit(self.allocator);
-		self.pending_target.deinit(self.allocator);
+		self.saved.list.deinit();
+		self.saved.path.deinit(self.allocator);
+		self.saved.pending.deinit(self.allocator);
 		if (self.palette) |*open| {
 			open.query.deinit(self.allocator);
 		}
@@ -1044,7 +1061,7 @@ pub const App = struct {
 		}
 		self.allocator.free(self.owned_path);
 		self.arena.deinit();
-		self.reports_arena.deinit();
+		self.report.arena.deinit();
 		self.object.arena.deinit();
 		self.form_arena.deinit();
 	}
@@ -1071,14 +1088,14 @@ pub const App = struct {
 	}
 
 	pub fn say(self: *App, comptime fmt: []const u8, args: anytype) void {
-		self.status.clearRetainingCapacity();
-		self.status.print(self.allocator, fmt, args) catch {};
-		self.status_error = false;
+		self.report.status.clearRetainingCapacity();
+		self.report.status.print(self.allocator, fmt, args) catch {};
+		self.report.status_error = false;
 	}
 
 	pub fn complain(self: *App, comptime fmt: []const u8, args: anytype) void {
 		self.say(fmt, args);
-		self.status_error = true;
+		self.report.status_error = true;
 	}
 
 	fn setTitle(self: *App, comptime fmt: []const u8, args: anytype) void {
@@ -1778,9 +1795,9 @@ pub const App = struct {
 		if (self.conn.wantsTerminal(std.mem.trim(u8, sql, " \t\r\n;"))) {
 			return self.runShell(std.mem.trim(u8, sql, " \t\r\n;"));
 		}
-		_ = self.reports_arena.reset(.retain_capacity);
-		const arena = self.reports_arena.allocator();
-		self.reports.clearRetainingCapacity();
+		_ = self.report.arena.reset(.retain_capacity);
+		const arena = self.report.arena.allocator();
+		self.report.list.clearRetainingCapacity();
 
 		var shown = false;
 		var last_shown: []const u8 = "";
@@ -1833,7 +1850,7 @@ pub const App = struct {
 			if (failure != null) {
 				failures += 1;
 			}
-			try self.reports.append(self.allocator, .{
+			try self.report.list.append(self.allocator, .{
 				// Copied: the splitter points into the caller's buffer, which is
 				// gone by the time the report is drawn.
 				.sql = try arena.dupe(u8, statement.sql),
@@ -1888,16 +1905,16 @@ pub const App = struct {
 		try self.loadObjects();
 
 		var affected: i64 = 0;
-		for (self.reports.items) |report| {
+		for (self.report.list.items) |report| {
 			affected += report.changes;
 		}
 		if (failures > 0) {
 			self.complain("{d} of {d} statement(s) failed, press m for details{s}", .{
-				failures, self.reports.items.len, if (rolled_back) ", rolled back" else "",
+				failures, self.report.list.items.len, if (rolled_back) ", rolled back" else "",
 			});
 		} else {
 			self.say("{d} statement(s), {d} row(s) affected{s}", .{
-				self.reports.items.len, affected, if (rolled_back) ", rolled back" else "",
+				self.report.list.items.len, affected, if (rolled_back) ", rolled back" else "",
 			});
 		}
 	}
@@ -3355,28 +3372,28 @@ pub const App = struct {
 				const keeps = std.meta.stringToEnum(conns.Keeps, form.valueNamed("keep the password")) orelse .ask;
 				const typed = try self.allocator.dupe(u8, form.valueNamed("password"));
 				defer self.allocator.free(typed);
-				const editing = self.editing_saved;
-				self.editing_saved = null;
+				const editing = self.saved.editing;
+				self.saved.editing = null;
 				self.closeForm();
 				if (target.len == 0) {
 					self.complain("a connection needs something to point at", .{});
 					return;
 				}
 				if (editing) |at| {
-					if (at < self.saved.items.items.len) {
+					if (at < self.saved.list.items.items.len) {
 						// A connection that stops using the keychain, or moves to
 						// another target, leaves nothing behind in it.
-						const was = self.saved.items.items[at];
+						const was = self.saved.list.items.items[at];
 						if (was.keeps == .keychain and (keeps != .keychain or !std.mem.eql(u8, was.target, target))) {
 							keychain.remove(was.target);
 						}
-						_ = self.saved.items.orderedRemove(at);
+						_ = self.saved.list.items.orderedRemove(at);
 					}
 				}
 				var scratch = std.heap.ArenaAllocator.init(self.allocator);
 				defer scratch.deinit();
 				const clean = try conns.withoutPassword(scratch.allocator(), target);
-				try self.saved.add(
+				try self.saved.list.add(
 					if (name.len != 0) name else try conns.suggestName(scratch.allocator(), clean),
 					clean,
 					keeps,
@@ -3390,8 +3407,8 @@ pub const App = struct {
 						self.complain("the keychain would not take the password", .{});
 					};
 				}
-				conns.save(&self.saved, self.saved_path.items) catch {};
-				self.saved_at = 0;
+				conns.save(&self.saved.list, self.saved.path.items) catch {};
+				self.saved.at = 0;
 				// Connect with whatever was typed here, whether or not it is kept.
 				const attempt = if (typed.len != 0)
 					try conns.withPassword(scratch.allocator(), clean, typed)
@@ -3424,7 +3441,7 @@ pub const App = struct {
 
 		try self.runBatchStopping(script, true);
 		try self.loadObjects();
-		if (self.reports.items.len != 0 and self.reports.items[self.reports.items.len - 1].failure != null) {
+		if (self.report.list.items.len != 0 and self.report.list.items[self.report.list.items.len - 1].failure != null) {
 			// The rollback in runBatch has already undone the half done work.
 			self.reload() catch {};
 			return;

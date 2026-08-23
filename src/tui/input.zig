@@ -416,7 +416,7 @@ fn closePalette(app: *App) void {
 
 /// The welcome screen: a short list of keys, and the mouse works too.
 fn onConnections(app: *App, key: Key) !void {
-	const count = app.saved.items.items.len;
+	const count = app.saved.list.items.items.len;
 	switch (key) {
 		.ctrl => |code| if (code == 'c') {
 			app.quit = true;
@@ -426,20 +426,20 @@ fn onConnections(app: *App, key: Key) !void {
 			'a' => try app.openConnectionForm(false),
 			'e' => try app.openConnectionForm(true),
 			'd' => try app.forgetSaved(),
-			'j' => if (count != 0 and app.saved_at + 1 < count) {
-				app.saved_at += 1;
+			'j' => if (count != 0 and app.saved.at + 1 < count) {
+				app.saved.at += 1;
 			},
-			'k' => if (app.saved_at > 0) {
-				app.saved_at -= 1;
+			'k' => if (app.saved.at > 0) {
+				app.saved.at -= 1;
 			},
 			'?' => openHelp(app),
 			else => {},
 		},
-		.down => if (count != 0 and app.saved_at + 1 < count) {
-			app.saved_at += 1;
+		.down => if (count != 0 and app.saved.at + 1 < count) {
+			app.saved.at += 1;
 		},
-		.up => if (app.saved_at > 0) {
-			app.saved_at -= 1;
+		.up => if (app.saved.at > 0) {
+			app.saved.at -= 1;
 		},
 		.enter => try app.connectSaved(),
 		.escape => if (app.connected) {
@@ -448,7 +448,7 @@ fn onConnections(app: *App, key: Key) !void {
 		.mouse => |mouse| {
 			// The list starts on the fifth row of the panel.
 			if (mouse.button == .left and mouse.row >= 4 and mouse.row - 4 < count) {
-				app.saved_at = mouse.row - 4;
+				app.saved.at = mouse.row - 4;
 				try app.connectSaved();
 			}
 		},
