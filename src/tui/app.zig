@@ -368,9 +368,12 @@ pub const App = struct {
 	pub fn connect(self: *App, target: []const u8, keep: bool) !void {
 		var report: std.ArrayListUnmanaged(u8) = .empty;
 		defer report.deinit(self.allocator);
-		const opened = database.Db.open(self.allocator, target, &report) catch {
+		const opened = database.Db.open(self.allocator, target, &report) catch |err| {
 			// A missing password is worth asking for rather than just failing.
-			if (needsPassword(report.items)) {
+			// `NeedPassword` is a driver saying so; `needsPassword` is this reading
+			// the sentence it wrote, which is what everything did before any of them
+			// could say it and is still all some of them offer.
+			if (err == error.NeedPassword or needsPassword(report.items)) {
 				var scratch = std.heap.ArenaAllocator.init(self.allocator);
 				defer scratch.deinit();
 				// What is asked again is the target without a password, not the one
@@ -3917,6 +3920,14 @@ pub fn looksNumeric(text: []const u8) bool {
 
 /// Whether the driver's complaint is about a missing password - or a missing
 /// secret key, which is what S3 calls one.
+/// Whether a driver that could not say what it wanted was, by the sound of it,
+/// after a password.
+///
+/// A guess, and a poor one - it cannot tell a server asking for a password from
+/// one refusing the password it got, because both sentences have the word in
+/// them. Whoever is being asked to type one cares about that difference more than
+/// anything else on the screen, which is why `error.NeedPassword` exists and why
+/// this is the fallback for the drivers that do not return it yet.
 fn needsPassword(message: []const u8) bool {
 	for ([_][]const u8{ "password", "authentication", "secret key" }) |needle| {
 		if (std.ascii.indexOfIgnoreCase(message, needle) != null) {

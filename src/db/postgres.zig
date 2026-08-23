@@ -37,8 +37,14 @@ pub const Db = struct {
 		};
 		if (PQstatus(conn) != CONNECTION_OK) {
 			try report.appendSlice(allocator, std.mem.trimEnd(u8, span(PQerrorMessage(conn)), "\n"));
+			// libpq knows the difference between a server that wants a password and
+			// one that refused the password it got, and will say which. Asked here
+			// rather than read out of the message afterwards, because "no password
+			// supplied" and "password authentication failed" are both sentences
+			// with the word in them and they mean opposite things.
+			const wants = PQconnectionNeedsPassword(conn) != 0;
 			PQfinish(conn);
-			return error.Driver;
+			return if (wants) error.NeedPassword else error.Driver;
 		}
 		const self = try allocator.create(Db);
 		self.* = .{
@@ -928,6 +934,7 @@ const OID_NUMERIC = 1700;
 
 extern fn PQconnectdb(conninfo: [*:0]const u8) ?*PGconn;
 extern fn PQstatus(conn: *PGconn) c_int;
+extern fn PQconnectionNeedsPassword(conn: *PGconn) c_int;
 extern fn PQfinish(conn: *PGconn) void;
 extern fn PQerrorMessage(conn: *PGconn) ?[*:0]const u8;
 extern fn PQsetErrorVerbosity(conn: *PGconn, verbosity: c_int) c_int;

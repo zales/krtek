@@ -90,9 +90,15 @@ pub const Db = struct {
 		}
 		if (connected == null) {
 			try report.appendSlice(allocator, span(mysql_error(conn)));
+			// Access denied and nothing was offered: the server wants a password
+			// and there was none to give. The connector has no `needsPassword` to
+			// ask, but this side knows what it sent, which answers the same
+			// question - and answers it without reading the server's prose, where
+			// "using password: NO" and "using password: YES" differ by one letter.
+			const wants = mysql_errno(conn) == ACCESS_DENIED and parts.password.len == 0;
 			mysql_close(conn);
 			allocator.destroy(self);
-			return error.Driver;
+			return if (wants) error.NeedPassword else error.Driver;
 		}
 		errdefer self.close();
 		try self.target.appendSlice(allocator, target);
@@ -1245,6 +1251,9 @@ const MYSQL_FIELD = extern struct {
 
 const NUM_FLAG: c_uint = 32768;
 const SERVER_STATUS_IN_TRANS: c_uint = 1;
+/// ER_ACCESS_DENIED_ERROR, which is what a refused login is whether or not a
+/// password was part of it.
+const ACCESS_DENIED: c_uint = 1045;
 const CLIENT_MULTI_RESULTS: c_ulong = 131072;
 const MYSQL_OPT_RECONNECT: c_uint = 21;
 const MYSQL_SET_CHARSET_NAME: c_uint = 7;

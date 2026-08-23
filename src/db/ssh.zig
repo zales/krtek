@@ -269,6 +269,11 @@ pub const Error = error{
 	Handshake,
 	HostKey,
 	Auth,
+	/// The server takes a password and none was given. Its own error, and not a
+	/// sentence with the word in it, because "you gave me none" and "the one you
+	/// gave me is wrong" read alike and mean opposite things to whoever is asked
+	/// to type one.
+	NeedPassword,
 	Sftp,
 	OutOfMemory,
 };
@@ -478,12 +483,14 @@ fn authenticate(allocator: std.mem.Allocator, session: *Session, options: Option
 	if (byKey(session, arena, options)) {
 		return;
 	}
-	// Nothing worked and the server takes a password: say so in those words,
-	// because that is what makes the interface offer one.
+	// Nothing worked and the server takes a password. Its own error rather than a
+	// sentence to be recognised later: the interface offers one because this says
+	// so, not because the words happened to contain "password".
 	if (std.mem.indexOf(u8, methods, "password") != null or
 		std.mem.indexOf(u8, methods, "keyboard-interactive") != null)
 	{
 		try why.print(allocator, "{s} needs a password, or a key the agent does not have", .{options.user});
+		return error.NeedPassword;
 	} else {
 		try why.print(allocator, "no key was accepted for {s} - the server takes {s}", .{
 			options.user,

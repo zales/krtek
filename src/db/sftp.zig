@@ -92,7 +92,12 @@ pub const Db = struct {
 			.key = self.parts.key,
 			.passphrase = self.parts.passphrase,
 			.verify = self.parts.verify,
-		}, report) catch return error.Driver;
+		}, report) catch |err| return switch (err) {
+			// The one thing worth telling apart from a failure: it is what decides
+			// between offering a password and saying why the last one was refused.
+			error.NeedPassword => error.NeedPassword,
+			else => error.Driver,
+		};
 
 		// Where we start: what the target said, or wherever the server puts us.
 		const start = if (self.parts.path.len != 0) self.parts.path else ".";
