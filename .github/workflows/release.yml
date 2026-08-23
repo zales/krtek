@@ -161,7 +161,11 @@ jobs:
     needs: [macos, linux]
     runs-on: ubuntu-24.04
     steps:
+      # The whole history, because the notes below say what changed since the
+      # last tag and a shallow clone has neither the tags nor what is between.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: actions/download-artifact@v4
         with:
@@ -183,6 +187,21 @@ jobs:
           version="${{ inputs.tag || github.ref_name }}"
           # A heredoc, because the notes are prose: quoting them through echo is how
           # a backslash ends up in a release nobody can edit afterwards.
+          # What changed, from the commit subjects: they are written as sentences
+          # about what happened and why, which is what release notes want, and
+          # writing them twice is how the second copy comes to be wrong.
+          previous=$(git describe --tags --abbrev=0 "$version^" 2>/dev/null || true)
+          if [ -n "$previous" ]; then
+            {
+              echo "### Since $previous"
+              echo
+              git log --reverse --pretty='- %s' "$previous..$version"
+              echo
+            } > changes.md
+          else
+            : > changes.md
+          fi
+
           cat > notes.md <<'NOTES'
           A database manager for the terminal: SQLite, PostgreSQL, MySQL/MariaDB,
           Redis, Kafka, S3, Azure Blob, RabbitMQ, SFTP and Kubernetes, behind one
@@ -217,6 +236,7 @@ jobs:
           NOTES
           # The indentation above is the workflow's; strip it from the file.
           sed -i 's/^          //' notes.md
+          cat changes.md notes.md > release.md && mv release.md notes.md
           # Runnable twice. A release that already exists is edited rather than
           # refused, so a version can be built again when only the packaging
           # around it changed and the binaries are the same ones.
