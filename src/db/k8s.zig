@@ -1455,7 +1455,11 @@ pub const Db = struct {
 		}
 		const wanted = if (howMany.len != 0) std.fmt.parseInt(usize, howMany, 10) catch LOG_LINES else LOG_LINES;
 		const resource = api.find("pods").?;
-		const path = try std.fmt.allocPrint(arena, "{s}/log?tailLines={d}", .{
+		// With the times the kubelet wrote down. They come at the front of every
+		// line, and go into a column of their own here rather than staying there:
+		// the grid has columns, and a stamp in front of the text is a stamp the
+		// text has to be read around.
+		const path = try std.fmt.allocPrint(arena, "{s}/log?tailLines={d}&timestamps=true", .{
 			try self.objectPath(arena, resource, "", name),
 			wanted,
 		});
@@ -1463,7 +1467,53 @@ pub const Db = struct {
 		if (!response.ok()) {
 			return self.fail(response, name);
 		}
-		return self.lines(arena, "line", response.body);
+		return self.stampedLines(arena, response.body);
+	}
+
+	/// A log as two columns: when the line was written, and what it said.
+	///
+	/// The kubelet writes the time as a full RFC 3339 stamp - thirty characters of
+	/// which the first eleven are the same on every line anybody is looking at.
+	/// What is shown is the time of day, because that is what a log is read
+	/// against; a line from another day is not marked as such, which is the price.
+	fn stampedLines(self: *Db, arena: std.mem.Allocator, text: []const u8) db.Error!Rows {
+		var rows = Rows{ .owner = self, .table = "" };
+		const heading = try arena.alloc([]const u8, 2);
+		heading[0] = "time";
+		heading[1] = "line";
+		rows.names = heading;
+		rows.numeric = try arena.alloc(bool, 2);
+		@memset(@constCast(rows.numeric), false);
+
+		var walk = std.mem.splitScalar(u8, text, '\n');
+		while (walk.next()) |one| {
+			const line = std.mem.trimEnd(u8, one, "\r");
+			const cells = try arena.alloc(Value, 2);
+			const apart = timeOf(line);
+			cells[0] = .{ .text = apart.when };
+			cells[1] = .{ .text = apart.what };
+			try rows.rows.append(arena, cells);
+		}
+		return rows;
+	}
+
+	/// The stamp at the front of a log line, as a time of day, and the rest.
+	///
+	/// A line without one is not an error: `timestamps=true` is asked for, but a
+	/// log is whatever the container wrote and this has to hold it either way. Such
+	/// a line keeps all of itself and has no time beside it.
+	fn timeOf(line: []const u8) struct { when: []const u8, what: []const u8 } {
+		const space = std.mem.indexOfScalar(u8, line, ' ') orelse return .{ .when = "", .what = line };
+		const stamp = line[0..space];
+		// 2026-08-21T15:55:33.775431123Z, and nothing shorter than the seconds.
+		if (stamp.len < 20 or stamp[10] != 'T' or stamp[stamp.len - 1] != 'Z') {
+			return .{ .when = "", .what = line };
+		}
+		var end: usize = 19;
+		if (stamp.len > 23 and stamp[19] == '.') {
+			end = 23; // and the milliseconds, which is what a request is timed in
+		}
+		return .{ .when = stamp[11..end], .what = line[space + 1 ..] };
 	}
 
 	/// Text as one column of rows, so the grid can hold it and the detail box can
@@ -2044,6 +2094,39 @@ test "a cluster's address comes apart into a host and a port" {
 	try testing.expect(splitServer("ftp://host") == null);
 	try testing.expect(splitServer("https://") == null);
 	try testing.expect(splitServer("https://host:not-a-port") == null);
+}
+
+test "a log line comes apart into when it was written and what it said" {
+	// What the kubelet actually sends with timestamps=true.
+	const one = Db.timeOf("2026-08-21T15:55:33.775431123Z info: request finished");
+	try testing.expectEqualStrings("15:55:33.775", one.when);
+	try testing.expectEqualStrings("info: request finished", one.what);
+
+	// Whole seconds, which is all some clocks offer.
+	const plain = Db.timeOf("2026-08-21T15:55:33Z hello");
+	try testing.expectEqualStrings("15:55:33", plain.when);
+	try testing.expectEqualStrings("hello", plain.what);
+
+	// A line that is only a stamp is a line with nothing in it, not a line that
+	// is a stamp.
+	const bare = Db.timeOf("2026-08-21T15:55:33.775431123Z ");
+	try testing.expectEqualStrings("15:55:33.775", bare.when);
+	try testing.expectEqualStrings("", bare.what);
+
+	// And a line with no stamp keeps all of itself rather than losing its first
+	// word to a column it does not belong in. `timestamps=true` is asked for, but
+	// a log is whatever the container wrote.
+	for ([_][]const u8{
+		"info: something without a stamp",
+		"nospaces",
+		"",
+		"2026-08-21 15:55:33 not rfc3339",
+		"short Z",
+	}) |line| {
+		const none = Db.timeOf(line);
+		try testing.expectEqualStrings("", none.when);
+		try testing.expectEqualStrings(line, none.what);
+	}
 }
 
 test "only the console verbs that look are worth repeating" {

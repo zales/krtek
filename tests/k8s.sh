@@ -323,6 +323,14 @@ printf '%s' "$wide" | grep -q "jestli se orizne nebo ne" || {
 }
 echo "ok: a log line is as wide as there is room for"
 
+# And it says when each line was written. The kubelet knows, and a log read
+# against a request somebody is chasing is a log with the clock on it.
+printf '%s' "$wide" | grep -qE '[0-9][0-9]:[0-9][0-9]:[0-9][0-9]\.[0-9][0-9][0-9] radek' || {
+	printf '%s\n' "$wide" >&2
+	fail "a log line should carry the time it was written"
+}
+echo "ok: a log line carries the time it was written"
+
 # And following one shows its end. A log opened at line one and followed from
 # there grows at the end nobody is looking at.
 #
