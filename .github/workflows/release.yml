@@ -41,9 +41,24 @@ jobs:
       # machines are Neoverse and emit SVE, which is an illegal instruction on
       # Apple silicon, and the x86 ones are no better. A release has to run on
       # everybody's processor, not on the one that compiled it.
+      #
+      # ReleaseSafe rather than ReleaseFast, and the difference is not speed.
+      # Half a dozen parsers here read a length off a socket and then believe it:
+      # TDS says how long a column is, Kafka how long a record batch is, S3 how
+      # long a listing is. With the checks on, a wrong number is a panic that
+      # names the line; without them it is a read past the end of a buffer that
+      # says nothing. The fuzzer already runs ReleaseSafe, so this is also what
+      # makes what is fuzzed and what is shipped the same program.
+      #
+      # It costs 239 kB of the four megabytes and nothing anybody can feel: this
+      # waits on a network and on a keyboard, never on a processor. Keeping the
+      # drivers safe while the interface stayed fast was tried first and does not
+      # work - a per-module `optimize` sets that module's `builtin.mode` and
+      # generates no checks, and `@setRuntimeSafety` does not reach past the
+      # function it is written in.
       - name: build
         run: |
-          zig build -Doptimize=ReleaseFast -Dstatic -Dstrip -Dcpu=baseline \
+          zig build -Doptimize=ReleaseSafe -Dstatic -Dstrip -Dcpu=baseline \
             -Dversion="${{ inputs.tag || github.ref_name }}" \
             -Dlibpq="$(brew --prefix libpq)" -Dmariadb="$(brew --prefix mariadb-connector-c)"
 
@@ -95,7 +110,7 @@ jobs:
             mkdir -p /opt/zig && tar xJf /tmp/zig.tar.xz -C /opt/zig --strip-components=1
             export PATH=/opt/zig:$PATH ZIG_GLOBAL_CACHE_DIR=/tmp/zig-cache
             ./fetch-sqlite.sh
-            OPTIMIZE=ReleaseFast ./tests/linux-static.sh -Dstrip -Dcpu=baseline -Dversion=${{ inputs.tag || github.ref_name }}
+            OPTIMIZE=ReleaseSafe ./tests/linux-static.sh -Dstrip -Dcpu=baseline -Dversion=${{ inputs.tag || github.ref_name }}
             ./tests/smoke.sh
           '
 

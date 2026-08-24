@@ -6,10 +6,29 @@
 
 const std = @import("std");
 const build = @import("build");
+const vaxis = @import("vaxis");
 const term = @import("term.zig");
 const app_mod = @import("app.zig");
 const draw = @import("draw.zig");
 const input = @import("input.zig");
+
+/// Put the terminal back before saying anything.
+///
+/// A panic does not unwind, so nothing that was deferred runs - and this program
+/// spends its life on the alternate screen with the keyboard in a mode of its own
+/// and mouse reporting on. Without this a panic leaves the terminal in that state
+/// and writes its message underneath a drawing nobody can scroll away from, which
+/// is the same as not saying anything at all.
+///
+/// libvaxis carries a handler of its own, but its signature is one Zig ago -
+/// three parameters where 0.16 passes two - so what is used here is the part of
+/// it that matters, which is the sequence that puts the terminal back.
+pub const panic = std.debug.FullPanic(atPanic);
+
+fn atPanic(message: []const u8, first_trace_address: ?usize) noreturn {
+	vaxis.recover();
+	std.debug.defaultPanic(message, first_trace_address);
+}
 
 const usage =
 	\\krtek - a database manager for the terminal
