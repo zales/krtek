@@ -967,6 +967,27 @@ connections:
 zig build && ./tests/shots.sh
 ```
 
+The same harness draws every screen at every size worth caring about:
+
+```sh
+zig build && ./tests/sizes.sh
+```
+
+What that checks is not that a screen looks *good* at forty columns - a grid of
+five columns cannot, and truncating is the honest answer - but that the drawing
+is still coherent. Chiefly that two panels are not drawn one column inside each
+other, which is what put a second border down each side of the connection form
+on any window under about seventy-five columns. Counting frames that open
+against ones that close was tried and is wrong: a panel drawn over another
+covers its top and not its bottom on purpose.
+
+**There is no minimum size and there is deliberately not one.** Nothing breaks
+as the window shrinks - the grid truncates all the way down to ten columns by
+three - so a floor would take away a window that works rather than prevent one
+that does not. What the small sizes needed instead was for the list of objects
+to shrink with the window rather than stay twenty-six columns wide until it
+vanished, and for the key map to stop putting two columns where one fits.
+
 A server is needed for the drivers that talk to one, and
 [tests/kafka.sh](tests/kafka.sh) brings its own: it starts a Kafka in KRaft mode
 with four listeners - plain, SASL, SASL over TLS, and an internal one for Kafka's

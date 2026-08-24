@@ -458,7 +458,7 @@ fn onConnections(app: *App, key: Key) !void {
 }
 
 fn click(app: *App, mouse: term.Mouse, size: term.Size) !void {
-	const side: usize = if (size.cols > app_mod.SIDEBAR + 20) app_mod.SIDEBAR else 0;
+	const side: usize = app_mod.sidebarWidth(size.cols);
 	const in_sidebar = side != 0 and mouse.col < side;
 
 	switch (mouse.button) {

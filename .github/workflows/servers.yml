@@ -73,6 +73,9 @@ jobs:
         run: |
           if [ "${{ matrix.suite }}" = sqlite ]; then
             ./tests/smoke.sh
+            # Every screen at every size worth caring about. It lives with the
+            # suite that needs no server because it needs none either.
+            ./tests/sizes.sh
           else
             ./tests/${{ matrix.suite }}.sh
           fi

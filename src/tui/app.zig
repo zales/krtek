@@ -34,6 +34,21 @@ pub const C = struct {
 
 pub const SIDEBAR: usize = 26;
 
+/// How wide the list of objects is on a terminal this wide.
+///
+/// It used to be twenty-six columns or nothing: on a sixty-column window that
+/// spent nearly half the screen on names, and one column narrower it took the
+/// list away altogether. A third of the width, up to those twenty-six, shrinks
+/// with the window instead. Below the point where a third is too narrow to read
+/// a name in, there is still no list - a stripe of clipped words helps nobody,
+/// and `tab` is not much use when there is nothing legible to move to.
+pub fn sidebarWidth(cols: usize) usize {
+	if (cols <= SIDEBAR + 20) {
+		return 0;
+	}
+	return @min(SIDEBAR, cols / 3);
+}
+
 pub const OPERATORS = [_][]const u8{ "=", "!=", "<", "<=", ">", ">=", "LIKE", "contains", "IS NULL", "IS NOT NULL" };
 
 /// What the filter form's operator means. `contains` is LIKE with the wildcards

@@ -30,8 +30,10 @@ pub fn frame(app: *App, size: Size) !void {
 	// The key map is a reference, not a place to be while browsing: it gets the
 	// whole width, the way the connection list and the two panes do, because a
 	// sidebar there costs a quarter of every description.
-	const side = if (size.cols > SIDEBAR + 20 and
-		app.view != .connections and app.view != .files and app.view != .help) SIDEBAR else 0;
+	const side = if (app.view != .connections and app.view != .files and app.view != .help)
+		app_mod.sidebarWidth(size.cols)
+	else
+		0;
 
 	header(app, size);
 	if (app.view == .connections) {
@@ -92,7 +94,7 @@ fn cursorAndFlush(app: *App, size: Size) !void {
 	} else if (app.typing.editor) |*editor| {
 		// In the editor the cursor is where the typing happens, inside the panel.
 		const at = editor.position();
-		const side: usize = if (size.cols > SIDEBAR + 20) SIDEBAR else 0;
+		const side: usize = app_mod.sidebarWidth(size.cols);
 		screen.cursorAt(2 + (at.line - editor.scroll), side + 2 + 5 + at.column);
 	} else if (app.typing.cursor) |spot| {
 		screen.cursorAt(spot.row, spot.col);
@@ -117,7 +119,10 @@ fn connections(app: *App, size: Size, rows: usize) void {
 		marked += @intFromBool(item.read_only);
 	}
 	const guard: usize = if (marked != 0) 10 else 0;
-	const width: usize = @min(size.cols, 74 + guard);
+	// Two columns narrower than the screen, so that a form drawn over this one -
+	// which insets itself by one on each side - lands on exactly the same columns
+	// instead of one inside them, which drew both frames side by side.
+	const width: usize = @min(size.cols -| 2, 74 + guard);
 	const left = if (size.cols > width) (size.cols - width) / 2 else 0;
 	const top: usize = 2;
 	var line: usize = top + 1;
@@ -1010,12 +1015,16 @@ fn help(app: *App, size: Size, side: usize, rows: usize) void {
 	screen.style(.{ .fg = C.accent, .bold = true });
 	_ = write(app, " keys", width);
 	screen.clearToEol();
-	// Two columns: the list is longer than a terminal is tall. And on a terminal
-	// short enough that two columns are not enough either, it scrolls - what used
-	// to happen was that the last few entries were quietly not drawn, which is a
-	// key map that hides keys.
-	const half = (HELP.len + 1) / 2;
-	const column_width = width / 2;
+	// Two columns, because the list is longer than a terminal is tall - but only
+	// where two of them still have room for what they say. An entry is two spaces,
+	// a key padded to fifteen and then its description, so a column under about
+	// forty-four columns starts cutting the descriptions, and a key map with
+	// "add, remove a column…" in it is a key map that has stopped explaining. One
+	// column and a scroll is the better half of that trade: it scrolls anyway on a
+	// short terminal, and everything can still be read.
+	const columns: usize = if (width >= 88) 2 else 1;
+	const half = if (columns == 2) (HELP.len + 1) / 2 else HELP.len;
+	const column_width = width / columns;
 	// The last body line is the strip that says where in the map this is; the
 	// entries have the rest.
 	const page = if (rows > 3) rows - 2 else 1;
