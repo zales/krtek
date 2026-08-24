@@ -283,6 +283,13 @@ const StreamSource = struct {
 			if (self.answered) |flag| {
 				flag.* = true;
 			}
+			// Every chunk, not only every timeout. A reply arriving steadily over
+			// a second never waits long enough to time out, so nothing was ever
+			// asked and no spinner was ever drawn - which is exactly the case
+			// somebody wants one for.
+			if (!self.stream.asked()) {
+				return error.GivenUp;
+			}
 		}
 		return got;
 	}

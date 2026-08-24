@@ -381,6 +381,33 @@ printf '%s' "$out" | grep -q "namespaces  1-" || {
 }
 echo "ok: the cursor counts kinds, not the lines drawn between them"
 
+# A cluster that is far away. The handshake is several round trips and the socket
+# has a short receive timeout on it, so OpenSSL says "want read" while the first
+# flight is still in the air - which is not a failure and used to be read as one.
+# Asked once, a cluster a third of a second away could not be reached at all.
+#
+# The delay goes on the k3s container's own interface, from a sidecar that shares
+# its network. Skipped where that will not run rather than failed: this is about
+# krtek, and a machine that cannot shape traffic has nothing to say about it.
+if docker run --rm --net=container:"$NAME" --cap-add=NET_ADMIN alpine:3.22 \
+	sh -c 'apk add -q iproute2 && tc qdisc add dev eth0 root netem delay 300ms' >/dev/null 2>&1
+then
+	out=$(python3 tests/screen.py "$ROOT" '{sleep}' '{sleep}' '{sleep}' '{sleep}' '{keep}' 2>&1 || true)
+	docker run --rm --net=container:"$NAME" --cap-add=NET_ADMIN alpine:3.22 \
+		sh -c 'apk add -q iproute2 && tc qdisc del dev eth0 root' >/dev/null 2>&1
+	printf '%s' "$out" | grep -q "handshake failed" && {
+		printf '%s\n' "$out" >&2
+		fail "a cluster 300ms away should still connect"
+	}
+	printf '%s' "$out" | grep -q "Kubernetes v1" || {
+		printf '%s\n' "$out" >&2
+		fail "a cluster 300ms away should still answer"
+	}
+	echo "ok: a cluster far enough away to outlast the read timeout still connects"
+else
+	echo "ok: (no way to add latency here, so nothing to say about a far cluster)"
+fi
+
 # What the cluster is made of. Every number here comes out of the API for
 # nothing extra - what a node has left to place pods in, and what the pods on it
 # asked for - so it works on a cluster with no add-ons at all.

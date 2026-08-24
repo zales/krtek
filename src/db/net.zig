@@ -43,7 +43,11 @@ pub const Stream = struct {
 		_ = std.c.setsockopt(self.fd, std.c.SOL.SOCKET, std.c.SO.RCVTIMEO, &timeout, @sizeOf(std.c.timeval));
 	}
 
-	fn waited(self: *Stream) bool {
+	/// Whether whoever asked for this still wants it. Asked between waits, and
+	/// asked again for every chunk that arrives: a reply that comes in steadily
+	/// over a second never times out, so waiting on a read is not the same
+	/// question as taking a while.
+	pub fn asked(self: *Stream) bool {
 		if (self.keep_waiting) |ask| {
 			if (self.context) |context| {
 				return ask(context);
@@ -100,7 +104,7 @@ pub const Stream = struct {
 			if (!self.timedOut()) {
 				return error.Gone;
 			}
-			if (!self.waited()) {
+			if (!self.asked()) {
 				return error.GivenUp;
 			}
 			waiting += READ_TIMEOUT_MS;
@@ -193,6 +197,7 @@ pub const ssl = struct {
 	pub extern fn ERR_error_string_n(code: c_ulong, buffer: [*]u8, length: usize) void;
 
 	pub const ERROR_WANT_READ: c_int = 2;
+	pub const ERROR_WANT_WRITE: c_int = 3;
 	pub const VERIFY_PEER: c_int = 1;
 	pub const VERIFY_NONE: c_int = 0;
 	/// SSL_set_tlsext_host_name, which is a macro over SSL_ctrl.
@@ -262,14 +267,37 @@ pub fn startTls(allocator: std.mem.Allocator, stream: *Stream, host: []const u8,
 	if (options.verify) {
 		_ = ssl.SSL_set1_host(session, zero_host.ptr);
 	}
-	if (ssl.SSL_connect(session) != 1) {
-		var buffer: [256]u8 = undefined;
-		const text = ssl.lastError(&buffer);
-		try why.print(allocator, "the TLS handshake failed{s}{s}", .{
-			if (text.len != 0) ": " else "",
-			text,
-		});
-		return error.Tls;
+	// A handshake is several round trips, and the socket has a short receive
+	// timeout on it so that a server which stops answering can be given up on.
+	// OpenSSL reports that timeout as "want read", which is not a failure - it is
+	// the reason to ask again. Asked once, as this did, a cluster further away
+	// than that timeout could not be reached at all: at a third of a second each
+	// way the first flight of the handshake had not come back yet, and krtek said
+	// the handshake had failed.
+	var waiting: i64 = 0;
+	while (true) {
+		if (ssl.SSL_connect(session) == 1) {
+			break;
+		}
+		const said = ssl.SSL_get_error(session, -1);
+		if (said != ssl.ERROR_WANT_READ and said != ssl.ERROR_WANT_WRITE) {
+			var buffer: [256]u8 = undefined;
+			const text = ssl.lastError(&buffer);
+			try why.print(allocator, "the TLS handshake failed{s}{s}", .{
+				if (text.len != 0) ": " else "",
+				text,
+			});
+			return error.Tls;
+		}
+		if (!stream.asked()) {
+			try why.appendSlice(allocator, "given up on the TLS handshake");
+			return error.Tls;
+		}
+		waiting += READ_TIMEOUT_MS;
+		if (waiting >= READ_PATIENCE_MS) {
+			try why.appendSlice(allocator, "the server never finished the TLS handshake");
+			return error.Tls;
+		}
 	}
 	stream.ssl = session;
 }

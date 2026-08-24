@@ -318,7 +318,15 @@ pub const Db = struct {
 		}) catch {};
 	}
 
+	/// A statement is starting: the spinner is told, and the last reply is let go.
+	///
+	/// Every other driver here said so and this one did not, so the clock the
+	/// spinner counts from was whatever the last statement left behind - which for
+	/// a cluster, where a request can take seconds, is the one place it mattered.
 	fn begin(self: *Db) void {
+		if (self.progress) |progress| {
+			progress.starting();
+		}
 		self.last_error.clearRetainingCapacity();
 		_ = self.replies.reset(.retain_capacity);
 	}
