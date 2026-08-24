@@ -14,6 +14,7 @@ const std = @import("std");
 pub const sqlite = @import("sqlite.zig");
 pub const postgres = @import("postgres.zig");
 const mysql = @import("mysql.zig");
+pub const mssql = @import("mssql.zig");
 pub const redis = @import("redis.zig");
 pub const kafka = @import("kafka.zig");
 pub const s3 = @import("s3.zig");
@@ -35,6 +36,7 @@ pub const ssh = @import("ssh.zig");
 pub const net = @import("net.zig");
 pub const http = @import("http.zig");
 pub const ws = @import("ws.zig");
+pub const tds = @import("tds.zig");
 pub const clock = @import("clock.zig");
 pub const targets = @import("targets.zig");
 pub const typed = @import("typed.zig");
@@ -151,6 +153,7 @@ comptime {
 	_ = sqlite;
 	_ = postgres;
 	_ = mysql;
+	_ = mssql;
 	_ = redis;
 	_ = kafka;
 	_ = s3;
@@ -165,6 +168,7 @@ comptime {
 	_ = k8s_target;
 	_ = net;
 	_ = ws;
+	_ = tds;
 	_ = http;
 	_ = ssh;
 	_ = clock;
@@ -206,6 +210,13 @@ pub const Value = union(enum) {
 	float: f64,
 	text: []const u8,
 	blob: []const u8,
+
+	/// `Built` asks each of its cells what it is worth, because most drivers
+	/// keep something of their own in a row. A driver that already decided when
+	/// it read the bytes keeps these, and this is that answer.
+	pub fn asValue(self: Value) Value {
+		return self;
+	}
 };
 
 pub const Kind = enum { table, view };
@@ -288,6 +299,20 @@ pub const Caps = struct {
 	/// What to cast a value to in order to compare it as text. Every engine
 	/// spells it differently and MySQL does not know `TEXT` as a cast target.
 	text_cast: []const u8 = "TEXT",
+	/// What goes in front of a quoted string so the engine reads it as text in
+	/// the wide encoding rather than in whatever single-byte one the database
+	/// was created with. Only SQL Server needs it, and there it is not optional:
+	/// `'příklep'` written plainly loses the `ř` on the way in, silently, and the
+	/// row comes back looking almost right.
+	text_prefix: []const u8 = "",
+	/// How a run of bytes is written into a statement. `x'` … `'` is what SQLite
+	/// and MySQL take; SQL Server writes `0x` and no quotes at all.
+	blob_prefix: []const u8 = "x'",
+	blob_suffix: []const u8 = "'",
+	/// How a page of rows is asked for. Three of the four SQL engines here take
+	/// `LIMIT n OFFSET m`; SQL Server takes the spelling the standard settled on
+	/// instead, and will not take it without something to sort by.
+	paging: enum { limit_offset, offset_fetch } = .limit_offset,
 	/// The engine takes SQL. When it does not, the interface asks for rows only
 	/// through `ask.Select` and changes them only through `ask.Change`, and what
 	/// the user writes in the editor is passed to the engine as its own kind of
@@ -345,6 +370,7 @@ pub const Rows = union(enum) {
 	sqlite: sqlite.Rows,
 	postgres: postgres.Rows,
 	mysql: mysql.Rows,
+	mssql: mssql.Rows,
 	redis: redis.Rows,
 	kafka: kafka.Rows,
 	s3: s3.Rows,
@@ -469,6 +495,7 @@ pub const Db = union(enum) {
 	sqlite: *sqlite.Db,
 	postgres: *postgres.Db,
 	mysql: *mysql.Db,
+	mssql: *mssql.Db,
 	redis: *redis.Db,
 	kafka: *kafka.Db,
 	s3: *s3.Db,
@@ -503,6 +530,9 @@ pub const Db = union(enum) {
 		}
 		if (mysql.owns(target)) {
 			return .{ .mysql = try mysql.Db.open(allocator, target, report) };
+		}
+		if (mssql.owns(target)) {
+			return .{ .mssql = try mssql.Db.open(allocator, target, report) };
 		}
 		if (isPostgresUrl(target)) {
 			return .{ .postgres = try postgres.Db.open(allocator, target, report) };
@@ -887,6 +917,7 @@ pub const Ddl = union(enum) {
 	sqlite: sqlite.Ddl,
 	postgres: postgres.Ddl,
 	mysql: mysql.Ddl,
+	mssql: mssql.Ddl,
 	redis: redis.Ddl,
 	kafka: kafka.Ddl,
 	s3: s3.Ddl,
@@ -980,6 +1011,42 @@ pub const Ddl = union(enum) {
 			try out.appendSlice(a, value);
 		}
 		try out.appendSlice(a, ");\n");
+	}
+
+	/// What a dump has to say before anything else, for an engine whose files
+	/// depend on a setting rather than only on what is in them. Optional.
+	pub fn prologue(self: Ddl, out: *List, a: std.mem.Allocator) !void {
+		switch (self) {
+			inline else => |driver| {
+				if (@hasDecl(@TypeOf(driver), "prologue")) {
+					return driver.prologue(out, a);
+				}
+			},
+		}
+	}
+
+	/// What a dump has to say before and after the rows of one table, for an
+	/// engine that needs telling. Optional, and only SQL Server has anything to
+	/// say: a column that numbers itself will not take a value until the table
+	/// has been told to accept one.
+	pub fn beforeRows(self: Ddl, out: *List, a: std.mem.Allocator, table: Table, cols: []const Column) !void {
+		switch (self) {
+			inline else => |driver| {
+				if (@hasDecl(@TypeOf(driver), "beforeRows")) {
+					return driver.beforeRows(out, a, table, cols);
+				}
+			},
+		}
+	}
+
+	pub fn afterRows(self: Ddl, out: *List, a: std.mem.Allocator, table: Table, cols: []const Column) !void {
+		switch (self) {
+			inline else => |driver| {
+				if (@hasDecl(@TypeOf(driver), "afterRows")) {
+					return driver.afterRows(out, a, table, cols);
+				}
+			},
+		}
 	}
 
 	/// Types offered in the column form.

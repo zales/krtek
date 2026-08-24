@@ -879,13 +879,20 @@ pub const App = struct {
 				try form.note("anything the engines take, as it stands - a libpq keyword string,");
 				try form.note("a scheme with a spelling of its own, a query this form does not know");
 			},
-			.postgres, .mysql => {
+			.postgres, .mysql, .mssql => {
 				try form.text("host", shape.host, 24);
 				try form.text("port", shape.port, 6);
 				form.sameLine();
 				try form.text("database", shape.name, 24);
 				try form.text("user", shape.user, 24);
-				try form.note("leave the port empty for the usual one, and the user for your own name");
+				// PostgreSQL and MySQL fall back to the name you are logged in as.
+				// SQL Server has no such idea - an empty user is a login it
+				// refuses, with `Login failed for user ''`, which reads like a bug
+				// rather than a field somebody left blank.
+				try form.note(if (shape.engine == .mssql)
+					"leave the port empty for the usual one; the user is not optional here"
+				else
+					"leave the port empty for the usual one, and the user for your own name");
 			},
 			.redis => {
 				try form.text("host", shape.host, 24);
@@ -2532,6 +2539,7 @@ pub const App = struct {
 		var out: std.ArrayListUnmanaged(u8) = .empty;
 		defer out.deinit(self.allocator);
 		try out.print(self.allocator, "-- krtek dump of {s}, {s}\n", .{ self.conn.describe(), self.conn.version() });
+		try self.conn.ddl().prologue(&out, self.allocator);
 
 		var written: usize = 0;
 		for (try self.conn.objects(scratch, self.grid.schema.items)) |object| {
@@ -2608,6 +2616,12 @@ pub const App = struct {
 		if (!self.conn.caps().speaks_sql) {
 			return self.dumpCommands(out, table, names);
 		}
+		const caps = self.conn.caps();
+		// What this table needs said before its rows, and afterwards. Asked for
+		// with the columns in hand, because whether anything is needed depends on
+		// them - a column that numbers itself is the case.
+		const defs = self.columnDefs(arena.allocator(), table.name) catch &[_]database.Column{};
+
 		var rows = (try self.conn.select(.{ .table = table })) orelse return;
 		defer rows.close();
 
@@ -2629,19 +2643,27 @@ pub const App = struct {
 					.null => try line.appendSlice(self.allocator, "NULL"),
 					.int => |v| try line.print(self.allocator, "{d}", .{v}),
 					.float => |v| try line.print(self.allocator, "{d}", .{v}),
-					.text => |t| try database.quote(&line, self.allocator, t),
+					.text => |t| {
+						// The prefix that says which encoding this is in, where the
+						// engine has one: without it a dump replayed into SQL Server
+						// loses every character its codepage does not have.
+						try line.appendSlice(self.allocator, caps.text_prefix);
+						try database.quote(&line, self.allocator, t);
+					},
 					.blob => |b| {
-						try line.appendSlice(self.allocator, "x'");
+						try line.appendSlice(self.allocator, caps.blob_prefix);
 						for (b) |byte| {
 							try line.print(self.allocator, "{x:0>2}", .{byte});
 						}
-						try line.append(self.allocator, '\'');
+						try line.appendSlice(self.allocator, caps.blob_suffix);
 					},
 				}
 			}
 			if (out.items.len == 0 or std.mem.endsWith(u8, out.items, ";\n") or std.mem.endsWith(u8, out.items, "\n\n")) {}
 			if (first == false and std.mem.endsWith(u8, out.items, "\n") and !std.mem.endsWith(u8, out.items, ",\n")) {
-				try out.appendSlice(self.allocator, "\nINSERT INTO ");
+				try out.append(self.allocator, '\n');
+				try self.conn.ddl().beforeRows(out, self.allocator, table, defs);
+				try out.appendSlice(self.allocator, "INSERT INTO ");
 				try database.quoteTable(out, self.allocator, table);
 				try out.appendSlice(self.allocator, " (");
 				for (names, 0..) |name, i| {
@@ -2659,6 +2681,7 @@ pub const App = struct {
 		}
 		if (!first) {
 			try out.appendSlice(self.allocator, ";\n");
+			try self.conn.ddl().afterRows(out, self.allocator, table, defs);
 		}
 	}
 

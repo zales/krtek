@@ -172,6 +172,20 @@ pub const ssl = struct {
 	// writing them out to temporary files to hand OpenSSL a path would put a
 	// private key on somebody's disk for as long as the program ran.
 	pub extern fn BIO_new_mem_buf(buffer: [*]const u8, length: c_int) ?*anyopaque;
+	// A handshake that does not go straight down a socket needs somewhere to put
+	// the records instead: TDS carries them inside its own packets, so OpenSSL
+	// writes into memory and the driver does the posting.
+	pub extern fn BIO_s_mem() ?*anyopaque;
+	pub extern fn BIO_new(method: ?*anyopaque) ?*anyopaque;
+	pub extern fn BIO_write(bio: ?*anyopaque, data: [*]const u8, length: c_int) c_int;
+	pub extern fn BIO_read(bio: ?*anyopaque, into: [*]u8, length: c_int) c_int;
+	pub extern fn BIO_ctrl(bio: ?*anyopaque, cmd: c_int, larg: c_long, parg: ?*anyopaque) c_long;
+	pub extern fn SSL_set_bio(session: ?*anyopaque, read_bio: ?*anyopaque, write_bio: ?*anyopaque) void;
+	pub extern fn SSL_set_connect_state(session: ?*anyopaque) void;
+	pub extern fn SSL_get_version(session: ?*anyopaque) [*:0]const u8;
+pub extern fn SSL_do_handshake(session: ?*anyopaque) c_int;
+	/// BIO_CTRL_PENDING: how much is waiting to be read out of a memory BIO.
+	pub const CTRL_PENDING: c_int = 10;
 	pub extern fn BIO_free(bio: ?*anyopaque) c_int;
 	pub extern fn PEM_read_bio_X509(bio: ?*anyopaque, out: ?*anyopaque, callback: ?*anyopaque, user: ?*anyopaque) ?*anyopaque;
 	pub extern fn PEM_read_bio_PrivateKey(bio: ?*anyopaque, out: ?*anyopaque, callback: ?*anyopaque, user: ?*anyopaque) ?*anyopaque;
@@ -305,7 +319,7 @@ pub fn startTls(allocator: std.mem.Allocator, stream: *Stream, host: []const u8,
 /// Every certificate in a PEM bundle into the context's own store, and how many
 /// there were. A bundle may hold several and all of them count: an intermediate
 /// left out is a chain that does not reach the root.
-fn trustPem(allocator: std.mem.Allocator, ctx: ?*anyopaque, pem: []const u8, why: *List) !usize {
+pub fn trustPem(allocator: std.mem.Allocator, ctx: ?*anyopaque, pem: []const u8, why: *List) !usize {
 	const bio = ssl.BIO_new_mem_buf(pem.ptr, @intCast(pem.len)) orelse return error.Tls;
 	defer _ = ssl.BIO_free(bio);
 	const store = ssl.SSL_CTX_get_cert_store(ctx) orelse return error.Tls;

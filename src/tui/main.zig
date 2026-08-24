@@ -17,6 +17,7 @@ const usage =
 	\\usage: krtek [database.db]
 	\\       krtek postgres://user@host:port/database
 	\\       krtek mysql://user@host:port/database
+	\\       krtek mssql://user@host:port/database
 	\\       krtek redis://host:port/index
 	\\       krtek kafka://host:port
 	\\       krtek kafka+ssl://user@host:port?mechanism=SCRAM-SHA-256

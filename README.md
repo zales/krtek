@@ -4,8 +4,8 @@
 
 A database manager for the terminal, written in Zig: what a graphical client
 does - browse, edit, alter, dump, import - on a text screen, and quicker, because
-everything is a key press. **SQLite, PostgreSQL, MySQL/MariaDB, Redis, Kafka, S3,
-Azure Blob, RabbitMQ, SFTP and Kubernetes**, behind one interface.
+everything is a key press. **SQLite, PostgreSQL, MySQL/MariaDB, SQL Server, Redis,
+Kafka, S3, Azure Blob, RabbitMQ, SFTP and Kubernetes**, behind one interface.
 
 *Krtek* is Czech for a mole: a small thing that digs through what is underneath
 and comes back up with what it found.
@@ -51,8 +51,8 @@ architectures. The `.deb` installs the binary, the man page and the copyright, a
 **Depends on nothing at all**, so it goes on any Debian or Ubuntu of any age.
 
 **It needs nothing installed.** SQLite, libpq, the MariaDB connector, libssh2 and
-OpenSSL are linked into the binary, and Redis, Kafka, S3, Azure Blob, RabbitMQ and
-the Kubernetes API are spoken directly - down to the WebSocket a shell in a
+OpenSSL are linked into the binary, and Redis, Kafka, S3, Azure Blob, RabbitMQ,
+the Kubernetes API and SQL Server's TDS are spoken directly - down to the WebSocket a shell in a
 container needs, so no `kubectl` either. The Linux
 builds are static against musl and run on any distribution - checked on Debian with nothing
 installed at all; the macOS builds leave only Apple's own libraries dynamic. That
@@ -66,6 +66,7 @@ zig build -Doptimize=ReleaseSafe
 ./zig-out/bin/krtek database.db
 ./zig-out/bin/krtek postgres://user@host:5432/database
 ./zig-out/bin/krtek mysql://user@host:3306/database
+./zig-out/bin/krtek mssql://user@host:1433/database
 ./zig-out/bin/krtek redis://host:6379/0
 ./zig-out/bin/krtek kafka://host:9092
 ./zig-out/bin/krtek s3://bucket
@@ -802,11 +803,15 @@ everything marked.
 **Schema.** Create a table, alter one, add an index or a foreign key, create a
 view or a trigger, rename, copy, empty or drop. `#` switches schema on PostgreSQL
 and database on MySQL, which is the same thing there. The type list in a form is
-the engine's own: `varchar(255)` on MySQL, `timestamptz` on PostgreSQL.
+the engine's own: `varchar(255)` on MySQL, `timestamptz` on PostgreSQL,
+`nvarchar(max)` on SQL Server.
 
 How an alter happens is the engine's business. PostgreSQL alters in place, one
 `ALTER TABLE` per difference; MySQL does too, with `CHANGE COLUMN`, which renames
-and retypes in one go. SQLite can only add, rename and drop a column, so
+and retypes in one go. SQL Server alters in place as well, but a rename is not a
+statement there at all - it is `sp_rename`, a stored procedure - and a default is
+a constraint of its own rather than part of the column, so changing a column's
+type leaves its default where it was. SQLite can only add, rename and drop a column, so
 anything else - a type, a default, a primary key, a foreign key - is done by
 [rebuilding the table](https://sqlite.org/lang_altertable.html): a new table, the
 rows copied over, the old name put back, the foreign keys carried across and the
@@ -834,6 +839,8 @@ permanent.
 | `src/db/sqlite.zig` | the SQLite driver: pragmas and the table rebuild |
 | `src/db/postgres.zig` | the PostgreSQL driver over libpq, single-row mode |
 | `src/db/mysql.zig` | the MySQL and MariaDB driver over the MariaDB connector |
+| `src/db/mssql.zig` | the SQL Server driver: T-SQL, `sys.*` and the schema statements |
+| `src/db/tds.zig` | TDS itself - packets, the handshake inside them, the token stream |
 | `src/db/redis.zig` | the Redis driver: RESP straight over a socket, no library |
 | `src/sqlite.zig` | the SQLite C declarations |
 | `src/tui/term.zig` | the terminal: a thin adapter over libvaxis |

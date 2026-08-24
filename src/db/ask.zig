@@ -146,7 +146,19 @@ pub fn renderSelect(out: *List, a: std.mem.Allocator, select: Select, caps: db.C
 			}
 		}
 		if (select.limit != 0) {
-			try out.print(a, " LIMIT {d} OFFSET {d}", .{ select.limit, select.offset });
+			switch (caps.paging) {
+				.limit_offset => try out.print(a, " LIMIT {d} OFFSET {d}", .{ select.limit, select.offset }),
+				.offset_fetch => {
+					// A page is defined as the rows after the first n *in order*,
+					// and without an order the engine refuses to guess. Where the
+					// grid has nothing to sort by, an order that sorts by nothing
+					// is what says so.
+					if (select.order.len == 0) {
+						try out.appendSlice(a, " ORDER BY (SELECT NULL)");
+					}
+					try out.print(a, " OFFSET {d} ROWS FETCH NEXT {d} ROWS ONLY", .{ select.offset, select.limit });
+				},
+			}
 		}
 	}
 }
@@ -172,7 +184,7 @@ pub fn renderChange(out: *List, a: std.mem.Allocator, change: Change, caps: db.C
 				if (i != 0) {
 					try out.appendSlice(a, ", ");
 				}
-				try renderValue(out, a, cell);
+				try renderValue(out, a, cell, caps);
 			}
 			try out.append(a, ')');
 		},
@@ -186,7 +198,7 @@ pub fn renderChange(out: *List, a: std.mem.Allocator, change: Change, caps: db.C
 				}
 				try db.quoteName(out, a, cell.column);
 				try out.appendSlice(a, " = ");
-				try renderValue(out, a, cell);
+				try renderValue(out, a, cell, caps);
 			}
 			try renderWhere(out, a, change.where, "", false, caps);
 		},
@@ -198,7 +210,7 @@ pub fn renderChange(out: *List, a: std.mem.Allocator, change: Change, caps: db.C
 	}
 }
 
-fn renderValue(out: *List, a: std.mem.Allocator, item: Cell) !void {
+fn renderValue(out: *List, a: std.mem.Allocator, item: Cell, caps: db.Caps) !void {
 	const value = item.value orelse {
 		try out.appendSlice(a, "NULL");
 		return;
@@ -206,6 +218,7 @@ fn renderValue(out: *List, a: std.mem.Allocator, item: Cell) !void {
 	if (item.raw) {
 		try out.appendSlice(a, value);
 	} else {
+		try out.appendSlice(a, caps.text_prefix);
 		try db.quote(out, a, value);
 	}
 }
@@ -231,6 +244,7 @@ fn renderWhere(out: *List, a: std.mem.Allocator, where: []const Filter, text: []
 		}
 		try out.appendSlice(a, filter.op.sql());
 		if (filter.op.takesValue()) {
+			try out.appendSlice(a, caps.text_prefix);
 			try db.quote(out, a, filter.value);
 		}
 	}
@@ -273,6 +287,12 @@ const testing = std.testing;
 fn rendered(select: Select) ![]u8 {
 	var out: List = .empty;
 	try renderSelect(&out, testing.allocator, select, .{});
+	return out.toOwnedSlice(testing.allocator);
+}
+
+fn renderedAs(select: Select, caps: db.Caps) ![]u8 {
+	var out: List = .empty;
+	try renderSelect(&out, testing.allocator, select, caps);
 	return out.toOwnedSlice(testing.allocator);
 }
 
@@ -417,4 +437,53 @@ test "picking one value out of an identity" {
 	try testing.expectEqualStrings("2", only(&where, "partition").?);
 	try testing.expect(only(&where, "offset") == null); // not an equality
 	try testing.expect(only(&where, "nothing") == null);
+}
+
+test "a page is asked for the way the engine spells it" {
+	const select = Select{ .table = .{ .name = "books" }, .order = "year", .limit = 50, .offset = 100 };
+	const standard = try renderedAs(select, .{ .paging = .offset_fetch });
+	defer testing.allocator.free(standard);
+	try testing.expectEqualStrings(
+		"SELECT * FROM \"books\" ORDER BY \"year\" OFFSET 100 ROWS FETCH NEXT 50 ROWS ONLY",
+		standard,
+	);
+	// Nothing to sort by, and the standard spelling will not have that - so an
+	// order that sorts by nothing is written in.
+	const unordered = try renderedAs(.{ .table = .{ .name = "books" }, .limit = 10 }, .{ .paging = .offset_fetch });
+	defer testing.allocator.free(unordered);
+	try testing.expectEqualStrings(
+		"SELECT * FROM \"books\" ORDER BY (SELECT NULL) OFFSET 0 ROWS FETCH NEXT 10 ROWS ONLY",
+		unordered,
+	);
+}
+
+test "text carries the prefix that says which encoding it is in" {
+	// Without the N a value written into an nvarchar column goes through the
+	// database's single-byte codepage on the way, and `ř` does not survive it.
+	const sql = try renderedAs(.{
+		.table = .{ .name = "zbozi" },
+		.where = &.{.{ .column = "nazev", .op = .like, .value = "%vrtačka%" }},
+	}, .{ .text_prefix = "N" });
+	defer testing.allocator.free(sql);
+	try testing.expectEqualStrings(
+		"SELECT * FROM \"zbozi\" WHERE \"nazev\" LIKE N'%vrtačka%'",
+		sql,
+	);
+
+	var out: List = .empty;
+	defer out.deinit(testing.allocator);
+	try renderChange(&out, testing.allocator, .{
+		.kind = .update,
+		.table = .{ .name = "zbozi" },
+		.cells = &.{
+			.{ .column = "nazev", .value = "příklep" },
+			.{ .column = "zalozeno", .value = "SYSUTCDATETIME()", .raw = true },
+		},
+		.where = &.{.{ .column = "id", .value = "2" }},
+	}, .{ .text_prefix = "N" });
+	// The written-out expression is not a string and does not take the prefix.
+	try testing.expectEqualStrings(
+		"UPDATE \"zbozi\" SET \"nazev\" = N'příklep', \"zalozeno\" = SYSUTCDATETIME() WHERE \"id\" = N'2'",
+		out.items,
+	);
 }

@@ -79,6 +79,7 @@ pub const Engine = enum {
 	sqlite,
 	postgres,
 	mysql,
+	mssql,
 	redis,
 	kafka,
 	s3,
@@ -94,6 +95,7 @@ pub const Engine = enum {
 			.sqlite => "SQLite",
 			.postgres => "PostgreSQL",
 			.mysql => "MySQL",
+			.mssql => "SQL Server",
 			.redis => "Redis",
 			.kafka => "Kafka",
 			.s3 => "S3",
@@ -118,8 +120,9 @@ pub const Engine = enum {
 
 /// In the order the form offers them, most used first.
 pub const ENGINES = [_][]const u8{
-	"SQLite",   "PostgreSQL", "MySQL", "Redis",      "Kafka", "S3",
-	"Azure",    "RabbitMQ",   "SFTP",  "Kubernetes", "target",
+	"SQLite", "PostgreSQL", "MySQL",      "SQL Server", "Redis",  "Kafka",
+	"S3",     "Azure",      "RabbitMQ",   "SFTP",       "Kubernetes",
+	"target",
 };
 
 test "the engine list offers every engine there is" {
@@ -188,6 +191,11 @@ pub fn engineOf(target: []const u8) Engine {
 	{
 		return .mysql;
 	}
+	if (std.ascii.startsWithIgnoreCase(target, "mssql://") or
+		std.ascii.startsWithIgnoreCase(target, "sqlserver://"))
+	{
+		return .mssql;
+	}
 	if (std.ascii.startsWithIgnoreCase(target, "postgres://") or
 		std.ascii.startsWithIgnoreCase(target, "postgresql://") or
 		std.mem.indexOf(u8, target, "dbname=") != null or
@@ -231,6 +239,7 @@ pub fn compose(arena: std.mem.Allocator, shape: Shape) ![]const u8 {
 	try out.appendSlice(arena, switch (shape.engine) {
 		.postgres => "postgres://",
 		.mysql => "mysql://",
+		.mssql => "mssql://",
 		.redis => "redis://",
 		.kafka => if (shape.tls) "kafka+ssl://" else "kafka://",
 		// S3 and Azure are TLS unless somebody says otherwise, which is the other
@@ -1038,6 +1047,21 @@ test "the parts make the target back" {
 	// SQLite is a path and nothing else, and `target` is whatever was typed.
 	try std.testing.expectEqualStrings("notes.db", try compose(a, .{ .engine = .sqlite, .path = "notes.db" }));
 	try std.testing.expectEqualStrings("host=h dbname=d", try compose(a, .{ .engine = .other, .path = "host=h dbname=d" }));
+}
+
+test "a SQL Server target survives being taken apart and put back" {
+	var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+	defer arena.deinit();
+	const a = arena.allocator();
+	// The rule the form depends on: what comes back has to be what went in, or
+	// editing a connection quietly rewrites it.
+	const target = "mssql://sa@sql.example:1433/objednavky";
+	const shape = decompose(a, target).?;
+	try std.testing.expectEqual(Engine.mssql, shape.engine);
+	try std.testing.expectEqualStrings("sa", shape.user);
+	try std.testing.expectEqualStrings("objednavky", shape.name);
+	try std.testing.expectEqualStrings(target, try compose(a, shape));
+	try std.testing.expectEqualStrings("SQL Server", (Connection{ .name = "a", .target = target }).engine());
 }
 
 test "every engine the form offers is one it knows" {
