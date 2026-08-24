@@ -1,0 +1,71 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="868" height="298" viewBox="0 0 868 298" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13.0">
+<rect width="100%" height="100%" rx="8" fill="#111114"/>
+<rect x="14.0" y="14.0" width="59.3" height="18.0" fill="#26262c"/>
+<rect x="72.8" y="14.0" width="185.3" height="18.0" fill="#26262c"/>
+<rect x="257.6" y="14.0" width="596.9" height="18.0" fill="#26262c"/>
+<rect x="232.4" y="50.0" width="395.3" height="18.0" fill="#26262c"/>
+<rect x="627.2" y="50.0" width="227.3" height="18.0" fill="#26262c"/>
+<rect x="232.4" y="68.0" width="34.1" height="18.0" fill="#8aa7f0"/>
+<rect x="266.0" y="68.0" width="160.1" height="18.0" fill="#4c4c56"/>
+<rect x="425.6" y="68.0" width="202.1" height="18.0" fill="#4c4c56"/>
+<rect x="14.0" y="86.0" width="193.7" height="18.0" fill="#4c4c56"/>
+<rect x="207.2" y="86.0" width="17.3" height="18.0" fill="#4c4c56"/>
+<rect x="14.0" y="248.0" width="487.7" height="18.0" fill="#26262c"/>
+<rect x="501.2" y="248.0" width="353.3" height="18.0" fill="#26262c"/>
+<text x="14.0" y="27.3" fill="#e0e0e6" font-weight="600" xml:space="preserve" textLength="58.8" lengthAdjust="spacing"> krtek </text>
+<text x="72.8" y="27.3" fill="#8aa7f0" xml:space="preserve" textLength="184.8" lengthAdjust="spacing">sa@127.0.0.1:1434/demo</text>
+<text x="257.6" y="27.3" fill="#9a9aa6" xml:space="preserve" textLength="596.4" lengthAdjust="spacing">                           SQL Server 16.0.4265.3 Developer  3 objects </text>
+<text x="14.0" y="45.3" fill="#9a9aa6" xml:space="preserve" textLength="67.2" lengthAdjust="spacing"> SCHEMA </text>
+<text x="81.2" y="45.3" fill="#8aa7f0" xml:space="preserve" textLength="25.2" lengthAdjust="spacing">dbo</text>
+<text x="106.4" y="45.3" fill="#7c7c88" xml:space="preserve" textLength="126.0" lengthAdjust="spacing">             #│</text>
+<text x="232.4" y="45.3" fill="#8aa7f0" font-weight="600" xml:space="preserve" textLength="50.4" lengthAdjust="spacing"> zbozi</text>
+<text x="282.8" y="45.3" fill="#9a9aa6" xml:space="preserve" textLength="571.2" lengthAdjust="spacing">  1-10 of 10   page 1/1                                             </text>
+<text x="14.0" y="63.3" fill="#e0e0e6" xml:space="preserve" textLength="201.6" lengthAdjust="spacing"> ▪ objednavky           </text>
+<text x="215.6" y="63.3" fill="#7c7c88" xml:space="preserve" textLength="16.8" lengthAdjust="spacing">0│</text>
+<text x="232.4" y="63.3" fill="#9a9aa6" font-weight="600" xml:space="preserve" textLength="394.8" lengthAdjust="spacing"> id  nazev              cena      dph   skladem</text>
+<text x="14.0" y="81.3" fill="#e0e0e6" xml:space="preserve" textLength="201.6" lengthAdjust="spacing"> ▪ zakaznici            </text>
+<text x="215.6" y="81.3" fill="#7c7c88" xml:space="preserve" textLength="16.8" lengthAdjust="spacing">0│</text>
+<text x="232.4" y="81.3" fill="#111114" xml:space="preserve" textLength="33.6" lengthAdjust="spacing">   1</text>
+<text x="266.0" y="81.3" fill="#e0e0e6" xml:space="preserve" textLength="159.6" lengthAdjust="spacing"> příklepová vrtačka</text>
+<text x="425.6" y="81.3" fill="#63a8d8" xml:space="preserve" textLength="201.6" lengthAdjust="spacing"> 2499.0000 21.00      12</text>
+<text x="14.0" y="99.3" fill="#e0e0e6" xml:space="preserve" textLength="193.2" lengthAdjust="spacing"> ▪ zbozi               </text>
+<text x="207.2" y="99.3" fill="#9a9aa6" xml:space="preserve" textLength="16.8" lengthAdjust="spacing">10</text>
+<text x="224.0" y="99.3" fill="#7c7c88" xml:space="preserve" textLength="8.4" lengthAdjust="spacing">│</text>
+<text x="232.4" y="99.3" fill="#63a8d8" xml:space="preserve" textLength="33.6" lengthAdjust="spacing">   2</text>
+<text x="266.0" y="99.3" fill="#e0e0e6" xml:space="preserve" textLength="159.6" lengthAdjust="spacing"> šroubovák křížový </text>
+<text x="425.6" y="99.3" fill="#63a8d8" xml:space="preserve" textLength="201.6" lengthAdjust="spacing">  129.5000 21.00     240</text>
+<text x="224.0" y="117.3" fill="#7c7c88" xml:space="preserve" textLength="8.4" lengthAdjust="spacing">│</text>
+<text x="232.4" y="117.3" fill="#63a8d8" xml:space="preserve" textLength="33.6" lengthAdjust="spacing">   3</text>
+<text x="266.0" y="117.3" fill="#e0e0e6" xml:space="preserve" textLength="159.6" lengthAdjust="spacing"> kladivo 500 g     </text>
+<text x="425.6" y="117.3" fill="#63a8d8" xml:space="preserve" textLength="201.6" lengthAdjust="spacing">  349.0000 21.00      37</text>
+<text x="224.0" y="135.3" fill="#7c7c88" xml:space="preserve" textLength="8.4" lengthAdjust="spacing">│</text>
+<text x="232.4" y="135.3" fill="#63a8d8" xml:space="preserve" textLength="33.6" lengthAdjust="spacing">   4</text>
+<text x="266.0" y="135.3" fill="#e0e0e6" xml:space="preserve" textLength="159.6" lengthAdjust="spacing"> pilník plochý     </text>
+<text x="425.6" y="135.3" fill="#63a8d8" xml:space="preserve" textLength="201.6" lengthAdjust="spacing">   89.9000 21.00       0</text>
+<text x="224.0" y="153.3" fill="#7c7c88" xml:space="preserve" textLength="8.4" lengthAdjust="spacing">│</text>
+<text x="232.4" y="153.3" fill="#63a8d8" xml:space="preserve" textLength="33.6" lengthAdjust="spacing">   5</text>
+<text x="266.0" y="153.3" fill="#e0e0e6" xml:space="preserve" textLength="159.6" lengthAdjust="spacing"> metr svinovací 5 m</text>
+<text x="425.6" y="153.3" fill="#63a8d8" xml:space="preserve" textLength="201.6" lengthAdjust="spacing">  199.0000 21.00      88</text>
+<text x="224.0" y="171.3" fill="#7c7c88" xml:space="preserve" textLength="8.4" lengthAdjust="spacing">│</text>
+<text x="232.4" y="171.3" fill="#63a8d8" xml:space="preserve" textLength="33.6" lengthAdjust="spacing">   6</text>
+<text x="266.0" y="171.3" fill="#e0e0e6" xml:space="preserve" textLength="159.6" lengthAdjust="spacing"> úhelník 300 mm    </text>
+<text x="425.6" y="171.3" fill="#63a8d8" xml:space="preserve" textLength="201.6" lengthAdjust="spacing">  259.0000 21.00      15</text>
+<text x="224.0" y="189.3" fill="#7c7c88" xml:space="preserve" textLength="8.4" lengthAdjust="spacing">│</text>
+<text x="232.4" y="189.3" fill="#63a8d8" xml:space="preserve" textLength="33.6" lengthAdjust="spacing">   7</text>
+<text x="266.0" y="189.3" fill="#e0e0e6" xml:space="preserve" textLength="159.6" lengthAdjust="spacing"> sada bitů 32 ks   </text>
+<text x="425.6" y="189.3" fill="#63a8d8" xml:space="preserve" textLength="201.6" lengthAdjust="spacing">  599.0000 21.00       6</text>
+<text x="224.0" y="207.3" fill="#7c7c88" xml:space="preserve" textLength="8.4" lengthAdjust="spacing">│</text>
+<text x="232.4" y="207.3" fill="#63a8d8" xml:space="preserve" textLength="33.6" lengthAdjust="spacing">   8</text>
+<text x="266.0" y="207.3" fill="#e0e0e6" xml:space="preserve" textLength="159.6" lengthAdjust="spacing"> vodováha 600 mm   </text>
+<text x="425.6" y="207.3" fill="#63a8d8" xml:space="preserve" textLength="201.6" lengthAdjust="spacing">  449.0000 21.00       0</text>
+<text x="224.0" y="225.3" fill="#7c7c88" xml:space="preserve" textLength="8.4" lengthAdjust="spacing">│</text>
+<text x="232.4" y="225.3" fill="#63a8d8" xml:space="preserve" textLength="33.6" lengthAdjust="spacing">   9</text>
+<text x="266.0" y="225.3" fill="#e0e0e6" xml:space="preserve" textLength="159.6" lengthAdjust="spacing"> kleště kombinované</text>
+<text x="425.6" y="225.3" fill="#63a8d8" xml:space="preserve" textLength="201.6" lengthAdjust="spacing">  279.0000 21.00      54</text>
+<text x="224.0" y="243.3" fill="#7c7c88" xml:space="preserve" textLength="8.4" lengthAdjust="spacing">│</text>
+<text x="232.4" y="243.3" fill="#63a8d8" xml:space="preserve" textLength="33.6" lengthAdjust="spacing">  10</text>
+<text x="266.0" y="243.3" fill="#e0e0e6" xml:space="preserve" textLength="159.6" lengthAdjust="spacing"> ochranné brýle    </text>
+<text x="425.6" y="243.3" fill="#63a8d8" xml:space="preserve" textLength="201.6" lengthAdjust="spacing">  149.0000 12.00     130</text>
+<text x="14.0" y="261.3" fill="#71c68f" xml:space="preserve" textLength="487.2" lengthAdjust="spacing"> sa@127.0.0.1:1434/demo - SQL Server 16.0.4265.3 Developer</text>
+<text x="14.0" y="279.3" fill="#7c7c88" xml:space="preserve" textLength="840.0" lengthAdjust="spacing"> i insert   e edit   x delete   o sort   v whole value   space mark   ctrl+k commands               </text>
+</svg>

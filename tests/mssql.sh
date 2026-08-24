@@ -3,6 +3,9 @@
 #
 #     zig build && ./tests/mssql.sh
 #
+# Run it with SHOTS=1 to regenerate the screenshot in docs/ that needs a server;
+# everything else in there comes from a SQLite file and tests/shots.sh.
+#
 # This one is worth more than the other suites, because this driver speaks the
 # protocol itself rather than through a library. Nothing here is checked by a
 # vendor's code: the packet framing, the TLS handshake that happens inside those
@@ -232,5 +235,46 @@ screen "and the connection is still good afterwards" "po_zruseni" \
 # back, and every schema statement this program writes run as written.
 echo "the unit tests that want a server"
 KRTEK_MSSQL="127.0.0.1:$PORT:sa:$PASSWORD" zig build test
+
+# The screenshot on the website and in the README, which needs a server with
+# something interesting in it - so it is regenerated here rather than in
+# tests/shots.sh, where everything else comes from a SQLite file.
+if [ -n "${SHOTS:-}" ]; then
+	# A shop rather than the three rows the checks above are happy with: a
+	# screenshot has to show what a screen is like, and three rows of two columns
+	# shows nothing. Built from scratch rather than patched into the fixture,
+	# because everything above has already had its way with that one - and a
+	# screenshot that depends on what a test left behind is one that changes
+	# whenever a test does.
+	$SQLCMD -b -Q "
+	ALTER DATABASE demo SET SINGLE_USER WITH ROLLBACK IMMEDIATE;
+	DROP DATABASE demo;
+	CREATE DATABASE demo;"
+	$SQLCMD -b -d demo -I -Q "CREATE SCHEMA sklad"
+	$SQLCMD -b -d demo -I -Q "
+	CREATE TABLE dbo.zbozi (
+	  id int IDENTITY(1,1) NOT NULL PRIMARY KEY,
+	  nazev nvarchar(80) NOT NULL,
+	  cena money NOT NULL DEFAULT 0,
+	  dph decimal(4,2) NOT NULL DEFAULT 21.00,
+	  skladem int NOT NULL DEFAULT 0
+	);
+	CREATE TABLE dbo.objednavky (id int IDENTITY(1,1) NOT NULL PRIMARY KEY, stav nvarchar(20) NOT NULL);
+	CREATE TABLE dbo.zakaznici (id int IDENTITY(1,1) NOT NULL PRIMARY KEY, jmeno nvarchar(80) NOT NULL);
+	CREATE TABLE sklad.pohyby (id bigint IDENTITY(1,1) NOT NULL PRIMARY KEY, zbozi_id int NOT NULL, zmena int NOT NULL);"
+	$SQLCMD -b -d demo -I -Q "
+	SET NOCOUNT ON;
+	INSERT INTO dbo.zbozi (nazev, cena, dph, skladem) VALUES
+	 (N'příklepová vrtačka', 2499.00, 21.00, 12), (N'šroubovák křížový', 129.50, 21.00, 240),
+	 (N'kladivo 500 g', 349.00, 21.00, 37),       (N'pilník plochý', 89.90, 21.00, 0),
+	 (N'metr svinovací 5 m', 199.00, 21.00, 88),  (N'úhelník 300 mm', 259.00, 21.00, 15),
+	 (N'sada bitů 32 ks', 599.00, 21.00, 6),      (N'vodováha 600 mm', 449.00, 21.00, 0),
+	 (N'kleště kombinované', 279.00, 21.00, 54),  (N'ochranné brýle', 149.00, 12.00, 130);"
+	# The last table in the list, reached with a key rather than by filtering: a
+	# filter sits in the sidebar's header, which is where the schema is - and the
+	# schema is half of what this shot is for.
+	SHOT_COLS=100 SHOT_ROWS=15 python3 tests/shot.py docs/sqlserver.svg \
+		"$ROOT/demo" '{sleep}' '{end}' '{enter}' '{sleep}'
+fi
 
 echo "all good"

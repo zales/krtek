@@ -75,6 +75,7 @@ footer { margin-top: 3.5rem; padding-top: 1.5rem; border-top: 1px solid var(--li
 		<span class="engine">SQLite</span>
 		<span class="engine">PostgreSQL</span>
 		<span class="engine">MySQL / MariaDB</span>
+		<span class="engine">SQL Server</span>
 		<span class="engine">Redis</span>
 		<span class="engine">Kafka</span>
 		<span class="engine">S3</span>
@@ -118,8 +119,9 @@ everyone who already trusts it.</p>
 
 <p><strong>It needs nothing installed.</strong> SQLite, libpq, the MariaDB
 connector, libssh2 and OpenSSL are linked into the binary, and Redis, Kafka, S3,
-Azure Blob, RabbitMQ and the Kubernetes API are spoken directly - down to the
-WebSocket a shell in a container needs, so no <code>kubectl</code> either.
+Azure Blob, RabbitMQ, the Kubernetes API and SQL Server's TDS are spoken
+directly - down to the WebSocket a shell in a container needs, so no
+<code>kubectl</code> either.
 The Linux builds are static against musl and run on any distribution; the macOS
 builds leave only Apple's own libraries dynamic.</p>
 
@@ -143,6 +145,15 @@ builds leave only Apple's own libraries dynamic.</p>
 	<figcaption>Connections are saved, and each one says where its password may be
 	kept: nowhere, the config file, or the macOS keychain. Every context of your
 	kubeconfig is offered here too, without being saved into anything.</figcaption>
+</figure>
+
+<figure>
+	<img src="sqlserver.svg" alt="a SQL Server table">
+	<figcaption>Every engine that speaks SQL is the same screen. SQL Server's
+	protocol is written out here rather than linked in - Microsoft's own driver may
+	not be repackaged and FreeTDS is LGPL - so <code>money</code> and
+	<code>decimal</code> stay digits instead of becoming floats, and text stays
+	text whatever the database's own codepage happens to hold.</figcaption>
 </figure>
 
 <h2>And a cluster is a database too</h2>

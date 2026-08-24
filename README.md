@@ -92,7 +92,7 @@ RabbitMQ, a file for SQLite. Nobody has to remember that a MinIO bucket is
 `s3+http://key@host:9000/bucket` - the form writes the target out of what was
 typed.
 
-![adding a connection](docs/connection.svg)
+![a connection, opened for editing](docs/connection.svg)
 
 Editing takes a target apart again, and **only when putting it back together
 gives exactly the same string**. Anything this does not model - a libpq keyword
@@ -184,6 +184,13 @@ statement the engine reports.
 
 ![the structure of a table](docs/structure.svg)
 
+Every engine that speaks SQL is the same screen. Here it is a SQL Server, whose
+protocol this program writes out itself - schemas down the left, `money` and
+`decimal` kept as digits rather than turned into floats, and text that is text
+whatever the database's own codepage happens to hold.
+
+![a SQL Server table](docs/sqlserver.svg)
+
 A cluster is a database too: a resource kind is a table and a namespace is a
 schema.
 
@@ -197,7 +204,9 @@ and the events - with what can be done to it along the bottom.
 Those are not photographs of a terminal. The pty harness reproduces what the app
 drew, colours and all, and [tests/shot.py](tests/shot.py) writes that grid out as
 an SVG - so `./tests/shots.sh` regenerates every one of them, and they cannot
-quietly drift away from what the program does.
+quietly drift away from what the program does. The three that need a server -
+the SQL Server one and the two cluster ones - are taken by the suites that
+already bring one up, with `SHOTS=1`.
 
 ## Redis
 
@@ -985,6 +994,24 @@ because browsing messages is what this driver refuses to do.
 
 ```sh
 zig build && ./tests/rabbit.sh
+```
+
+[tests/mssql.sh](tests/mssql.sh) is worth more than the rest of these, because
+nothing in that driver is somebody else's code: the packet framing, the
+handshake, the login, the token stream and the types are all written here, and
+only a server can say they are right. Two of its checks are the unit tests that
+skip on a laptop and run when one is named - one reads back a row of every type
+worth having, the other runs every schema statement the driver knows how to
+write, as written. The rest drive the interface: a transaction that is really a
+transaction, an accent that survives being typed into a cell, and a statement
+that will not finish being stopped with the connection still working
+afterwards. The one that found three faults in a single run exports the table
+and replays the file with plain `sqlcmd` rather than through krtek, so the file
+has to stand on its own.
+
+```sh
+zig build && ./tests/mssql.sh
+SHOTS=1 ./tests/mssql.sh    # and the screenshot that needs a server
 ```
 
 [tests/sftp.sh](tests/sftp.sh) starts an ssh server, makes a key for it, and
