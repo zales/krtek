@@ -40,6 +40,18 @@ FAMILY = "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace"
 
 def capture(target, keys, rows, cols):
 	"""Run the app, feed it the keys, and hand back the screen it ended on."""
+	# No kubeconfig, unless whoever called set one up. The list of connections
+	# offers every context in ~/.kube/config, so a test or a screenshot taken on a
+	# machine that has one reaches - or publishes - somebody's real clusters.
+	#
+	# An empty file rather than a name that is not there: a KUBECONFIG naming only
+	# unreadable files falls through to ~/.kube/config, so pointing it at nothing
+	# is the same as not setting it at all.
+	if not os.environ.get("KUBECONFIG"):
+		empty = os.path.join(os.environ.get("XDG_CONFIG_HOME", "/tmp"), "empty-kubeconfig")
+		with open(empty, "w") as file:
+			file.write("apiVersion: v1\nkind: Config\nclusters: []\ncontexts: []\nusers: []\n")
+		os.environ["KUBECONFIG"] = empty
 	pid, fd = pty.fork()
 	if pid == 0:
 		os.execv(BINARY, ["krtek", target])

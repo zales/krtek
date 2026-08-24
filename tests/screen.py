@@ -227,13 +227,18 @@ def run(database, script):
 	# and `%2F` came from in a real person's saved connections.
 	if not os.environ.get("XDG_CONFIG_HOME"):
 		os.environ["XDG_CONFIG_HOME"] = tempfile.mkdtemp(prefix="krtek-screen-")
-	# And no kubeconfig, unless whoever called set one up. When a target fails to
-	# open, the app falls back to its list of connections - and that list is built
-	# partly from ~/.kube/config, so one stray {enter} in a key script connects to
-	# whatever cluster happens to be first. That is somebody's real infrastructure,
-	# and a test has no business being pointed at it.
+	# No kubeconfig, unless whoever called set one up. The list of connections
+	# offers every context in ~/.kube/config, so a test or a screenshot taken on a
+	# machine that has one reaches - or publishes - somebody's real clusters.
+	#
+	# An empty file rather than a name that is not there: a KUBECONFIG naming only
+	# unreadable files falls through to ~/.kube/config, so pointing it at nothing
+	# is the same as not setting it at all.
 	if not os.environ.get("KUBECONFIG"):
-		os.environ["KUBECONFIG"] = os.path.join(os.environ["XDG_CONFIG_HOME"], "no-kubeconfig")
+		empty = os.path.join(os.environ["XDG_CONFIG_HOME"], "empty-kubeconfig")
+		with open(empty, "w") as file:
+			file.write("apiVersion: v1\nkind: Config\nclusters: []\ncontexts: []\nusers: []\n")
+		os.environ["KUBECONFIG"] = empty
 
 	pid, fd = pty.fork()
 	if pid == 0:

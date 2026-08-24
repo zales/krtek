@@ -3,8 +3,8 @@
 <rect x="14.0" y="14.0" width="59.3" height="18.0" fill="#26262c"/>
 <rect x="72.8" y="14.0" width="109.7" height="18.0" fill="#26262c"/>
 <rect x="182.0" y="14.0" width="672.5" height="18.0" fill="#26262c"/>
-<rect x="14.0" y="68.0" width="202.1" height="18.0" fill="#2e2e36"/>
-<rect x="215.6" y="68.0" width="8.9" height="18.0" fill="#2e2e36"/>
+<rect x="14.0" y="68.0" width="202.1" height="18.0" fill="#4c4c56"/>
+<rect x="215.6" y="68.0" width="8.9" height="18.0" fill="#4c4c56"/>
 <rect x="14.0" y="230.0" width="252.5" height="18.0" fill="#26262c"/>
 <rect x="266.0" y="230.0" width="588.5" height="18.0" fill="#26262c"/>
 <text x="14.0" y="27.3" fill="#e0e0e6" font-weight="600" xml:space="preserve" textLength="58.8" lengthAdjust="spacing"> krtek </text>
@@ -17,7 +17,7 @@
 <text x="215.6" y="63.3" fill="#7c7c88" xml:space="preserve" textLength="16.8" lengthAdjust="spacing">4│</text>
 <text x="232.4" y="63.3" fill="#7c7c88" font-weight="600" xml:space="preserve" textLength="621.6" lengthAdjust="spacing"> COLUMNS                                                                  </text>
 <text x="14.0" y="81.3" fill="#e0e0e6" xml:space="preserve" textLength="201.6" lengthAdjust="spacing"> ▪ books                </text>
-<text x="215.6" y="81.3" fill="#7c7c88" xml:space="preserve" textLength="8.4" lengthAdjust="spacing">5</text>
+<text x="215.6" y="81.3" fill="#9a9aa6" xml:space="preserve" textLength="8.4" lengthAdjust="spacing">5</text>
 <text x="224.0" y="81.3" fill="#7c7c88" xml:space="preserve" textLength="8.4" lengthAdjust="spacing">│</text>
 <text x="232.4" y="81.3" fill="#e0e0e6" xml:space="preserve" textLength="201.6" lengthAdjust="spacing">  id                    </text>
 <text x="434.0" y="81.3" fill="#9a9aa6" xml:space="preserve" textLength="184.8" lengthAdjust="spacing">INTEGER               </text>

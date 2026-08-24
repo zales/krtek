@@ -5,12 +5,12 @@
 <rect x="182.0" y="14.0" width="672.5" height="18.0" fill="#26262c"/>
 <rect x="232.4" y="50.0" width="445.7" height="18.0" fill="#26262c"/>
 <rect x="677.6" y="50.0" width="176.9" height="18.0" fill="#26262c"/>
-<rect x="14.0" y="68.0" width="202.1" height="18.0" fill="#2e2e36"/>
-<rect x="215.6" y="68.0" width="8.9" height="18.0" fill="#2e2e36"/>
+<rect x="14.0" y="68.0" width="202.1" height="18.0" fill="#4c4c56"/>
+<rect x="215.6" y="68.0" width="8.9" height="18.0" fill="#4c4c56"/>
 <rect x="232.4" y="68.0" width="34.1" height="18.0" fill="#8aa7f0"/>
-<rect x="266.0" y="68.0" width="84.5" height="18.0" fill="#2e2e36"/>
-<rect x="350.0" y="68.0" width="235.7" height="18.0" fill="#2e2e36"/>
-<rect x="585.2" y="68.0" width="92.9" height="18.0" fill="#2e2e36"/>
+<rect x="266.0" y="68.0" width="84.5" height="18.0" fill="#4c4c56"/>
+<rect x="350.0" y="68.0" width="235.7" height="18.0" fill="#4c4c56"/>
+<rect x="585.2" y="68.0" width="92.9" height="18.0" fill="#4c4c56"/>
 <rect x="14.0" y="230.0" width="252.5" height="18.0" fill="#26262c"/>
 <rect x="266.0" y="230.0" width="588.5" height="18.0" fill="#26262c"/>
 <text x="14.0" y="27.3" fill="#e0e0e6" font-weight="600" xml:space="preserve" textLength="58.8" lengthAdjust="spacing"> krtek </text>
@@ -24,7 +24,7 @@
 <text x="215.6" y="63.3" fill="#7c7c88" xml:space="preserve" textLength="16.8" lengthAdjust="spacing">4│</text>
 <text x="232.4" y="63.3" fill="#9a9aa6" font-weight="600" xml:space="preserve" textLength="445.2" lengthAdjust="spacing"> id  author_id title                       year price</text>
 <text x="14.0" y="81.3" fill="#e0e0e6" xml:space="preserve" textLength="201.6" lengthAdjust="spacing"> ▪ books                </text>
-<text x="215.6" y="81.3" fill="#7c7c88" xml:space="preserve" textLength="8.4" lengthAdjust="spacing">5</text>
+<text x="215.6" y="81.3" fill="#9a9aa6" xml:space="preserve" textLength="8.4" lengthAdjust="spacing">5</text>
 <text x="224.0" y="81.3" fill="#7c7c88" xml:space="preserve" textLength="8.4" lengthAdjust="spacing">│</text>
 <text x="232.4" y="81.3" fill="#111114" xml:space="preserve" textLength="33.6" lengthAdjust="spacing">   1</text>
 <text x="266.0" y="81.3" fill="#63a8d8" xml:space="preserve" textLength="84.0" lengthAdjust="spacing">         1</text>

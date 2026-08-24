@@ -46,16 +46,24 @@ SQL
 CONFIG=/tmp/krtek-shots
 rm -rf "$CONFIG"
 mkdir -p "$CONFIG/krtek"
-{
-	printf '# krtek connections\n'
-	printf 'books\t%s\n' "$DB"
-	printf 'shop (docker)\tpostgres://postgres@127.0.0.1:5432/shop\n'
-	printf 'orders\tmysql://root@127.0.0.1:3306/orders\tkeychain\n'
-	printf 'cache\tredis://127.0.0.1:6379/0\n'
-	printf 'events\tkafka+ssl://alice@broker.example:9093\n'
-	printf 'photos\ts3://photos?region=eu-central-1\n'
-	printf 'broker\trabbit://guest@127.0.0.1:15672/%%2F\n'
-} > "$CONFIG/krtek/connections"
+
+# Written again just before the two shots that show it, because the app moves a
+# connection to the top of this file every time it opens one - so by the time
+# those shots are taken, the shots above have already put `books` first.
+demo_connections() {
+	{
+		printf '# krtek connections\n'
+		printf 'photos\ts3://photos?region=eu-central-1\n'
+		printf 'books\t%s\n' "$DB"
+		printf 'shop (docker)\tpostgres://postgres@127.0.0.1:5432/shop\n'
+		printf 'orders\tmysql://root@127.0.0.1:3306/orders\tkeychain\n'
+		printf 'warehouse\tmssql://sa@sql.example:1433/demo\tkeychain\n'
+		printf 'cache\tredis://127.0.0.1:6379/0\n'
+		printf 'events\tkafka+ssl://alice@broker.example:9093\n'
+		printf 'broker\trabbit://guest@127.0.0.1:15672/%%2F\n'
+	} > "$CONFIG/krtek/connections"
+}
+demo_connections
 export XDG_CONFIG_HOME="$CONFIG"
 trap 'rm -rf "$CONFIG"' EXIT
 
@@ -75,9 +83,14 @@ SHOT_ROWS=16 take editor "$DB" 's' 'select title, year, price from books' '{ente
 	"where year < 1950 -- the old ones" '{enter}' 'order by year desc'
 SHOT_ROWS=18 take palette "$DB" '{ctrl-k}' 'exp'
 # An empty target is what opens the list of connections.
+demo_connections
 SHOT_ROWS=17 take connections ''
 # The form asks which engine first, and the fields under it are that engine's.
-SHOT_ROWS=16 take connection '' 'a' 'photos' '{down}{right}{right}{right}{right}{right}' \
-	'{down}' 'photos' '{down}' 'eu-central-1'
+# Opened on the first connection in the list, so the engine is already the one
+# this is meant to show - rather than counting steps in the engine chooser, which
+# is what it did until an engine was added and this became a Kafka form with a
+# bucket typed into it.
+demo_connections
+SHOT_ROWS=16 take connection '' 'e'
 
 echo "screenshots in docs/"
