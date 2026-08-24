@@ -9,8 +9,10 @@ name: servers
 # Worth the minutes. Every bug found in these drivers lately was found by one of
 # these scripts and by nothing else: a listing signed the way the server does not
 # check it, an upload freed twice on the way out, a password prompt that repeated
-# itself instead of saying the password was refused. None of that is reachable
-# from a unit test, because none of it is wrong until something answers back.
+# itself instead of saying the password was refused, a connection freed twice
+# when a password was wrong, an accent dropped on the way into a table. None of
+# that is reachable from a unit test, because none of it is wrong until something
+# answers back.
 
 on:
   push:
@@ -28,7 +30,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        suite: [sqlite, azure, s3, rabbit, sftp, kafka, k8s]
+        suite: [sqlite, azure, s3, rabbit, sftp, kafka, k8s, mssql]
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4

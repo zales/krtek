@@ -204,14 +204,14 @@ jobs:
 
           cat > notes.md <<'NOTES'
           A database manager for the terminal: SQLite, PostgreSQL, MySQL/MariaDB,
-          Redis, Kafka, S3, Azure Blob, RabbitMQ, SFTP and Kubernetes, behind one
-          interface.
+          SQL Server, Redis, Kafka, S3, Azure Blob, RabbitMQ, SFTP and Kubernetes,
+          behind one interface.
 
           Every archive holds one binary that **needs nothing installed**. SQLite,
           libpq, the MariaDB connector, libssh2 and OpenSSL are linked into it; Redis,
-          Kafka, S3, Azure Blob, RabbitMQ and the Kubernetes API are spoken directly,
-          protocol and all - down to the WebSocket a shell in a container needs, so no
-          kubectl either.
+          Kafka, S3, Azure Blob, RabbitMQ, the Kubernetes API and SQL Server's TDS are
+          spoken directly, protocol and all - down to the WebSocket a shell in a
+          container needs, so no kubectl either.
 
           The Linux binaries are static against musl and run on any distribution. The
           macOS ones leave only Apple's own libraries dynamic. Both are built for a
