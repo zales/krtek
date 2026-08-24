@@ -121,6 +121,24 @@ Where an engine has its own password store - `~/.pgpass` for libpq, `~/.my.cnf`
 for MySQL, `PGPASSWORD` in the environment - that is better still, and it keeps
 working either way.
 
+**A connection can be marked read-only**, with `r` in the list or the toggle in
+the form. Nothing is written through one: no insert, no update, no delete, no
+schema statement, no upload and no removal of a file - and a statement typed in
+the editor is refused too, by the conservative test, so anything whose first word
+is not a read is taken to write. It is not a claim about the server; the account
+may be allowed to do all of it. It is about what this program will do with that
+connection, which is the useful thing to be able to say when a production
+database sits in the same list as half a dozen local ones and both are one
+`enter` away.
+
+The list says which connections are marked, so it is visible before connecting,
+and the header says so while one is open. A context from a kubeconfig can be
+marked as well: there is nowhere in a kubeconfig to keep the mark, so marking one
+saves a connection of `krtek`'s own with the same name and the same target -
+which is why the connection *form* still refuses to edit a found connection while
+this key does not. Renaming one leaves two answers to what a cluster is called;
+marking one leaves one.
+
 **Nothing is only discoverable by reading the key map.** `ctrl+k` opens a command
 palette: type a few words of what you want - `dro tab`, `expo`, `vacuum` - and it
 lists what matches with the letters that matched underlined, each with the key

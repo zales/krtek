@@ -425,6 +425,7 @@ fn onConnections(app: *App, key: Key) !void {
 			'q' => app.quit = true,
 			'a' => try app.openConnectionForm(false),
 			'e' => try app.openConnectionForm(true),
+			'r' => try app.toggleReadOnly(),
 			'd' => try app.forgetSaved(),
 			'j' => if (count != 0 and app.saved.at + 1 < count) {
 				app.saved.at += 1;
@@ -583,7 +584,7 @@ const SCHEMA_KEYS = [_]u21{ 'c', 'a', 'I', 'K', 'V', 'T', 'N', 'Y', 'X', 'D' };
 fn letter(app: *App, point: u21, size: term.Size) !void {
 	_ = size;
 	if (std.mem.indexOfScalar(u21, &SCHEMA_KEYS, point) != null) {
-		const refused = app.conn.caps().no_ddl;
+		const refused = app.caps().no_ddl;
 		if (refused.len != 0) {
 			app.complain("{s}", .{refused});
 			return;
@@ -925,7 +926,7 @@ fn edit(app: *App) !void {
 	}
 	// Before the value is typed rather than after: on an engine that cannot
 	// change a row, typing one in is time spent on an answer that was already no.
-	const refused = app.conn.caps().no_update;
+	const refused = app.caps().no_update;
 	if (refused.len != 0) {
 		app.complain("{s}", .{refused});
 		return;
@@ -999,6 +1000,11 @@ fn askRemove(app: *App) !void {
 	const count = if (pane.marked.items.len != 0) pane.marked.items.len else @as(usize, 1);
 	const one = pane.current() orelse return;
 	if (pane.marked.items.len == 0 and std.mem.eql(u8, one.name, "..")) {
+		return;
+	}
+	// Before the question rather than after the answer: asking "remove this?" and
+	// then refusing the yes is a worse way of saying no than saying it now.
+	if (!app.mayWriteTo(pane.place)) {
 		return;
 	}
 	try ask(app, .remove_files, " type y to remove: ");

@@ -264,6 +264,11 @@ const Saved = struct {
 	/// Which saved connection the open form is editing, so changing both its name
 	/// and its target replaces that entry instead of adding a second one.
 	editing: ?usize = null,
+	/// Whether the connection now open was marked as one nothing may be written
+	/// through. Kept here rather than asked of the list every time, because the
+	/// list can be edited while a connection is open and what is in force is what
+	/// was in force when it was opened.
+	read_only: bool = false,
 };
 
 /// What is being typed, and what is waiting on the answer.
@@ -502,6 +507,16 @@ pub const App = struct {
 		defer scratch.deinit();
 		self.owned_path = try self.allocator.dupe(u8, try conns.withoutPassword(scratch.allocator(), target));
 		self.path = self.owned_path;
+		// Whether this one is marked read-only, looked up by what it points at
+		// rather than by how it was reached: a target typed on the command line is
+		// the same database as the saved entry with that target, and marking it in
+		// the list would be worth nothing if a name on the command line went round
+		// it. Read once, here, so editing the list under an open connection cannot
+		// change what is in force in the middle of it.
+		self.saved.read_only = false;
+		if (self.saved.list.find(self.owned_path)) |at| {
+			self.saved.read_only = self.saved.list.items.items[at].read_only;
+		}
 		try self.setTable(null);
 		self.grid.schema.clearRetainingCapacity();
 		try self.firstSchema();
@@ -539,11 +554,11 @@ pub const App = struct {
 		// Not a list of keys: the footer has one, and saying it twice on one screen
 		// teaches nobody anything the second time. What is worth saying here is what
 		// this panel *is*, which is not the same thing on every engine.
-		const caps = self.conn.caps();
-		if (caps.speaks_sql) {
+		const allowed = self.caps();
+		if (allowed.speaks_sql) {
 			self.say("several statements at once - each one is reported on its own", .{});
 		} else {
-			self.say("{s} commands here, not SQL", .{if (caps.label.len != 0) caps.label else "engine"});
+			self.say("{s} commands here, not SQL", .{if (allowed.label.len != 0) allowed.label else "engine"});
 		}
 	}
 
@@ -814,6 +829,52 @@ pub const App = struct {
 	}
 
 	/// The form for adding or editing a connection.
+	/// Mark the connection under the cursor as one nothing may be written
+	/// through, or unmark it.
+	pub fn toggleReadOnly(self: *App) !void {
+		if (self.saved.at >= self.saved.list.items.items.len) {
+			self.complain("there is nothing to mark yet - press a to add a connection", .{});
+			return;
+		}
+		const item = self.saved.list.items.items[self.saved.at];
+		const now = !item.read_only;
+		if (item.found) {
+			// A cluster from the kubeconfig has nowhere of its own to keep a mark,
+			// and the kubeconfig is not this program's to write in - so marking one
+			// saves a connection of this program's own with the same name and the
+			// same target. The name is kept deliberately: what the form refuses is
+			// renaming a found connection, because that leaves two answers to what a
+			// cluster is called, and this leaves one.
+			const name = try self.allocator.dupe(u8, item.name);
+			defer self.allocator.free(name);
+			const target = try self.allocator.dupe(u8, item.target);
+			defer self.allocator.free(target);
+			try self.saved.list.addWith(name, target, .ask, "", now);
+			self.saved.at = 0;
+		} else {
+			self.saved.list.mark(self.saved.at, now);
+		}
+		conns.save(&self.saved.list, self.saved.path.items) catch {
+			self.complain("the connection list could not be written", .{});
+			return;
+		};
+		// What is in force for a connection already open was read when it opened,
+		// so say what this did and did not change rather than leaving somebody to
+		// find out by trying to write.
+		const same = self.connected and std.mem.eql(u8, self.path, item.target);
+		if (now) {
+			self.say("{s} is read-only{s}", .{
+				item.name,
+				if (same) " from the next time it is opened" else "",
+			});
+		} else {
+			self.say("{s} may be written to{s}", .{
+				item.name,
+				if (same) " from the next time it is opened" else "",
+			});
+		}
+	}
+
 	pub fn openConnectionForm(self: *App, edit: bool) !void {
 		// Editing one would have to write it somewhere, and the only place it
 		// could go is this program's own file - which would leave two answers to
@@ -832,6 +893,7 @@ pub const App = struct {
 		var target: []const u8 = "";
 		var secret: []const u8 = "";
 		var keeps: conns.Keeps = .ask;
+		var read_only = false;
 		if (edit) {
 			if (self.saved.at >= self.saved.list.items.items.len) {
 				self.complain("there is nothing to edit yet - press a to add one", .{});
@@ -842,6 +904,7 @@ pub const App = struct {
 			target = entry.target;
 			keeps = entry.keeps;
 			secret = entry.secret;
+			read_only = entry.read_only;
 			self.saved.editing = self.saved.at;
 		}
 		// A target that cannot be taken apart and put back together identically is
@@ -850,7 +913,74 @@ pub const App = struct {
 			.engine = if (target.len == 0) .sqlite else .other,
 			.path = target,
 		};
-		try self.showConnectionForm(shape, name, keeps, secret);
+		try self.showConnectionForm(shape, name, keeps, secret, read_only);
+	}
+
+	/// Whether this pane may be written into. A read-only connection is about the
+	/// place it opened, not about the machine krtek runs on: copying a file *down*
+	/// from a read-only bucket is a read, and there is no reason to refuse it.
+	pub fn mayWriteTo(self: *App, place: database.store.Store) bool {
+		if (!self.saved.read_only or place == .local) {
+			return true;
+		}
+		self.complain("this connection is read-only: {s} is not written to", .{place.label()});
+		return false;
+	}
+
+	/// Say no to a batch with anything in it that is not a read, and name the
+	/// statement that stopped it - "read-only" on its own leaves somebody looking
+	/// for which of five statements it meant.
+	fn refuseWrites(self: *App, sql: []const u8) bool {
+		var scratch = std.heap.ArenaAllocator.init(self.allocator);
+		defer scratch.deinit();
+		const statements = self.conn.split(scratch.allocator(), sql) catch {
+			self.complain("this connection is read-only", .{});
+			return true;
+		};
+		for (statements) |statement| {
+			const text = std.mem.trim(u8, statement.sql, " \t\r\n;");
+			if (text.len == 0 or database.readsOnly(text)) {
+				continue;
+			}
+			// The first few words are enough to recognise it by, and the whole of a
+			// long statement would push everything else off the line.
+			const shown = if (text.len > 40) text[0..40] else text;
+			self.complain("this connection is read-only: {s}{s}", .{
+				shown,
+				if (text.len > 40) "..." else "",
+			});
+			return true;
+		}
+		return false;
+	}
+
+	/// What this engine can do, and what this *connection* is allowed to do.
+	///
+	/// A read-only connection is not a claim about the server - the account may
+	/// have every privilege there is - so it cannot come from the driver. It is
+	/// laid over the driver's answer here, in the one place everything asks, so
+	/// that every key, every form and every footer hint follows from it without
+	/// any of them knowing about it. The four texts are the reason and the flag
+	/// at once, which is why saying it once is enough.
+	pub fn caps(self: *App) database.Caps {
+		var out = self.conn.caps();
+		if (!self.saved.read_only) {
+			return out;
+		}
+		const why = "this connection is marked read-only; edit it with e in the connection list to change that";
+		if (out.no_insert.len == 0) {
+			out.no_insert = why;
+		}
+		if (out.no_update.len == 0) {
+			out.no_update = why;
+		}
+		if (out.no_delete.len == 0) {
+			out.no_delete = why;
+		}
+		if (out.no_ddl.len == 0) {
+			out.no_ddl = why;
+		}
+		return out;
 	}
 
 	/// An arena that outlives the form: the connection form is built again every
@@ -859,7 +989,7 @@ pub const App = struct {
 		return self.typing.arena.allocator();
 	}
 
-	fn showConnectionForm(self: *App, shape: conns.Shape, name: []const u8, keeps: conns.Keeps, secret: []const u8) !void {
+	fn showConnectionForm(self: *App, shape: conns.Shape, name: []const u8, keeps: conns.Keeps, secret: []const u8, read_only: bool) !void {
 		const form = try self.newForm(
 			.connection,
 			if (self.saved.editing != null) "edit connection" else "add connection",
@@ -971,6 +1101,15 @@ pub const App = struct {
 			},
 		}
 
+		// Above the password and before the engines that have none, because this is
+		// the one thing on this form that is true of every engine - and truest of
+		// the one that has no password at all, since a kubeconfig usually holds
+		// every cluster somebody has, production among them.
+		try form.toggle("read-only", read_only);
+		try form.note("nothing is written through a read-only connection: no insert, no update,");
+		try form.note("no delete and no schema statement. The account may still be allowed to;");
+		try form.note("this is about what this program will do with it.");
+
 		// A cluster has no password to keep anywhere: it is reached with what the
 		// kubeconfig carries, and offering a place to put one would be offering to
 		// keep something nothing will ever ask for.
@@ -1009,7 +1148,8 @@ pub const App = struct {
 		const name = try self.formArena().dupe(u8, form.valueNamed("name"));
 		const secret = try self.formArena().dupe(u8, form.valueNamed("password"));
 		const keeps = std.meta.stringToEnum(conns.Keeps, form.valueNamed("keep the password")) orelse .ask;
-		try self.showConnectionForm(shape, name, keeps, secret);
+		const read_only = form.isOnNamed("read-only");
+		try self.showConnectionForm(shape, name, keeps, secret, read_only);
 		// Back on the engine, so it can be cycled again without walking up to it.
 		self.typing.form.?.cursor = 1;
 	}
@@ -1641,10 +1781,10 @@ pub const App = struct {
 		// Where nothing takes a delete back - a row that is a file, a row that is a
 		// Kubernetes object - it is asked about first. A database row goes as it
 		// always has, because a transaction is there to take it out of.
-		const caps = self.conn.caps();
-		if (self.conn.files() != null or caps.final_deletes) {
+		const allowed = self.caps();
+		if (self.conn.files() != null or allowed.final_deletes) {
 			const count = if (self.cursor.marked.items.len != 0) self.cursor.marked.items.len else @as(usize, 1);
-			const noun = if (self.conn.files() != null) "file" else caps.row_noun;
+			const noun = if (self.conn.files() != null) "file" else allowed.row_noun;
 			if (self.typing.prompt) |*old| {
 				old.buffer.deinit(self.allocator);
 			}
@@ -1867,6 +2007,16 @@ pub const App = struct {
 		if (self.conn.wantsTerminal(std.mem.trim(u8, sql, " \t\r\n;"))) {
 			return self.runShell(std.mem.trim(u8, sql, " \t\r\n;"));
 		}
+		// The forms and the keys already refuse through the capabilities, but this
+		// is where somebody types their own, and nothing above has read it. The
+		// test is the conservative one: a first word not on the reading list is
+		// taken to write, so a statement this cannot recognise is refused rather
+		// than run.
+		if (self.saved.read_only) {
+			if (self.refuseWrites(sql)) {
+				return;
+			}
+		}
 		_ = self.report.arena.reset(.retain_capacity);
 		const arena = self.report.arena.allocator();
 		self.report.list.clearRetainingCapacity();
@@ -2021,7 +2171,7 @@ pub const App = struct {
 		}
 		const far = if (self.connected) self.conn.files() else null;
 		if (far == null) {
-			self.complain("{s} holds rows, not files - this is for SFTP, S3 and Azure", .{self.conn.caps().label});
+			self.complain("{s} holds rows, not files - this is for SFTP, S3 and Azure", .{self.caps().label});
 			return;
 		}
 		self.files = try Files.Manager.init(self.allocator, far);
@@ -2109,6 +2259,9 @@ pub const App = struct {
 		const manager = self.files orelse return;
 		const from = manager.here();
 		const to = manager.there();
+		if (!self.mayWriteTo(to.place)) {
+			return;
+		}
 
 		var scratch = std.heap.ArenaAllocator.init(self.allocator);
 		defer scratch.deinit();
@@ -2213,6 +2366,9 @@ pub const App = struct {
 	pub fn deleteFiles(self: *App) !void {
 		const manager = self.files orelse return;
 		const pane = manager.here();
+		if (!self.mayWriteTo(pane.place)) {
+			return;
+		}
 		var scratch = std.heap.ArenaAllocator.init(self.allocator);
 		defer scratch.deinit();
 		const arena = scratch.allocator();
@@ -2238,6 +2394,9 @@ pub const App = struct {
 	pub fn makeFileDir(self: *App, name: []const u8) !void {
 		const manager = self.files orelse return;
 		const pane = manager.here();
+		if (!self.mayWriteTo(pane.place)) {
+			return;
+		}
 		var scratch = std.heap.ArenaAllocator.init(self.allocator);
 		defer scratch.deinit();
 		const arena = scratch.allocator();
@@ -2278,6 +2437,9 @@ pub const App = struct {
 	pub fn renameFile(self: *App, name: []const u8) !void {
 		const manager = self.files orelse return;
 		const pane = manager.here();
+		if (!self.mayWriteTo(pane.place)) {
+			return;
+		}
 		const one = pane.current() orelse return;
 		var scratch = std.heap.ArenaAllocator.init(self.allocator);
 		defer scratch.deinit();
@@ -2562,7 +2724,7 @@ pub const App = struct {
 					// not want one, and its splitter would hand it to the engine.
 					const body = std.mem.trimEnd(u8, text, ";\n");
 					if (body.len != 0) {
-						if (self.conn.caps().speaks_sql) {
+						if (self.caps().speaks_sql) {
 							try out.print(self.allocator, "\n{s};\n", .{body});
 						} else {
 							try out.print(self.allocator, "\n{s}\n", .{body});
@@ -2606,17 +2768,17 @@ pub const App = struct {
 		}
 		// Where a row only names bytes kept elsewhere, a file of commands that put
 		// the names back would put empty things where the data was.
-		if (!self.conn.caps().dumps_rows) {
+		if (!self.caps().dumps_rows) {
 			try out.print(self.allocator, "-- {s} keeps the bytes, not this file: {s} was listed, not dumped\n", .{
-				self.conn.caps().label,
+				self.caps().label,
 				table.name,
 			});
 			return;
 		}
-		if (!self.conn.caps().speaks_sql) {
+		if (!self.caps().speaks_sql) {
 			return self.dumpCommands(out, table, names);
 		}
-		const caps = self.conn.caps();
+		const allowed = self.caps();
 		// What this table needs said before its rows, and afterwards. Asked for
 		// with the columns in hand, because whether anything is needed depends on
 		// them - a column that numbers itself is the case.
@@ -2647,15 +2809,15 @@ pub const App = struct {
 						// The prefix that says which encoding this is in, where the
 						// engine has one: without it a dump replayed into SQL Server
 						// loses every character its codepage does not have.
-						try line.appendSlice(self.allocator, caps.text_prefix);
+						try line.appendSlice(self.allocator, allowed.text_prefix);
 						try database.quote(&line, self.allocator, t);
 					},
 					.blob => |b| {
-						try line.appendSlice(self.allocator, caps.blob_prefix);
+						try line.appendSlice(self.allocator, allowed.blob_prefix);
 						for (b) |byte| {
 							try line.print(self.allocator, "{x:0>2}", .{byte});
 						}
-						try line.appendSlice(self.allocator, caps.blob_suffix);
+						try line.appendSlice(self.allocator, allowed.blob_suffix);
 					},
 				}
 			}
@@ -3067,8 +3229,8 @@ pub const App = struct {
 		// An engine that will not take this is asked before the form is drawn, not
 		// after it has been filled in. Which of the two it is matters: a Kafka
 		// record can be written and not changed, and a Kubernetes object neither.
-		const caps = self.conn.caps();
-		const refused = if (mode == .edit) caps.no_update else caps.no_insert;
+		const allowed = self.caps();
+		const refused = if (mode == .edit) allowed.no_update else allowed.no_insert;
 		if (refused.len != 0) {
 			self.complain("{s}", .{refused});
 			return;
@@ -3149,7 +3311,7 @@ pub const App = struct {
 		try form.text("table name", table_label, 30);
 		// Only an engine that has to rebuild loses anything by altering; MySQL and
 		// PostgreSQL change the table in place.
-		if (alter and self.conn.caps().rebuild_to_alter) {
+		if (alter and self.caps().rebuild_to_alter) {
 			try form.note("altering rebuilds the table; CHECK constraints and generated columns are lost");
 		}
 		const columns = if (alter) try self.columnDefs(form.arena.allocator(), table_label) else &[_]database.Column{};
@@ -3349,7 +3511,7 @@ pub const App = struct {
 	pub fn openImportForm(self: *App) !void {
 		// Importing is inserting, so an engine that takes no new rows takes no
 		// file of them either.
-		const refused = self.conn.caps().no_insert;
+		const refused = self.caps().no_insert;
 		if (refused.len != 0) {
 			self.complain("{s}", .{refused});
 			return;
@@ -3364,8 +3526,8 @@ pub const App = struct {
 
 	/// Pick a schema on an engine that has them.
 	pub fn openSchemaForm(self: *App) !void {
-		if (!self.conn.caps().schemas) {
-			self.complain("{s} has no schemas", .{self.conn.caps().label});
+		if (!self.caps().schemas) {
+			self.complain("{s} has no schemas", .{self.caps().label});
 			return;
 		}
 		const form = try self.newForm(.schema, "schema", "");
@@ -3524,6 +3686,7 @@ pub const App = struct {
 				const shape = self.shapeOf(form);
 				const target = conns.compose(self.formArena(), shape) catch "";
 				const keeps = std.meta.stringToEnum(conns.Keeps, form.valueNamed("keep the password")) orelse .ask;
+				const read_only = form.isOnNamed("read-only");
 				const typed = try self.allocator.dupe(u8, form.valueNamed("password"));
 				defer self.allocator.free(typed);
 				const editing = self.saved.editing;
@@ -3547,7 +3710,7 @@ pub const App = struct {
 				var scratch = std.heap.ArenaAllocator.init(self.allocator);
 				defer scratch.deinit();
 				const clean = try conns.withoutPassword(scratch.allocator(), target);
-				try self.saved.list.add(
+				try self.saved.list.addWith(
 					if (name.len != 0) name else try conns.suggestName(scratch.allocator(), clean),
 					clean,
 					keeps,
@@ -3555,6 +3718,7 @@ pub const App = struct {
 					// and an empty one here means "keep the one I am about to be
 					// asked for".
 					if (keeps == .file) typed else "",
+					read_only,
 				);
 				if (keeps == .keychain and typed.len != 0) {
 					keychain.store(clean, typed) catch {
@@ -3738,7 +3902,7 @@ pub const App = struct {
 		} else {
 			self.say("{d} row(s) on this page; {s} cannot count the rest without reading it", .{
 				self.grid.rows.items.len,
-				self.conn.caps().label,
+				self.caps().label,
 			});
 		}
 	}
@@ -3748,7 +3912,7 @@ pub const App = struct {
 		// One SELECT per column of every table, unioned - which is SQL, and there is
 		// no honest way to put it to an engine that has none. Filtering one table
 		// works there, and says so.
-		if (!self.conn.caps().speaks_sql) {
+		if (!self.caps().speaks_sql) {
 			self.complain("searching every table needs SQL - filter one table with W instead", .{});
 			return;
 		}
@@ -3782,13 +3946,13 @@ pub const App = struct {
 				try sql.appendSlice(a, " AS \"column\", CAST(");
 				try database.quoteName(&sql, a, column.name);
 				try sql.appendSlice(a, " AS ");
-				try sql.appendSlice(a, self.conn.caps().text_cast);
+				try sql.appendSlice(a, self.caps().text_cast);
 				try sql.appendSlice(a, ") AS \"value\" FROM ");
 				try database.quoteName(&sql, a, object.name);
 				try sql.appendSlice(a, " WHERE CAST(");
 				try database.quoteName(&sql, a, column.name);
 				try sql.appendSlice(a, " AS ");
-				try sql.appendSlice(a, self.conn.caps().text_cast);
+				try sql.appendSlice(a, self.caps().text_cast);
 				try sql.appendSlice(a, ") LIKE ");
 				try database.quote(&sql, a, pattern.items);
 			}
@@ -3902,7 +4066,7 @@ pub const App = struct {
 		// per row through the same path the row form uses - it used to get the script
 		// too, and a script of INSERTs is not something Redis or Kafka can read: the
 		// import said "2 rows imported" and wrote nothing at all.
-		const scripted = self.conn.caps().speaks_sql;
+		const scripted = self.caps().speaks_sql;
 		var names: std.ArrayListUnmanaged([]const u8) = .empty;
 		var script: std.ArrayListUnmanaged(u8) = .empty;
 		if (scripted) {

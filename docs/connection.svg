@@ -46,21 +46,16 @@
 <rect x="30.8" y="176.0" width="8.9" height="18.0" fill="#4c4c56"/>
 <rect x="39.2" y="176.0" width="554.9" height="18.0" fill="#4c4c56"/>
 <rect x="593.6" y="176.0" width="244.1" height="18.0" fill="#4c4c56"/>
-<rect x="30.8" y="194.0" width="8.9" height="18.0" fill="#4c4c56"/>
-<rect x="39.2" y="194.0" width="143.3" height="18.0" fill="#4c4c56"/>
-<rect x="182.0" y="194.0" width="17.3" height="18.0" fill="#4c4c56"/>
-<rect x="198.8" y="194.0" width="84.5" height="18.0" fill="#4c4c56"/>
-<rect x="282.8" y="194.0" width="17.3" height="18.0" fill="#4c4c56"/>
-<rect x="299.6" y="194.0" width="67.7" height="18.0" fill="#4c4c56"/>
-<rect x="366.8" y="194.0" width="8.9" height="18.0" fill="#4c4c56"/>
-<rect x="375.2" y="194.0" width="202.1" height="18.0" fill="#4c4c56"/>
-<rect x="576.8" y="194.0" width="260.9" height="18.0" fill="#4c4c56"/>
+<rect x="30.8" y="194.0" width="168.5" height="18.0" fill="#4c4c56"/>
+<rect x="198.8" y="194.0" width="34.1" height="18.0" fill="#4c4c56"/>
+<rect x="232.4" y="194.0" width="76.1" height="18.0" fill="#4c4c56"/>
+<rect x="308.0" y="194.0" width="529.7" height="18.0" fill="#4c4c56"/>
 <rect x="30.8" y="212.0" width="8.9" height="18.0" fill="#4c4c56"/>
 <rect x="39.2" y="212.0" width="605.3" height="18.0" fill="#4c4c56"/>
 <rect x="644.0" y="212.0" width="193.7" height="18.0" fill="#4c4c56"/>
 <rect x="30.8" y="230.0" width="8.9" height="18.0" fill="#4c4c56"/>
-<rect x="39.2" y="230.0" width="588.5" height="18.0" fill="#4c4c56"/>
-<rect x="627.2" y="230.0" width="210.5" height="18.0" fill="#4c4c56"/>
+<rect x="39.2" y="230.0" width="596.9" height="18.0" fill="#4c4c56"/>
+<rect x="635.6" y="230.0" width="202.1" height="18.0" fill="#4c4c56"/>
 <rect x="14.0" y="266.0" width="487.7" height="18.0" fill="#26262c"/>
 <rect x="501.2" y="266.0" width="353.3" height="18.0" fill="#26262c"/>
 <text x="14.0" y="27.3" fill="#e0e0e6" font-weight="600" xml:space="preserve" textLength="58.8" lengthAdjust="spacing"> krtek </text>
@@ -108,18 +103,16 @@
 <text x="39.2" y="189.3" fill="#7c7c88" font-style="italic" xml:space="preserve" textLength="554.4" lengthAdjust="spacing">empty access key means ~/.aws and AWS_ACCESS_KEY_ID are looked at.</text>
 <text x="837.2" y="189.3" fill="#8aa7f0" xml:space="preserve" textLength="8.4" lengthAdjust="spacing">│</text>
 <text x="22.4" y="207.3" fill="#8aa7f0" xml:space="preserve" textLength="8.4" lengthAdjust="spacing">│</text>
-<text x="39.2" y="207.3" fill="#9a9aa6" xml:space="preserve" textLength="142.8" lengthAdjust="spacing">keep the password</text>
-<text x="198.8" y="207.3" fill="#e0e0e6" xml:space="preserve" textLength="84.0" lengthAdjust="spacing">‹ask     ›</text>
-<text x="299.6" y="207.3" fill="#9a9aa6" xml:space="preserve" textLength="67.2" lengthAdjust="spacing">password</text>
-<rect x="375.2" y="209.7" width="201.6" height="1.1" fill="#7c7c88"/>
+<text x="198.8" y="207.3" fill="#7c7c88" xml:space="preserve" textLength="33.6" lengthAdjust="spacing">[ ] </text>
+<text x="232.4" y="207.3" fill="#e0e0e6" xml:space="preserve" textLength="75.6" lengthAdjust="spacing">read-only</text>
 <text x="837.2" y="207.3" fill="#8aa7f0" xml:space="preserve" textLength="8.4" lengthAdjust="spacing">│</text>
 <text x="22.4" y="225.3" fill="#8aa7f0" xml:space="preserve" textLength="8.4" lengthAdjust="spacing">│</text>
-<text x="39.2" y="225.3" fill="#7c7c88" font-style="italic" xml:space="preserve" textLength="604.8" lengthAdjust="spacing">file: plain text in ~/.config/krtek/connections, which only you can read</text>
+<text x="39.2" y="225.3" fill="#7c7c88" font-style="italic" xml:space="preserve" textLength="604.8" lengthAdjust="spacing">nothing is written through a read-only connection: no insert, no update,</text>
 <text x="837.2" y="225.3" fill="#8aa7f0" xml:space="preserve" textLength="8.4" lengthAdjust="spacing">│</text>
 <text x="22.4" y="243.3" fill="#8aa7f0" xml:space="preserve" textLength="8.4" lengthAdjust="spacing">│</text>
-<text x="39.2" y="243.3" fill="#7c7c88" font-style="italic" xml:space="preserve" textLength="588.0" lengthAdjust="spacing">keychain: in the macOS keychain, which asks you before handing it over</text>
+<text x="39.2" y="243.3" fill="#7c7c88" font-style="italic" xml:space="preserve" textLength="596.4" lengthAdjust="spacing">no delete and no schema statement. The account may still be allowed to;</text>
 <text x="837.2" y="243.3" fill="#8aa7f0" xml:space="preserve" textLength="8.4" lengthAdjust="spacing">│</text>
 <text x="22.4" y="261.3" fill="#8aa7f0" xml:space="preserve" textLength="823.2" lengthAdjust="spacing">╰────────────────────────────────────────────────────────────────────────────────────────────────╯</text>
-<text x="14.0" y="279.3" fill="#71c68f" xml:space="preserve" textLength="487.2" lengthAdjust="spacing"> 8 saved connection(s) - enter connects, a adds, d removes</text>
+<text x="14.0" y="279.3" fill="#71c68f" xml:space="preserve" textLength="487.2" lengthAdjust="spacing"> 9 saved connection(s) - enter connects, a adds, d removes</text>
 <text x="14.0" y="297.3" fill="#7c7c88" xml:space="preserve" textLength="840.0" lengthAdjust="spacing"> tab moves   ctrl+s saves   ctrl+u clears the field   esc cancels                                   </text>
 </svg>

@@ -46,6 +46,12 @@ pub const Connection = struct {
 	keeps: Keeps = .ask,
 	/// The password, for `.file` only - the keychain holds its own.
 	secret: []const u8 = "",
+	/// Nothing may be written through this connection. Not a claim about the
+	/// server - the account may well have every privilege - but about what this
+	/// program is allowed to do with it. A production database in a list beside
+	/// half a dozen local ones is one wrong `enter` away, and the answer to that
+	/// is a connection that refuses rather than a person who remembers.
+	read_only: bool = false,
 	/// Not from this file: found somewhere else that already describes it, which
 	/// today means a context in a kubeconfig. It is offered like any other
 	/// connection and is nobody's to save or remove from here - the file it came
@@ -455,12 +461,20 @@ pub const List = struct {
 	}
 
 	pub fn add(self: *List, name: []const u8, target: []const u8, keeps: ?Keeps, secret: []const u8) !void {
+		return self.addWith(name, target, keeps, secret, null);
+	}
+
+	/// The same, saying whether this connection may be written through. Null
+	/// leaves whatever the entry already said, the way a null `keeps` does:
+	/// reconnecting to a connection marked read-only must not quietly unmark it.
+	pub fn addWith(self: *List, name: []const u8, target: []const u8, keeps: ?Keeps, secret: []const u8, read_only: ?bool) !void {
 		const a = self.arena.allocator();
 		// Either the name or the target identifies an entry, so renaming a
 		// connection or pointing an existing name somewhere else replaces it
 		// instead of leaving the list with two rows for one database.
 		var how: ?Keeps = keeps;
 		var kept: []const u8 = secret;
+		var refuses: ?bool = read_only;
 		var i = self.items.items.len;
 		while (i > 0) {
 			i -= 1;
@@ -472,6 +486,9 @@ pub const List = struct {
 					how = item.keeps;
 					kept = item.secret;
 				}
+				if (refuses == null) {
+					refuses = item.read_only;
+				}
 				_ = self.items.orderedRemove(i);
 			}
 		}
@@ -480,7 +497,18 @@ pub const List = struct {
 			.target = try a.dupe(u8, target),
 			.keeps = how orelse .ask,
 			.secret = try a.dupe(u8, kept),
+			.read_only = refuses orelse false,
 		});
+	}
+
+	/// Mark the connection at `index` as one nothing may be written through, or
+	/// unmark it. In place, because a mark is not a use: moving it to the front of
+	/// the list the way `add` does would answer a keypress by shuffling the list
+	/// under the cursor that made it.
+	pub fn mark(self: *List, index: usize, read_only: bool) void {
+		if (index < self.items.items.len) {
+			self.items.items[index].read_only = read_only;
+		}
 	}
 
 	/// Say where the connection at `index` keeps its password, and what it is.
@@ -534,6 +562,37 @@ pub fn path(buffer: []u8, env: *std.process.Environ.Map) ?[]const u8 {
 }
 
 /// Read the file; a missing one is simply an empty list.
+/// What a saved connection says about itself beyond where it points.
+pub const Flags = struct {
+	keeps: Keeps = .ask,
+	/// Points into the line it was read from.
+	secret: []const u8 = "",
+	read_only: bool = false,
+};
+
+/// Whatever follows the target: a list of words, in any order.
+///
+/// A list rather than a fixed third field, so the next thing worth saying about
+/// a connection costs nothing to add and a file written by an older build still
+/// reads. A word this build does not know is ignored rather than refused, which
+/// is what lets a newer build's file be read by an older one.
+pub fn flagsOf(text: []const u8) Flags {
+	var out = Flags{};
+	var words = std.mem.splitScalar(u8, text, '\t');
+	while (words.next()) |raw| {
+		const word = std.mem.trim(u8, raw, " \t");
+		if (std.mem.startsWith(u8, word, "password=")) {
+			out.keeps = .file;
+			out.secret = word["password=".len..];
+		} else if (std.mem.eql(u8, word, "keychain")) {
+			out.keeps = .keychain;
+		} else if (std.mem.eql(u8, word, "read-only")) {
+			out.read_only = true;
+		}
+	}
+	return out;
+}
+
 pub fn load(list: *List, file_path: []const u8) !void {
 	list.items.clearRetainingCapacity();
 	const text = read(list.arena.allocator(), file_path) catch return;
@@ -547,18 +606,10 @@ pub fn load(list: *List, file_path: []const u8) !void {
 		const tab = std.mem.indexOfScalar(u8, line, '\t') orelse continue;
 		const name = std.mem.trim(u8, line[0..tab], " \t");
 		var rest = line[tab + 1 ..];
-		// The third field, if it is there, says where this connection's password is.
-		var keeps: Keeps = .ask;
-		var secret: []const u8 = "";
+		var said = Flags{};
 		if (std.mem.indexOfScalar(u8, rest, '\t')) |second| {
-			const extra = std.mem.trim(u8, rest[second + 1 ..], " \t");
+			said = flagsOf(rest[second + 1 ..]);
 			rest = rest[0..second];
-			if (std.mem.startsWith(u8, extra, "password=")) {
-				keeps = .file;
-				secret = extra["password=".len..];
-			} else if (std.mem.eql(u8, extra, "keychain")) {
-				keeps = .keychain;
-			}
 		}
 		const target = std.mem.trim(u8, rest, " \t");
 		if (name.len == 0 or target.len == 0) {
@@ -567,8 +618,9 @@ pub fn load(list: *List, file_path: []const u8) !void {
 		try list.items.append(list.allocator, .{
 			.name = try a.dupe(u8, name),
 			.target = try a.dupe(u8, target),
-			.keeps = keeps,
-			.secret = try a.dupe(u8, secret),
+			.keeps = said.keeps,
+			.secret = try a.dupe(u8, said.secret),
+			.read_only = said.read_only,
 		});
 	}
 }
@@ -578,9 +630,10 @@ pub fn save(list: *List, file_path: []const u8) !void {
 	var out: std.ArrayListUnmanaged(u8) = .empty;
 	defer out.deinit(list.allocator);
 	try out.appendSlice(list.allocator,
-		"# krtek connections: name<TAB>target[<TAB>password=secret|<TAB>keychain],\n" ++
-		"# most recent first. `password=` is plain text in this file, which is mode\n" ++
-		"# 0600; `keychain` means the macOS keychain holds it instead.\n");
+		"# krtek connections: name<TAB>target[<TAB>flag]..., most recent first.\n" ++
+		"# `password=` is plain text in this file, which is mode 0600; `keychain`\n" ++
+		"# means the macOS keychain holds it instead; `read-only` means this program\n" ++
+		"# will not write through this connection whatever the account may do.\n");
 	list.stripped = false;
 	for (list.items.items) |item| {
 		// What another file already describes stays described there.
@@ -598,6 +651,9 @@ pub fn save(list: *List, file_path: []const u8) !void {
 			.ask => {},
 			.file => try out.print(list.allocator, "\tpassword={s}", .{item.secret}),
 			.keychain => try out.appendSlice(list.allocator, "\tkeychain"),
+		}
+		if (item.read_only) {
+			try out.appendSlice(list.allocator, "\tread-only");
 		}
 		try out.append(list.allocator, '\n');
 	}
@@ -1182,4 +1238,51 @@ test "saving writes the saved ones and leaves the found ones where they came fro
 	const text = try read(arena.allocator(), file);
 	try std.testing.expect(std.mem.indexOf(u8, text, "books") != null);
 	try std.testing.expect(std.mem.indexOf(u8, text, "k8s://work") == null);
+}
+
+test "a connection says whether anything may be written through it" {
+	var list = List.init(std.testing.allocator);
+	defer list.deinit();
+	try list.add("plain", "postgres://u@h/d", .ask, "");
+	try std.testing.expect(!list.items.items[0].read_only);
+
+	// Marked in place: a mark is not a use, and moving it to the front would
+	// shuffle the list under the cursor that made the mark.
+	list.mark(0, true);
+	try std.testing.expect(list.items.items[0].read_only);
+
+	// Reconnecting must not quietly unmark it, the way it must not forget where
+	// the password is kept.
+	try list.add("plain", "postgres://u@h/d", null, "");
+	try std.testing.expect(list.items.items[0].read_only);
+	// And saying so explicitly does change it.
+	try list.addWith("plain", "postgres://u@h/d", null, "", false);
+	try std.testing.expect(!list.items.items[0].read_only);
+}
+
+test "whatever follows the target is a list of words, in any order" {
+	// Nothing said is a connection that keeps no password and may be written to.
+	const plain = flagsOf("");
+	try std.testing.expectEqual(Keeps.ask, plain.keeps);
+	try std.testing.expect(!plain.read_only);
+
+	const both = flagsOf("keychain\tread-only");
+	try std.testing.expectEqual(Keeps.keychain, both.keeps);
+	try std.testing.expect(both.read_only);
+
+	// The other way round says the same thing, which is the point of a list.
+	const swapped = flagsOf("read-only\tkeychain");
+	try std.testing.expectEqual(Keeps.keychain, swapped.keeps);
+	try std.testing.expect(swapped.read_only);
+
+	const kept = flagsOf("password=hunter2\tread-only");
+	try std.testing.expectEqual(Keeps.file, kept.keeps);
+	try std.testing.expectEqualStrings("hunter2", kept.secret);
+	try std.testing.expect(kept.read_only);
+
+	// A word from a newer build is stepped over rather than taking the line with
+	// it, so a file written by one can still be read by the other.
+	const later = flagsOf("read-only\tsomething-else-entirely");
+	try std.testing.expect(later.read_only);
+	try std.testing.expectEqual(Keeps.ask, later.keeps);
 }

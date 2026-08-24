@@ -109,7 +109,15 @@ fn connections(app: *App, size: Size, rows: usize) void {
 	const screen = app.screen;
 	// A usize, spelled out: `@min` with a literal narrows the result to a type
 	// that only fits the literal, and arithmetic on that overflows at once.
-	const width: usize = @min(size.cols, 74);
+	// The read-only column is only there when something is marked, and when it is,
+	// the panel grows by its width rather than taking it from the targets - which
+	// are what people read this list for.
+	var marked: usize = 0;
+	for (app.saved.list.items.items) |item| {
+		marked += @intFromBool(item.read_only);
+	}
+	const guard: usize = if (marked != 0) 10 else 0;
+	const width: usize = @min(size.cols, 74 + guard);
 	const left = if (size.cols > width) (size.cols - width) / 2 else 0;
 	const top: usize = 2;
 	var line: usize = top + 1;
@@ -143,9 +151,19 @@ fn connections(app: *App, size: Size, rows: usize) void {
 				.fg = if (item.found) (if (on) C.dim else C.faint) else if (item.keeps == .file) C.warn else C.ok,
 			});
 			pad(app, if (item.found) "kubeconfig" else item.keeps.label(), 11, false);
+			// The row where this is not empty is the one somebody needs to see
+			// before pressing enter: a production database in a list of local ones.
+			if (guard != 0) {
+				screen.style(.{
+					.bg = if (on) C.selected else null,
+					.fg = if (item.read_only) C.warn else (if (on) C.dim else C.faint),
+				});
+				pad(app, if (item.read_only) "read-only" else "", guard, false);
+			}
 			screen.style(.{ .bg = if (on) C.selected else null, .fg = if (on) C.text else C.dim });
-			// 4 for the marker, 22 name, 11 engine, 11 for where the thing lives.
-			const room = if (width > 50) width - 50 else 0;
+			// 4 for the marker, 22 name, 11 engine, 11 for where the thing lives,
+			// and the guard column when the list has anything to put in it.
+			const room = if (width > 50 + guard) width - 50 - guard else 0;
 			const shown = write(app, item.target, room);
 			// Filled to the panel's edge rather than the screen's: the row of the one
 			// selected is a band of colour, and clearing to the end of the line would
@@ -163,6 +181,7 @@ fn connections(app: *App, size: Size, rows: usize) void {
 		.{ "enter", "connect to the one selected" },
 		.{ "a", "add a connection" },
 		.{ "e / d", "edit, remove" },
+		.{ "r", "read-only: nothing is written through it" },
 		.{ "up down", "move in the list" },
 		.{ "q", "quit" },
 	};
@@ -211,6 +230,13 @@ fn header(app: *App, size: Size) void {
 	used += write(app, " krtek ", size.cols);
 	screen.style(.{ .bg = C.bar, .fg = C.accent });
 	used += write(app, if (app.connected) app.conn.describe() else "", size.cols - used);
+	// Beside the name of the connection, because that is what it is about - and
+	// in the colour that means "mind this", since the rest of the screen says so
+	// only by the keys it stops offering.
+	if (app.connected and app.saved.read_only) {
+		screen.style(.{ .bg = C.bar, .fg = C.warn, .bold = true });
+		used += write(app, "  read-only", size.cols -| used);
+	}
 	screen.style(.{ .bg = C.bar, .fg = C.dim });
 	var buf: [96]u8 = undefined;
 	const right = if (app.connected)
@@ -285,7 +311,7 @@ fn sidebar(app: *App, width: usize, rows: usize) void {
 		// what it is and not how to change it is where the key goes to be missed.
 		// Upper case, because the other two headings this line can carry are.
 		var shouted: [24]u8 = undefined;
-		const noun = app.conn.caps().schema_noun;
+		const noun = app.caps().schema_noun;
 		const heading = std.ascii.upperString(&shouted, noun[0..@min(noun.len, shouted.len)]);
 		var used: usize = write(app, " ", width);
 		screen.style(.{ .fg = C.dim });
@@ -563,7 +589,7 @@ fn grid(app: *App, size: Size, side: usize, rows: usize) void {
 		const filtered = app.isFiltered();
 		_ = write(app, if (filtered)
 			"nothing matches the filter - W changes it, esc clears it"
-		else if (app.grid.editable and app.conn.caps().no_insert.len == 0)
+		else if (app.grid.editable and app.caps().no_insert.len == 0)
 			"no rows yet - i inserts one"
 		else
 			"no rows", width);
@@ -1458,7 +1484,7 @@ fn footerHints(app: *App) []const u8 {
 		return out.items;
 	}
 	if (app.view == .grid and app.focus == .sidebar) {
-		const caps = app.conn.caps();
+		const caps = app.caps();
 		var out: std.ArrayListUnmanaged(u8) = .empty;
 		const arena = app.screen.frame.allocator();
 		out.appendSlice(arena, " enter opens   / filter") catch return " enter opens   / filter";
@@ -1472,8 +1498,8 @@ fn footerHints(app: *App) []const u8 {
 		return out.items;
 	}
 	return switch (app.view) {
-		.connections => " enter connect   a add   e edit   d remove   ctrl+k commands   q quit",
-		.structure => if (app.conn.caps().no_ddl.len == 0)
+		.connections => " enter connect   a add   e edit   d remove   r read-only   ctrl+k commands   q quit",
+		.structure => if (app.caps().no_ddl.len == 0)
 			" a alter   I index   K key   N rename   S data   ctrl+k commands"
 		else
 			" S data   ctrl+k commands",
@@ -1495,7 +1521,7 @@ fn footerHints(app: *App) []const u8 {
 /// be changed and `x` for one that cannot be removed, and a cluster offered `i`
 /// for an object nothing here makes.
 fn rowHints(app: *App) []const u8 {
-	const caps = app.conn.caps();
+	const caps = app.caps();
 	if (caps.no_insert.len == 0 and caps.no_update.len == 0 and caps.no_delete.len == 0 and app.files == null) {
 		return " i insert   e edit   x delete   o sort   v whole value   space mark   ctrl+k commands";
 	}
@@ -1608,7 +1634,7 @@ fn editorPanel(app: *App, size: Size, side: usize, rows: usize) void {
 	// there is its command line and calling that SQL would be a lie. And where a
 	// shell is open in a container, the panel says which one: what is typed is
 	// going somewhere else entirely, and nothing else on the screen says so.
-	const caps = app.conn.caps();
+	const caps = app.caps();
 	var named: [64]u8 = undefined;
 	const container = app.conn.sessionIn();
 	const title = if (container.len != 0)
@@ -2079,7 +2105,7 @@ fn info(app: *App, size: Size, side: usize, rows: usize) void {
 	screen.moveTo(1, left);
 	screen.style(.{ .fg = C.accent, .bold = true });
 	_ = write(app, " ", width);
-	_ = write(app, app.conn.caps().label, width);
+	_ = write(app, app.caps().label, width);
 	screen.clearToEol();
 
 	var line: usize = 2;

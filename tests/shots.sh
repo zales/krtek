@@ -56,6 +56,7 @@ demo_connections() {
 		printf 'photos\ts3://photos?region=eu-central-1\n'
 		printf 'books\t%s\n' "$DB"
 		printf 'shop (docker)\tpostgres://postgres@127.0.0.1:5432/shop\n'
+		printf 'ledger (live)\tpostgres://reader@ledger.example:5432/ledger\tread-only\n'
 		printf 'orders\tmysql://root@127.0.0.1:3306/orders\tkeychain\n'
 		printf 'warehouse\tmssql://sa@sql.example:1433/demo\tkeychain\n'
 		printf 'cache\tredis://127.0.0.1:6379/0\n'
