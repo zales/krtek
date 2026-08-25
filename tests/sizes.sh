@@ -66,6 +66,7 @@ editor:db:s|select
 filter:db:{down}{enter}|W
 insert:db:{down}{enter}|i
 connections:-:{sleep}
+filtered:-:/|krtek-07
 add:-:a
 add-postgres:-:a|{tab}|{right}
 edit:-:e'
@@ -99,6 +100,24 @@ for size in 120x40 100x30 80x24 70x22 60x20 50x16 44x14 40x12; do
 		# Wherever the cursor is, it is on screen. A list longer than the window
 		# used to stop drawing where the room ran out, so `end` put the cursor
 		# somewhere nobody could see and nothing below it could be reached.
+		# The filter narrows the list, and what the keys reach afterwards is what
+		# is showing rather than what is at that index in the file.
+		case "$name" in
+		filtered)
+			# `krtek-07` is in one target and no name, so it is the plain search of
+			# the target that has to find it - and find only it.
+			printf '%s' "$out" | grep -q 'saved-07' || {
+				echo
+				printf '%s\n' "$out" >&2
+				fail "the filter matched nothing at $size"
+			}
+			printf '%s' "$out" | grep -q 'saved-08' && {
+				echo
+				printf '%s\n' "$out" >&2
+				fail "the filter did not narrow the list at $size"
+			}
+			;;
+		esac
 		case "$name" in
 		connections)
 			far=$(SCREEN_COLS="$cols" SCREEN_ROWS="$rows" python3 tests/screen.py "" \
@@ -120,14 +139,15 @@ for size in 120x40 100x30 80x24 70x22 60x20 50x16 44x14 40x12; do
 			# frame wherever the room ran out is the right answer on a short window
 			# and the wrong one on a tall one, where it would quietly hide the keys
 			# instead - so the tall case is checked for what it should contain.
-			# The notes are the last thing drawn, so they are what falls off first
-			# when the list is sized a few rows too generously - the keys survive
-			# that and would not notice.
-			if [ "$rows" -ge 30 ]; then
-				printf '%s' "$out" | grep -q 'a file path opens SQLite' || {
+			# On a window with room for them, the list never takes it: the keys are
+			# there whatever the list's length. On a shorter one they give way on
+			# purpose - the strip along the bottom of the terminal names every one
+			# of them anyway - so this asks only of the sizes that have the room.
+			if [ "$rows" -ge 24 ]; then
+				printf '%s' "$out" | grep -q 'q  *quit' || {
 					echo
 					printf '%s\n' "$out" >&2
-					fail "the bottom of the panel was pushed off the screen at $size"
+					fail "the list pushed the keys off the panel at $size"
 				}
 			fi
 			;;

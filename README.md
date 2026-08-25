@@ -121,6 +121,13 @@ Where an engine has its own password store - `~/.pgpass` for libpq, `~/.my.cnf`
 for MySQL, `PGPASSWORD` in the environment - that is better still, and it keeps
 working either way.
 
+`/` narrows the list, by name or by what the connection points at - thirty-odd
+of them is more than anybody scrolls through, and half are told apart by their
+host rather than by the name somebody gave them. The name is matched the fuzzy
+way the sidebar and the palette are; the target is searched for the letters as
+typed, because every target begins `postgres://` and runs to forty characters,
+and a fuzzy match against one says yes to nearly everything.
+
 **A connection can be marked read-only**, with `r` in the list or the toggle in
 the form. Nothing is written through one: no insert, no update, no delete, no
 schema statement, no upload and no removal of a file - and a statement typed in

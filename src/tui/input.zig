@@ -416,7 +416,8 @@ fn closePalette(app: *App) void {
 
 /// The welcome screen: a short list of keys, and the mouse works too.
 fn onConnections(app: *App, key: Key) !void {
-	const count = app.saved.list.items.items.len;
+	// What is on screen, which is not what is saved once a filter is on.
+	const count = app.savedCount();
 	switch (key) {
 		.ctrl => |code| if (code == 'c') {
 			app.quit = true;
@@ -426,6 +427,7 @@ fn onConnections(app: *App, key: Key) !void {
 			'a' => try app.openConnectionForm(false),
 			'e' => try app.openConnectionForm(true),
 			'r' => try app.toggleReadOnly(),
+			'/' => try ask(app, .filter, " /"),
 			'd' => try app.forgetSaved(),
 			'j' => if (count != 0 and app.saved.at + 1 < count) {
 				app.saved.at += 1;
@@ -451,8 +453,17 @@ fn onConnections(app: *App, key: Key) !void {
 		.home => app.saved.at = 0,
 		.end => app.saved.at = count -| 1,
 		.enter => try app.connectSaved(),
-		.escape => if (app.connected) {
-			app.view = .grid;
+		.escape => {
+			// The filter first, because the frame says `esc clears it` and a key
+			// that leaves the screen instead would be answering a different
+			// question from the one on the screen.
+			if (app.saved.filter.items.len > 0) {
+				app.saved.filter.clearRetainingCapacity();
+				app.saved.at = 0;
+				app.saved.scroll = 0;
+			} else if (app.connected) {
+				app.view = .grid;
+			}
 		},
 		.mouse => |mouse| {
 			// What is drawn on a row is the entry at that row *in view*, which stops
@@ -1042,8 +1053,11 @@ fn ask(app: *App, kind: PromptKind, label: []const u8) !void {
 		old.buffer.deinit(app.allocator);
 	}
 	app.typing.prompt = .{ .kind = kind, .label = label };
-	if (kind == .filter and app.sidebar.filter.items.len > 0) {
-		try app.typing.prompt.?.buffer.appendSlice(app.allocator, app.sidebar.filter.items);
+	if (kind == .filter) {
+		const was = if (app.view == .connections) app.saved.filter.items else app.sidebar.filter.items;
+		if (was.len > 0) {
+			try app.typing.prompt.?.buffer.appendSlice(app.allocator, was);
+		}
 	}
 }
 
@@ -1059,8 +1073,14 @@ fn typing(app: *App, key: Key) !void {
 	switch (key) {
 		.escape => {
 			if (prompt.kind == .filter) {
-				app.sidebar.filter.clearRetainingCapacity();
-				app.sidebar.selected = 0;
+				if (app.view == .connections) {
+					app.saved.filter.clearRetainingCapacity();
+					app.saved.at = 0;
+					app.saved.scroll = 0;
+				} else {
+					app.sidebar.filter.clearRetainingCapacity();
+					app.sidebar.selected = 0;
+				}
 			}
 			close(app);
 		},
@@ -1156,10 +1176,18 @@ fn typing(app: *App, key: Key) !void {
 	}
 }
 
-/// The object filter applies as it is typed.
+/// The filter applies as it is typed - the object list on one screen, the
+/// connection list on the other, since `/` means the same thing on both.
 fn refilter(app: *App) !void {
 	const prompt = app.typing.prompt orelse return;
 	if (prompt.kind != .filter) {
+		return;
+	}
+	if (app.view == .connections) {
+		app.saved.filter.clearRetainingCapacity();
+		try app.saved.filter.appendSlice(app.allocator, prompt.buffer.items);
+		app.saved.at = 0;
+		app.saved.scroll = 0;
 		return;
 	}
 	app.sidebar.filter.clearRetainingCapacity();

@@ -285,6 +285,11 @@ const Saved = struct {
 	/// bottom and everything past it was unreachable.
 	at: usize = 0,
 	scroll: usize = 0,
+	/// What was typed to narrow the list. The same fuzzy match the sidebar and
+	/// the command palette use, on the name and on the target both - thirty-odd
+	/// connections is more than anybody scrolls through, and half of them are
+	/// told apart by their host rather than by the name somebody gave them.
+	filter: std.ArrayListUnmanaged(u8) = .empty,
 	/// How many entries were on screen last time it was drawn, so a page key can
 	/// move by a page. The drawing is what knows this - it is the one that has the
 	/// window and the hints to fit around.
@@ -768,10 +773,8 @@ pub const App = struct {
 
 	/// Connect to the entry the cursor is on.
 	pub fn connectSaved(self: *App) !void {
-		if (self.saved.at >= self.saved.list.items.items.len) {
-			return;
-		}
-		const entry = self.saved.list.items.items[self.saved.at];
+		const chosen = self.chosenSaved() orelse return;
+		const entry = self.saved.list.items.items[chosen];
 		var scratch = std.heap.ArenaAllocator.init(self.allocator);
 		defer scratch.deinit();
 		// A connection that keeps its password connects with it and never asks. The
@@ -790,7 +793,7 @@ pub const App = struct {
 		// A found connection has no place in the file to be moved to the front of,
 		// and touching it would only shuffle it among the ones that do.
 		if (!entry.found) {
-			self.saved.list.touch(self.saved.at);
+			self.saved.list.touch(chosen);
 			self.saved.at = 0;
 			conns.save(&self.saved.list, self.saved.path.items) catch {};
 		}
@@ -838,25 +841,22 @@ pub const App = struct {
 	}
 
 	pub fn forgetSaved(self: *App) !void {
-		if (self.saved.at >= self.saved.list.items.items.len) {
-			return;
-		}
+		const chosen = self.chosenSaved() orelse return;
+		const going = self.saved.list.items.items[chosen];
 		// Nothing here put it in the list, so nothing here takes it out: the file
 		// it came from is where it lives.
-		if (self.saved.list.items.items[self.saved.at].found) {
-			self.complain("{s} comes from the kubeconfig - remove the context there", .{
-				self.saved.list.items.items[self.saved.at].name,
-			});
+		if (going.found) {
+			self.complain("{s} comes from the kubeconfig - remove the context there", .{going.name});
 			return;
 		}
 		var name: [128]u8 = undefined;
-		const label = std.fmt.bufPrint(&name, "{s}", .{self.saved.list.items.items[self.saved.at].name}) catch "it";
-		const going = self.saved.list.items.items[self.saved.at];
+		const label = std.fmt.bufPrint(&name, "{s}", .{going.name}) catch "it";
 		if (going.keeps == .keychain) {
 			keychain.remove(going.target);
 		}
-		_ = self.saved.list.items.orderedRemove(self.saved.at);
-		if (self.saved.at >= self.saved.list.items.items.len and self.saved.at > 0) {
+		_ = self.saved.list.items.orderedRemove(chosen);
+		// The cursor counts what is on screen, and one fewer is showing now.
+		if (self.saved.at >= self.savedCount() and self.saved.at > 0) {
 			self.saved.at -= 1;
 		}
 		conns.save(&self.saved.list, self.saved.path.items) catch {};
@@ -867,11 +867,11 @@ pub const App = struct {
 	/// Mark the connection under the cursor as one nothing may be written
 	/// through, or unmark it.
 	pub fn toggleReadOnly(self: *App) !void {
-		if (self.saved.at >= self.saved.list.items.items.len) {
+		const chosen = self.chosenSaved() orelse {
 			self.complain("there is nothing to mark yet - press a to add a connection", .{});
 			return;
-		}
-		const item = self.saved.list.items.items[self.saved.at];
+		};
+		const item = self.saved.list.items.items[chosen];
 		const now = !item.read_only;
 		if (item.found) {
 			// A cluster from the kubeconfig has nowhere of its own to keep a mark,
@@ -887,7 +887,7 @@ pub const App = struct {
 			try self.saved.list.addWith(name, target, .ask, "", now);
 			self.saved.at = 0;
 		} else {
-			self.saved.list.mark(self.saved.at, now);
+			self.saved.list.mark(chosen, now);
 		}
 		conns.save(&self.saved.list, self.saved.path.items) catch {
 			self.complain("the connection list could not be written", .{});
@@ -914,13 +914,16 @@ pub const App = struct {
 		// Editing one would have to write it somewhere, and the only place it
 		// could go is this program's own file - which would leave two answers to
 		// what that cluster is called. `a` is how to make one of your own.
-		if (edit and self.saved.at < self.saved.list.items.items.len and
-			self.saved.list.items.items[self.saved.at].found)
-		{
-			self.complain("{s} comes from the kubeconfig - a adds one of your own, with its own name", .{
-				self.saved.list.items.items[self.saved.at].name,
-			});
-			return;
+		const chosen = self.chosenSaved();
+		if (edit) {
+			if (chosen) |at| {
+				if (self.saved.list.items.items[at].found) {
+					self.complain("{s} comes from the kubeconfig - a adds one of your own, with its own name", .{
+						self.saved.list.items.items[at].name,
+					});
+					return;
+				}
+			}
 		}
 		self.saved.editing = null;
 		_ = self.typing.arena.reset(.retain_capacity);
@@ -930,17 +933,17 @@ pub const App = struct {
 		var keeps: conns.Keeps = .ask;
 		var read_only = false;
 		if (edit) {
-			if (self.saved.at >= self.saved.list.items.items.len) {
+			const at = chosen orelse {
 				self.complain("there is nothing to edit yet - press a to add one", .{});
 				return;
-			}
-			const entry = self.saved.list.items.items[self.saved.at];
+			};
+			const entry = self.saved.list.items.items[at];
 			name = entry.name;
 			target = entry.target;
 			keeps = entry.keeps;
 			secret = entry.secret;
 			read_only = entry.read_only;
-			self.saved.editing = self.saved.at;
+			self.saved.editing = at;
 		}
 		// A target that cannot be taken apart and put back together identically is
 		// left as the one field it always was.
@@ -1247,6 +1250,7 @@ pub const App = struct {
 		self.freeObjects();
 		self.sidebar.objects.deinit(self.allocator);
 		self.sidebar.filter.deinit(self.allocator);
+		self.saved.filter.deinit(self.allocator);
 		self.grid.cols.deinit(self.allocator);
 		self.grid.widths.deinit(self.allocator);
 		self.grid.rows.deinit(self.allocator);
@@ -1372,6 +1376,58 @@ pub const App = struct {
 			_ = fuzzy.match(name, self.sidebar.filter.items, &hit);
 		}
 		return hit;
+	}
+
+	/// Whether the connection at `index` in the whole list is one the filter
+	/// leaves showing.
+	pub fn savedMatches(self: *App, index: usize) bool {
+		const item = self.saved.list.items.items[index];
+		return connectionMatches(item.name, item.target, self.saved.filter.items);
+	}
+
+	/// Which letters of a name the filter landed on, for the drawing.
+	pub fn savedHit(self: *App, text: []const u8) fuzzy.Hit {
+		var hit = fuzzy.Hit{};
+		if (self.saved.filter.items.len != 0) {
+			_ = fuzzy.match(text, self.saved.filter.items, &hit);
+		}
+		return hit;
+	}
+
+	pub fn savedCount(self: *App) usize {
+		if (self.saved.filter.items.len == 0) {
+			return self.saved.list.items.items.len;
+		}
+		var count: usize = 0;
+		for (0..self.saved.list.items.items.len) |i| {
+			count += @intFromBool(self.savedMatches(i));
+		}
+		return count;
+	}
+
+	/// Where in the whole list the entry shown at position `n` is. The cursor
+	/// counts what is on screen, the way the sidebar's does, so everything that
+	/// wants the entry itself comes through here.
+	pub fn savedIndex(self: *App, n: usize) ?usize {
+		if (self.saved.filter.items.len == 0) {
+			return if (n < self.saved.list.items.items.len) n else null;
+		}
+		var seen: usize = 0;
+		for (0..self.saved.list.items.items.len) |i| {
+			if (!self.savedMatches(i)) {
+				continue;
+			}
+			if (seen == n) {
+				return i;
+			}
+			seen += 1;
+		}
+		return null;
+	}
+
+	/// The entry the cursor is on, in the whole list.
+	pub fn chosenSaved(self: *App) ?usize {
+		return self.savedIndex(self.saved.at);
 	}
 
 	pub fn visibleCount(self: *App) usize {
@@ -4331,6 +4387,23 @@ fn needsPassword(message: []const u8) bool {
 	return false;
 }
 
+/// Whether a saved connection is one this filter leaves showing.
+///
+/// Fuzzy on the name, the way the sidebar and the command palette are - but
+/// plainly on the target, and that difference is the whole of it. Every target
+/// begins `postgres://` or `mssql://` and runs to forty characters, so a fuzzy
+/// match against one says yes to nearly everything: `prod` found a connection
+/// called `localni` through `postgres://u@localni.example:5432/d`, and the
+/// filter narrowed six connections to five. A host or a port is worth searching
+/// for, so the target is searched - as the substring somebody actually typed.
+pub fn connectionMatches(name: []const u8, target: []const u8, needle: []const u8) bool {
+	if (needle.len == 0) {
+		return true;
+	}
+	return fuzzy.match(name, needle, null) != null or
+		std.ascii.indexOfIgnoreCase(target, needle) != null;
+}
+
 pub fn divCeil(a: usize, b: usize) usize {
 	return if (b == 0) 1 else (a + b - 1) / b;
 }
@@ -4417,4 +4490,21 @@ test "a driver that cannot say what it wants is guessed at, and the guess is not
 	// refused password says the same word as a missing one. `error.NeedPassword`
 	// is why this is only a fallback.
 	try testing.expect(needsPassword("the password for foo was not accepted"));
+}
+
+test "the connection filter is fuzzy about the name and literal about the target" {
+	const target = "postgres://u@localni.example:5432/d";
+	// Nothing typed shows everything.
+	try testing.expect(connectionMatches("localni", target, ""));
+	// Fuzzy on the name: `pdb` finds `produkce-db`, which is the point of it.
+	try testing.expect(connectionMatches("produkce-db", "postgres://u@p.example/d", "pdb"));
+	// And not fuzzy on the target, which is what this rule is for: every letter
+	// of `prod` is somewhere in that URL, in that order, so a fuzzy match there
+	// says yes to a connection that has nothing to do with production.
+	try testing.expect(!connectionMatches("localni", target, "prod"));
+	// A host or a port is searched for as itself.
+	try testing.expect(connectionMatches("cokoliv", target, "5432"));
+	try testing.expect(connectionMatches("cokoliv", target, "localni.example"));
+	// Case is not the point of a search either.
+	try testing.expect(connectionMatches("cokoliv", target, "LOCALNI"));
 }

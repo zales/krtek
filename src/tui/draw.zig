@@ -14,6 +14,8 @@ const Files = @import("files.zig");
 const App = app_mod.App;
 const C = app_mod.C;
 const SIDEBAR = app_mod.SIDEBAR;
+/// How many key hints the connection list draws under itself.
+const HINTS: usize = 9;
 const Size = term.Size;
 
 // The widest a single column may get; :text changes it.
@@ -115,8 +117,8 @@ fn connections(app: *App, size: Size, rows: usize) void {
 	// the panel grows by its width rather than taking it from the targets - which
 	// are what people read this list for.
 	var marked: usize = 0;
-	for (app.saved.list.items.items) |item| {
-		marked += @intFromBool(item.read_only);
+	for (app.saved.list.items.items, 0..) |item, i| {
+		marked += @intFromBool(item.read_only and app.savedMatches(i));
 	}
 	const guard: usize = if (marked != 0) 10 else 0;
 	// Two columns narrower than the screen, so that a form drawn over this one -
@@ -125,6 +127,8 @@ fn connections(app: *App, size: Size, rows: usize) void {
 	const width: usize = @min(size.cols -| 2, 74 + guard);
 	const left = if (size.cols > width) (size.cols - width) / 2 else 0;
 	const top: usize = app_mod.CONNECTIONS_FIRST - 1;
+	// Whether there is room for the keys as well as a list worth looking at.
+	const roomy = rows > app_mod.CONNECTIONS_FIRST + HINTS + 5;
 	// Declared here rather than beside where they are drawn, because how much room
 	// the list gets is worked out from how many of these there are.
 	const hints = [_][2][]const u8{
@@ -132,6 +136,7 @@ fn connections(app: *App, size: Size, rows: usize) void {
 		.{ "a", "add a connection" },
 		.{ "e / d", "edit, remove" },
 		.{ "r", "read-only: nothing is written through it" },
+		.{ "/", "narrow the list by name, host or port" },
 		.{ "up down", "move in the list" },
 		.{ "pgup pgdn", "a page at a time; home end for the ends" },
 		.{ "q", "quit" },
@@ -139,20 +144,28 @@ fn connections(app: *App, size: Size, rows: usize) void {
 
 	var line: usize = top + 1;
 
-	if (app.saved.list.items.items.len == 0) {
+	if (app.savedCount() == 0) {
 		screen.moveTo(line, left);
 		screen.style(.{ .fg = C.dim });
-		_ = write(app, "  Nothing saved yet.", width);
+		_ = write(app, if (app.saved.filter.items.len != 0)
+			"  Nothing matches."
+		else
+			"  Nothing saved yet.", width);
 		line += 2;
 	} else {
-		const count = app.saved.list.items.items.len;
-		// Everything below the list wants its lines whatever the list does, so the
-		// list gets what is left rather than all of it. Counted out rather than
-		// guessed at, because guessing left the list three rows too tall and the
-		// frame's bottom line off the screen: the line saying where in the list
-		// this is, the keys, a blank, the two notes, where the file is kept, and
-		// the frame's own last row.
-		const below = 1 + hints.len + 1 + 2 + 1 + 1;
+		const count = app.savedCount();
+		// What the list has to leave room for is the line saying where in it this
+		// is, the keys, and the frame's own last row. Not the notes under them:
+		// those are read once and the list is the work, so on a window too short
+		// for both it is the notes that give way - they draw only if there is
+		// still room, which on a window with a short list there is.
+		//
+		// And on a window too short even for the keys, the keys give way as well.
+		// Eight lines of them on a sixteen-row terminal left two rows for the list
+		// itself, which is the wrong way round on the screen whose whole purpose
+		// is the list - and the strip along the bottom of the terminal names every
+		// one of those keys anyway.
+		const below = 1 + (if (roomy) hints.len else 0) + 1;
 		const page = if (rows > top + below) rows - top - below else 1;
 		// Follow the cursor, by the least that brings it back into view - so a step
 		// down scrolls by one and does not jump the list under somebody's eyes.
@@ -165,10 +178,11 @@ fn connections(app: *App, size: Size, rows: usize) void {
 		app.saved.scroll = scroll;
 		app.saved.shown = page;
 
-		for (app.saved.list.items.items[scroll..], scroll..) |item, i| {
+		for (scroll..count) |i| {
 			if (line >= top + 1 + page) {
 				break;
 			}
+			const item = app.saved.list.items.items[app.savedIndex(i) orelse break];
 			const on = i == app.saved.at;
 			screen.moveTo(line, left);
 			screen.style(.{ .bg = if (on) C.selected else null, .fg = if (on) C.accent else C.text, .bold = on });
@@ -229,7 +243,7 @@ fn connections(app: *App, size: Size, rows: usize) void {
 	}
 
 	for (hints) |entry| {
-		if (line > rows) {
+		if (!roomy or line > rows) {
 			break;
 		}
 		screen.moveTo(line, left);
@@ -267,7 +281,14 @@ fn connections(app: *App, size: Size, rows: usize) void {
 	// to give is the bottom of the list rather than the frame around it: a panel
 	// whose last line is off the screen reads as one that goes on forever.
 	const bottom = @min(line, rows);
-	box(app, top, left, width, bottom + 1 - top, "connect to a database", "", C.accent);
+	// The filter goes in the frame, because once it is typed and the prompt has
+	// closed nothing else on the screen says why two thirds of the list is gone.
+	var narrowed: [64]u8 = undefined;
+	const hint = if (app.saved.filter.items.len != 0)
+		std.fmt.bufPrint(&narrowed, "/{s}   esc clears it", .{app.saved.filter.items}) catch ""
+	else
+		"";
+	box(app, top, left, width, bottom + 1 - top, "connect to a database", hint, C.accent);
 }
 
 fn header(app: *App, size: Size) void {
@@ -1550,7 +1571,7 @@ fn footerHints(app: *App) []const u8 {
 		return out.items;
 	}
 	return switch (app.view) {
-		.connections => " enter connect   a add   e edit   d remove   r read-only   ctrl+k commands   q quit",
+		.connections => " enter connect   / filter   a add   e edit   d remove   r read-only   q quit",
 		.structure => if (app.caps().no_ddl.len == 0)
 			" a alter   I index   K key   N rename   S data   ctrl+k commands"
 		else
