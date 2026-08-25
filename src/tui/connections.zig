@@ -30,13 +30,22 @@ pub const Keeps = enum {
 	file,
 	/// In the macOS keychain, under the target as the account.
 	keychain,
+	/// The same place, with a fingerprint asked for before it is read. See
+	/// `biometry.zig` for what that does and does not guard.
+	touchid,
 
 	pub fn label(self: Keeps) []const u8 {
 		return switch (self) {
 			.ask => "",
 			.file => "in file",
 			.keychain => "keychain",
+			.touchid => "touch id",
 		};
+	}
+
+	/// Whether the keychain is where this one keeps it.
+	pub fn inKeychain(self: Keeps) bool {
+		return self == .keychain or self == .touchid;
 	}
 };
 
@@ -586,6 +595,8 @@ pub fn flagsOf(text: []const u8) Flags {
 			out.secret = word["password=".len..];
 		} else if (std.mem.eql(u8, word, "keychain")) {
 			out.keeps = .keychain;
+		} else if (std.mem.eql(u8, word, "touch-id")) {
+			out.keeps = .touchid;
 		} else if (std.mem.eql(u8, word, "read-only")) {
 			out.read_only = true;
 		}
@@ -632,7 +643,8 @@ pub fn save(list: *List, file_path: []const u8) !void {
 	try out.appendSlice(list.allocator,
 		"# krtek connections: name<TAB>target[<TAB>flag]..., most recent first.\n" ++
 		"# `password=` is plain text in this file, which is mode 0600; `keychain`\n" ++
-		"# means the macOS keychain holds it instead; `read-only` means this program\n" ++
+		"# means the macOS keychain holds it instead, `touch-id` the same with a\n" ++
+		"# fingerprint asked for first; `read-only` means this program\n" ++
 		"# will not write through this connection whatever the account may do.\n");
 	list.stripped = false;
 	for (list.items.items) |item| {
@@ -651,6 +663,7 @@ pub fn save(list: *List, file_path: []const u8) !void {
 			.ask => {},
 			.file => try out.print(list.allocator, "\tpassword={s}", .{item.secret}),
 			.keychain => try out.appendSlice(list.allocator, "\tkeychain"),
+			.touchid => try out.appendSlice(list.allocator, "\ttouch-id"),
 		}
 		if (item.read_only) {
 			try out.appendSlice(list.allocator, "\tread-only");

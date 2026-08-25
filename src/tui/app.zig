@@ -12,6 +12,7 @@ const sql_syntax = @import("editor.zig");
 const fuzzy = @import("fuzzy.zig");
 const conns = @import("connections.zig");
 const keychain = @import("keychain.zig");
+const biometry = @import("biometry.zig");
 const Files = @import("files.zig");
 
 pub const Term = term.Term;
@@ -123,7 +124,7 @@ pub const Focus = enum { sidebar, main };
 pub const Spot = struct { row: usize, col: usize };
 
 /// Where a connection can keep its password, in the order the form offers them.
-const PLACES = [_][]const u8{ "ask", "file", "keychain" };
+const PLACES = [_][]const u8{ "ask", "file", "keychain", "touchid" };
 /// What the Kafka form offers. The empty one is no SASL at all, which is what a
 /// broker on a private network wants.
 const MECHANISMS = [_][]const u8{ "", "PLAIN", "SCRAM-SHA-256", "SCRAM-SHA-512" };
@@ -783,6 +784,18 @@ pub const App = struct {
 			.ask => null,
 			.file => entry.secret,
 			.keychain => keychain.fetch(scratch.allocator(), entry.target) catch null,
+			.touchid => blk: {
+				// The fingerprint first, and the item is not touched without it.
+				// A refusal is not a failure to connect - it falls back to asking
+				// for the password, which is what somebody who cannot use the
+				// reader needs to be able to do.
+				var reason: [160]u8 = undefined;
+				const words = std.fmt.bufPrint(&reason, "unlock the password for {s}", .{entry.name}) catch "unlock a saved password";
+				if (!biometry.ask(words)) {
+					break :blk null;
+				}
+				break :blk keychain.fetch(scratch.allocator(), entry.target) catch null;
+			},
 		};
 		const with = if (secret) |value|
 			try conns.withPassword(scratch.allocator(), entry.target, value)
@@ -829,7 +842,7 @@ pub const App = struct {
 				conns.save(&self.saved.list, self.saved.path.items) catch {};
 				self.say("connected, and the password is now in {s}", .{self.saved.path.items});
 			},
-			.keychain => {
+			.keychain, .touchid => {
 				const target_now = self.saved.list.items.items[0].target;
 				if (keychain.store(target_now, password)) |_| {
 					self.say("connected, and the password is now in the keychain", .{});
@@ -851,7 +864,7 @@ pub const App = struct {
 		}
 		var name: [128]u8 = undefined;
 		const label = std.fmt.bufPrint(&name, "{s}", .{going.name}) catch "it";
-		if (going.keeps == .keychain) {
+		if (going.keeps.inKeychain()) {
 			keychain.remove(going.target);
 		}
 		_ = self.saved.list.items.orderedRemove(chosen);
@@ -1155,13 +1168,20 @@ pub const App = struct {
 			return;
 		}
 		// Only offer what this machine has: the keychain is macOS's.
-		const places = if (keychain.available) &PLACES else PLACES[0..2];
+		// Only what this machine has: the keychain is macOS's, and the reader is
+		// not on every Mac.
+		const places = if (!keychain.available)
+			PLACES[0..2]
+		else if (biometry.available) &PLACES else PLACES[0..3];
 		try form.choice("keep the password", places, Form.indexOf(places, @tagName(keeps)));
 		try form.secret("password", secret, 24);
 		form.sameLine();
 		try form.note("file: plain text in ~/.config/krtek/connections, which only you can read");
 		if (keychain.available) {
 			try form.note("keychain: in the macOS keychain, which asks you before handing it over");
+			if (biometry.available) {
+				try form.note("touchid: the same place, and a fingerprint each time instead of typing");
+			}
 		}
 		try form.note("ask: nothing is kept - as with ~/.pgpass, ~/.my.cnf or PGPASSWORD");
 	}
@@ -3792,7 +3812,7 @@ pub const App = struct {
 						// A connection that stops using the keychain, or moves to
 						// another target, leaves nothing behind in it.
 						const was = self.saved.list.items.items[at];
-						if (was.keeps == .keychain and (keeps != .keychain or !std.mem.eql(u8, was.target, target))) {
+						if (was.keeps.inKeychain() and (!keeps.inKeychain() or !std.mem.eql(u8, was.target, target))) {
 							keychain.remove(was.target);
 						}
 						_ = self.saved.list.items.orderedRemove(at);
@@ -3811,7 +3831,7 @@ pub const App = struct {
 					if (keeps == .file) typed else "",
 					read_only,
 				);
-				if (keeps == .keychain and typed.len != 0) {
+				if (keeps.inKeychain() and typed.len != 0) {
 					keychain.store(clean, typed) catch {
 						self.complain("the keychain would not take the password", .{});
 					};

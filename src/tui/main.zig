@@ -11,6 +11,7 @@ const term = @import("term.zig");
 const app_mod = @import("app.zig");
 const draw = @import("draw.zig");
 const input = @import("input.zig");
+const biometry = @import("biometry.zig");
 
 /// Put the terminal back before saying anything.
 ///
@@ -75,6 +76,11 @@ pub fn main(init: std.process.Init) !void {
 		std.Io.File.stdout().writeStreamingAll(init.io, usage) catch {};
 		return;
 	}
+	// Asked once, before anything is drawn: whether this machine has a reader
+	// with a finger on it cannot change while the program runs, and the answer
+	// decides whether the connection form offers to use one.
+	biometry.detect();
+
 	// No argument is not an error: the app opens its list of connections.
 	const target = if (args.len > 1) args[1] else "";
 

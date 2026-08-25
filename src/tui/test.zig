@@ -166,6 +166,7 @@ test "a key that points past the row is left out rather than read" {
 // the driver layer brings its own tests
 comptime {
 	_ = @import("db");
+	_ = @import("biometry.zig");
 }
 
 test "an engine that refuses a change says so in one place" {

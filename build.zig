@@ -400,13 +400,16 @@ fn inLibc(library: []const u8) bool {
 	return false;
 }
 
-/// The keychain lives in Security.framework, which only macOS has.
+/// The keychain lives in Security.framework, and Touch ID in
+/// LocalAuthentication - both of which only macOS has.
 fn linkKeychain(module: *std.Build.Module, target: std.Build.ResolvedTarget) void {
 	if (target.result.os.tag != .macos) {
 		return;
 	}
 	module.linkFramework("Security", .{});
 	module.linkFramework("CoreFoundation", .{});
+	module.linkFramework("LocalAuthentication", .{});
+	module.linkFramework("Foundation", .{});
 }
 
 fn linkMysql(b: *std.Build, module: *std.Build.Module, target: std.Build.ResolvedTarget, prefix: ?[]const u8, options: Linking) void {

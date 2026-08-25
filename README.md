@@ -107,6 +107,7 @@ quietly rewrite it.
 | `ask` | the default: asked when the server asks, used once, forgotten | nowhere |
 | `file` | the connection stops asking | `password=…` on its line, **plain text**, file mode 0600 |
 | `keychain` | the connection stops asking; macOS guards it | the login keychain, service `krtek`, account = the target |
+| `touchid` | a fingerprint instead of typing, every time | the same keychain item, read only after Touch ID says so |
 
 The list says which is which, so it is never a surprise. Leave the field empty and
 the place set, and the password is asked for once and then kept there.
@@ -116,6 +117,19 @@ macOS decides whether to hand it over. **It will ask you the first time each bui
 of `krtek` reads an item**, because a keychain item remembers which binary created
 it and a rebuilt binary is a different one; "Always Allow" settles it for that
 binary. If you refuse, the app falls back to asking for the password itself.
+
+`touchid` is offered where the Mac has a reader with a finger enrolled. **The
+keychain does not enforce it**, and it is worth being exact about that: an item
+the keychain itself guards with a fingerprint has to live in the data protection
+keychain, and that needs an entitlement only a binary signed with a real team
+identity may carry - claimed by the ad-hoc signature these builds have, macOS
+kills the process on the spot. That was tried first. So what happens is that
+`krtek` asks for the fingerprint through LocalAuthentication and then reads the
+item the way it always did: a lock on the door of this program, not on the safe.
+Worth having anyway, because the alternative people actually reach for is
+*Always Allow*, which hands the binary the password silently and forever. A
+refusal is not a failure - it falls back to asking for the password, which is
+what somebody whose finger will not read needs.
 
 Where an engine has its own password store - `~/.pgpass` for libpq, `~/.my.cnf`
 for MySQL, `PGPASSWORD` in the environment - that is better still, and it keeps
@@ -899,6 +913,7 @@ permanent.
 | `src/tui/connections.zig` | the saved connections and where each keeps its password |
 | `src/db/kafka.zig` | Kafka: the protocol, the compression codecs, TLS and SASL |
 | `src/db/ask.zig` | what the interface asks for, and the SQL it renders to |
+| `src/tui/biometry.zig` | Touch ID, through the Objective-C runtime by hand |
 | `src/tui/keychain.zig` | the macOS keychain, through Security.framework |
 | `vendor/sqlite3.c` | the unmodified SQLite amalgamation, compiled by Zig's clang |
 | `src/db/kafka/` | the Kafka protocol, the codecs, the target and SCRAM - the parts with no connection in them |
