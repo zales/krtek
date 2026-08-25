@@ -124,7 +124,19 @@ fn connections(app: *App, size: Size, rows: usize) void {
 	// instead of one inside them, which drew both frames side by side.
 	const width: usize = @min(size.cols -| 2, 74 + guard);
 	const left = if (size.cols > width) (size.cols - width) / 2 else 0;
-	const top: usize = 2;
+	const top: usize = app_mod.CONNECTIONS_FIRST - 1;
+	// Declared here rather than beside where they are drawn, because how much room
+	// the list gets is worked out from how many of these there are.
+	const hints = [_][2][]const u8{
+		.{ "enter", "connect to the one selected" },
+		.{ "a", "add a connection" },
+		.{ "e / d", "edit, remove" },
+		.{ "r", "read-only: nothing is written through it" },
+		.{ "up down", "move in the list" },
+		.{ "pgup pgdn", "a page at a time; home end for the ends" },
+		.{ "q", "quit" },
+	};
+
 	var line: usize = top + 1;
 
 	if (app.saved.list.items.items.len == 0) {
@@ -133,8 +145,25 @@ fn connections(app: *App, size: Size, rows: usize) void {
 		_ = write(app, "  Nothing saved yet.", width);
 		line += 2;
 	} else {
-		for (app.saved.list.items.items, 0..) |item, i| {
-			if (line + 3 > rows) {
+		const count = app.saved.list.items.items.len;
+		// The hints below want their lines whatever the list does, so the list gets
+		// what is left rather than all of it: a list that pushes the keys off the
+		// screen is a list nobody can be told how to use.
+		const wanted = hints.len + 3;
+		const page = if (rows > top + wanted) rows - top - wanted else 1;
+		// Follow the cursor, by the least that brings it back into view - so a step
+		// down scrolls by one and does not jump the list under somebody's eyes.
+		var scroll = @min(app.saved.scroll, count -| 1);
+		if (app.saved.at < scroll) {
+			scroll = app.saved.at;
+		} else if (app.saved.at >= scroll + page) {
+			scroll = app.saved.at - page + 1;
+		}
+		app.saved.scroll = scroll;
+		app.saved.shown = page;
+
+		for (app.saved.list.items.items[scroll..], scroll..) |item, i| {
+			if (line >= top + 1 + page) {
 				break;
 			}
 			const on = i == app.saved.at;
@@ -179,17 +208,23 @@ fn connections(app: *App, size: Size, rows: usize) void {
 			}
 			line += 1;
 		}
+		// What is above and below, because a list that scrolls without saying so
+		// looks like a list that has ended.
+		if (count > page) {
+			screen.moveTo(line, left);
+			screen.style(.{ .fg = C.faint });
+			var strip: [64]u8 = undefined;
+			const text = std.fmt.bufPrint(&strip, "    {d}-{d} of {d}", .{
+				scroll + 1,
+				@min(scroll + page, count),
+				count,
+			}) catch "";
+			_ = write(app, text, width);
+			screen.clearToEol();
+		}
 		line += 1;
 	}
 
-	const hints = [_][2][]const u8{
-		.{ "enter", "connect to the one selected" },
-		.{ "a", "add a connection" },
-		.{ "e / d", "edit, remove" },
-		.{ "r", "read-only: nothing is written through it" },
-		.{ "up down", "move in the list" },
-		.{ "q", "quit" },
-	};
 	for (hints) |entry| {
 		if (line > rows) {
 			break;

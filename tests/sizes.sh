@@ -23,7 +23,17 @@ CONFIG=$(mktemp -d)
 trap 'rm -rf "$CONFIG" "$DB"' EXIT
 export XDG_CONFIG_HOME="$CONFIG"
 mkdir -p "$CONFIG/krtek"
-printf 'books\t%s\n' "/tmp/krtek-sizes.db" > "$CONFIG/krtek/connections"
+{
+	printf 'books\t%s\n' "/tmp/krtek-sizes.db"
+	# More connections than a window is tall, because that is the shape that
+	# showed the list did not scroll at all: the cursor walked off the bottom and
+	# everything past it was unreachable.
+	i=1
+	while [ "$i" -le 30 ]; do
+		printf 'saved-%02d\t/tmp/krtek-%02d.db\n' "$i" "$i"
+		i=$((i + 1))
+	done
+} > "$CONFIG/krtek/connections"
 
 DB=/tmp/krtek-sizes.db
 rm -f "$DB"
@@ -79,6 +89,20 @@ for size in 120x40 100x30 80x24 70x22 60x20 50x16 44x14 40x12; do
 			printf '%s\n' "$out" >&2
 			fail "two frames side by side on $name at $size"
 		}
+		# Wherever the cursor is, it is on screen. A list longer than the window
+		# used to stop drawing where the room ran out, so `end` put the cursor
+		# somewhere nobody could see and nothing below it could be reached.
+		case "$name" in
+		connections)
+			far=$(SCREEN_COLS="$cols" SCREEN_ROWS="$rows" python3 tests/screen.py "" \
+				'{sleep}' '{end}' '{sleep}' '{keep}' 2>&1) || fail "the list did not draw at $size"
+			printf '%s' "$far" | grep -q '> saved-30' || {
+				echo
+				printf '%s\n' "$far" >&2
+				fail "the last connection is out of sight at $size"
+			}
+			;;
+		esac
 		# The header is the first line of every screen there is.
 		printf '%s' "$out" | head -1 | grep -q '^ krtek' || {
 			echo

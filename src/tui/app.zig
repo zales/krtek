@@ -34,6 +34,13 @@ pub const C = struct {
 
 pub const SIDEBAR: usize = 26;
 
+/// The screen row the connection list's first entry is drawn on: the header, a
+/// blank line and the panel's own top line come before it. Here rather than
+/// written out twice, because the drawing and the mouse have to agree about it
+/// and did not - a click selected the connection above the one clicked, and the
+/// first could not be clicked at all.
+pub const CONNECTIONS_FIRST: usize = 3;
+
 /// How wide the list of objects is on a terminal this wide.
 ///
 /// It used to be twenty-six columns or nothing: on a sixty-column window that
@@ -272,8 +279,16 @@ const Reporting = struct {
 const Saved = struct {
 	list: conns.List,
 	path: std.ArrayListUnmanaged(u8) = .empty,
-	/// The cursor in the connection list.
+	/// The cursor in the connection list, and the first row drawn. A list of
+	/// thirty is longer than most windows are tall, and before this it simply
+	/// stopped drawing where the room ran out - so the cursor walked off the
+	/// bottom and everything past it was unreachable.
 	at: usize = 0,
+	scroll: usize = 0,
+	/// How many entries were on screen last time it was drawn, so a page key can
+	/// move by a page. The drawing is what knows this - it is the one that has the
+	/// window and the hints to fit around.
+	shown: usize = 0,
 	/// The connection a password is being asked for.
 	pending: std.ArrayListUnmanaged(u8) = .empty,
 	/// Which saved connection the open form is editing, so changing both its name
@@ -284,6 +299,11 @@ const Saved = struct {
 	/// list can be edited while a connection is open and what is in force is what
 	/// was in force when it was opened.
 	read_only: bool = false,
+
+	/// A page, and never zero: a page key that moves by nothing looks broken.
+	pub fn page(self: Saved) usize {
+		return @max(1, self.shown);
+	}
 };
 
 /// What is being typed, and what is waiting on the answer.

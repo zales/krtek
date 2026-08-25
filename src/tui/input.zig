@@ -433,6 +433,8 @@ fn onConnections(app: *App, key: Key) !void {
 			'k' => if (app.saved.at > 0) {
 				app.saved.at -= 1;
 			},
+			'g' => app.saved.at = 0,
+			'G' => app.saved.at = count -| 1,
 			'?' => openHelp(app),
 			else => {},
 		},
@@ -442,15 +444,25 @@ fn onConnections(app: *App, key: Key) !void {
 		.up => if (app.saved.at > 0) {
 			app.saved.at -= 1;
 		},
+		// A page is what is on screen, which the drawing worked out and left
+		// behind - thirty connections are a lot of arrow keys otherwise.
+		.page_down => app.saved.at = @min(app.saved.at + app.saved.page(), count -| 1),
+		.page_up => app.saved.at -|= app.saved.page(),
+		.home => app.saved.at = 0,
+		.end => app.saved.at = count -| 1,
 		.enter => try app.connectSaved(),
 		.escape => if (app.connected) {
 			app.view = .grid;
 		},
 		.mouse => |mouse| {
-			// The list starts on the fifth row of the panel.
-			if (mouse.button == .left and mouse.row >= 4 and mouse.row - 4 < count) {
-				app.saved.at = mouse.row - 4;
-				try app.connectSaved();
+			// What is drawn on a row is the entry at that row *in view*, which stops
+			// being the entry at that index in the list as soon as it scrolls.
+			if (mouse.button == .left and mouse.row >= app_mod.CONNECTIONS_FIRST) {
+				const at = app.saved.scroll + (mouse.row - app_mod.CONNECTIONS_FIRST);
+				if (at < count) {
+					app.saved.at = at;
+					try app.connectSaved();
+				}
 			}
 		},
 		else => {},

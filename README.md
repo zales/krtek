@@ -977,7 +977,9 @@ What that checks is not that a screen looks *good* at forty columns - a grid of
 five columns cannot, and truncating is the honest answer - but that the drawing
 is still coherent. Chiefly that two panels are not drawn one column inside each
 other, which is what put a second border down each side of the connection form
-on any window under about seventy-five columns. Counting frames that open
+on any window under about seventy-five columns, and that the cursor is on screen
+wherever it is - a list of thirty connections used to stop drawing where the room
+ran out, so everything past the fold was unreachable. Counting frames that open
 against ones that close was tried and is wrong: a panel drawn over another
 covers its top and not its bottom on purpose.
 
