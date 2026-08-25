@@ -50,13 +50,20 @@ works. Every [release](https://github.com/zales/krtek/releases/latest) also has 
 architectures. The `.deb` installs the binary, the man page and the copyright, and
 **Depends on nothing at all**, so it goes on any Debian or Ubuntu of any age.
 
-**It needs nothing installed.** SQLite, libpq, the MariaDB connector, libssh2 and
-OpenSSL are linked into the binary, and Redis, Kafka, S3, Azure Blob, RabbitMQ,
-the Kubernetes API and SQL Server's TDS are spoken directly - down to the WebSocket a shell in a
-container needs, so no `kubectl` either. The Linux
-builds are static against musl and run on any distribution - checked on Debian with nothing
-installed at all; the macOS builds leave only Apple's own libraries dynamic. That
-is `-Dstatic`.
+**The archive needs nothing installed.** SQLite, libpq, the MariaDB connector,
+libssh2 and OpenSSL are linked into the binary, and Redis, Kafka, S3, Azure Blob,
+RabbitMQ, the Kubernetes API and SQL Server's TDS are spoken directly - down to
+the WebSocket a shell in a container needs, so no `kubectl` either. The Linux
+builds are static against musl and run on any distribution - checked on Debian
+with nothing installed at all; the macOS ones leave only Apple's own libraries
+dynamic. That is `-Dstatic`.
+
+**Homebrew gets a different binary**, and on purpose: there the client libraries
+are declared as dependencies and linked dynamically, which is what a package
+manager is for. Half the download, and an OpenSSL that gets its security fixes
+from `brew upgrade` rather than from whenever this program is next released. The
+static build is what the plain `.tar.gz` and the `.deb` carry, for machines with
+no package manager to ask.
 
 Or from source, which needs nothing but Zig 0.16:
 

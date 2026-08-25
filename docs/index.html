@@ -117,13 +117,15 @@ everyone who already trusts it.</p>
 
 <pre><code>tar xzf krtek-*.tar.gz &amp;&amp; ./krtek-*/krtek</code></pre>
 
-<p><strong>It needs nothing installed.</strong> SQLite, libpq, the MariaDB
+<p><strong>The archive needs nothing installed.</strong> SQLite, libpq, the MariaDB
 connector, libssh2 and OpenSSL are linked into the binary, and Redis, Kafka, S3,
 Azure Blob, RabbitMQ, the Kubernetes API and SQL Server's TDS are spoken
 directly - down to the WebSocket a shell in a container needs, so no
 <code>kubectl</code> either.
 The Linux builds are static against musl and run on any distribution; the macOS
-builds leave only Apple's own libraries dynamic.</p>
+builds leave only Apple's own libraries dynamic. Homebrew gets a dynamic build
+with those libraries declared as dependencies instead - half the download, and
+their security fixes arrive with <code>brew upgrade</code>.</p>
 
 <h2>What it is like</h2>
 
