@@ -879,7 +879,7 @@ pub const App = struct {
 			},
 			.keychain, .touchid => {
 				const target_now = self.saved.list.items.items[0].target;
-				if (keychain.store(target_now, password)) |_| {
+				if (keychain.store(target_now, password, if (self.saved.list.items.items[0].keeps == .touchid) .anyone else .keychain)) |_| {
 					self.say("connected, and the password is now in the keychain", .{});
 				} else |_| {
 					self.complain("connected, but the keychain would not take the password", .{});
@@ -1215,7 +1215,8 @@ pub const App = struct {
 		if (keychain.available) {
 			try form.note("keychain: in the macOS keychain, which asks you before handing it over");
 			if (biometry.available) {
-				try form.note("touchid: the same place, and a fingerprint each time instead of typing");
+				try form.note("touchid: the same place, and a fingerprint each time instead of typing -");
+				try form.note("  the keychain hands this one over without asking, so the finger is the guard");
 			}
 		}
 		try form.note("ask: nothing is kept - as with ~/.pgpass, ~/.my.cnf or PGPASSWORD");
@@ -3874,7 +3875,7 @@ pub const App = struct {
 					read_only,
 				);
 				if (keeps.inKeychain() and typed.len != 0) {
-					keychain.store(clean, typed) catch {
+					keychain.store(clean, typed, if (keeps == .touchid) .anyone else .keychain) catch {
 						self.complain("the keychain would not take the password", .{});
 					};
 				}

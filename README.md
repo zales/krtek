@@ -137,13 +137,21 @@ a saved password until somebody at the keyboard says so, and that holds
 whichever order they come in - but it means nobody is asked to touch anything
 before finding out there is nothing to unlock.
 
-**Two dialogs after a rebuild is macOS, not this.** The first read from a build
-macOS has not seen brings up *"krtek wants to use your confidential
-information"*, and that is the one asking for your login password. `Always
-Allow` settles it for that binary. Nothing here can skip it: the item is guarded
-by the keychain and the fingerprint is this program's own. When the answer is
-no, it now says so - before, the next thing on the screen was a password prompt
-with nothing to say which of the two questions it was answering.
+**The two modes guard different things, and that is the whole of the choice.**
+A `keychain` item remembers which binary may read it, so the first read from a
+build macOS has not seen brings up *"krtek wants to use your confidential
+information"* - that is the dialog asking for your login password, and `Always
+Allow` settles it for that binary. Strong, and one dialog per build.
+
+A `touchid` item is stored so the keychain hands it over without asking, and the
+fingerprint is what stands in the way instead. That is deliberate: a fingerprint
+that arrives only after a dialog asking for the login password is a fingerprint
+replacing nothing, which is what it was after every rebuild. **What it costs is
+real** - any program running as you can read those particular passwords out of
+the keychain with no prompt at all - and what it buys is that the keychain's
+question about *which binary* is replaced by one about *whether the owner is at
+the keyboard*. `keychain` still answers the first question; pick by which one
+matters to you.
 
 Where an engine has its own password store - `~/.pgpass` for libpq, `~/.my.cnf`
 for MySQL, `PGPASSWORD` in the environment - that is better still, and it keeps

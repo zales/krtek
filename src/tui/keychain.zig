@@ -28,8 +28,23 @@ const SERVICE = "krtek";
 /// `errSecItemNotFound`, which is an answer rather than a refusal.
 const ITEM_NOT_FOUND: i32 = -25300;
 
+/// Who the keychain lets read an item.
+pub const Guard = enum {
+	/// The keychain decides, which means this binary and a dialog for the next
+	/// one - an item remembers which binary made it, and a rebuilt binary is a
+	/// different binary.
+	keychain,
+	/// Anything running as this user, with no dialog at all. Not carelessness:
+	/// it is the trade the `touchid` option makes on purpose. A fingerprint that
+	/// arrives only after a dialog asking for the login password is a fingerprint
+	/// replacing nothing, and after a rebuild that is what it was. What is given
+	/// up is the keychain's own answer to *which binary*; what is kept, and what
+	/// that option is for, is an answer to *is the owner at the keyboard*.
+	anyone,
+};
+
 /// Put `password` in the keychain for `account`, replacing what was there.
-pub fn store(account: []const u8, password: []const u8) !void {
+pub fn store(account: []const u8, password: []const u8, guard: Guard) !void {
 	if (!available) {
 		return error.Unsupported;
 	}
@@ -40,8 +55,11 @@ pub fn store(account: []const u8, password: []const u8) !void {
 	const secret = CFDataCreate(null, password.ptr, @intCast(password.len)) orelse return error.OutOfMemory;
 	defer release(secret);
 
-	// Update first: adding a second item for the same account would fail.
-	{
+	// Update first: adding a second item for the same account would fail. Not
+	// where the guard has to change, though - an update leaves the access alone,
+	// so switching a connection between `keychain` and `touchid` would do
+	// nothing at all.
+	if (guard == .keychain) {
 		const query = try dictionary(&.{
 			.{ kSecClass, kSecClassGenericPassword },
 			.{ kSecAttrService, service_key },
@@ -53,8 +71,18 @@ pub fn store(account: []const u8, password: []const u8) !void {
 		if (SecItemUpdate(query, changes) == 0) {
 			return;
 		}
+	} else {
+		remove(account);
 	}
-	const item = try dictionary(&.{
+	const access = if (guard == .anyone) openToAll() else null;
+	defer if (access) |made| release(made);
+	const item = if (access) |made| try dictionary(&.{
+		.{ kSecClass, kSecClassGenericPassword },
+		.{ kSecAttrService, service_key },
+		.{ kSecAttrAccount, account_key },
+		.{ kSecAttrAccess, made },
+		.{ kSecValueData, secret },
+	}) else try dictionary(&.{
 		.{ kSecClass, kSecClassGenericPassword },
 		.{ kSecAttrService, service_key },
 		.{ kSecAttrAccount, account_key },
@@ -100,6 +128,52 @@ pub fn fetch(allocator: std.mem.Allocator, account: []const u8) !?[]u8 {
 	const bytes = CFDataGetBytePtr(data) orelse return null;
 	const length: usize = @intCast(CFDataGetLength(data));
 	return try allocator.dupe(u8, bytes[0..length]);
+}
+
+/// An access that lets anything read the item without a dialog.
+///
+/// The keychain's own way of saying so is an ACL whose list of trusted
+/// applications is empty - empty meaning *any*, which is the one part of this
+/// that has to be read twice. It is the API `security -A` uses: deprecated since
+/// the CSSM era and still the only way to say it about an item in the login
+/// keychain. Null when any of it fails, and then the item is stored the ordinary
+/// way rather than not at all.
+fn openToAll() ?CFRef {
+	const label = string(SERVICE) catch return null;
+	defer release(label);
+	var access: ?CFRef = null;
+	if (SecAccessCreate(label, null, &access) != 0) {
+		return null;
+	}
+	const made = access orelse return null;
+	var acls: ?CFRef = null;
+	if (SecAccessCopySelectedACLList(made, DECRYPT, &acls) != 0) {
+		release(made);
+		return null;
+	}
+	const list = acls orelse {
+		release(made);
+		return null;
+	};
+	defer release(list);
+	var i: isize = 0;
+	while (i < CFArrayGetCount(list)) : (i += 1) {
+		const acl = CFArrayGetValueAtIndex(list, i) orelse continue;
+		var apps: ?CFRef = null;
+		var description: ?CFRef = null;
+		var prompt: Prompt = .{ .version = 0, .flags = 0 };
+		if (SecACLCopySimpleContents(acl, &apps, &description, &prompt) != 0) {
+			continue;
+		}
+		if (apps) |had| {
+			release(had);
+		}
+		_ = SecACLSetSimpleContents(acl, null, description orelse label, &prompt);
+		if (description) |had| {
+			release(had);
+		}
+	}
+	return made;
 }
 
 /// Forget the password for `account`. A missing item is not an error.
@@ -183,6 +257,19 @@ extern "c" const kCFBooleanTrue: CFRef;
 
 extern "c" fn SecItemAdd(attributes: CFRef, result: ?*?CFRef) i32;
 extern "c" fn SecItemCopyMatching(query: CFRef, result: *?*const anyopaque) i32;
+
+/// `CSSM_ACL_AUTHORIZATION_DECRYPT`: reading the secret is what the ACL is about.
+const DECRYPT: u32 = 24;
+
+/// `CSSM_ACL_KEYCHAIN_PROMPT_SELECTOR`, which is two sixteen-bit fields.
+const Prompt = extern struct { version: u16, flags: u16 };
+
+extern "c" fn SecAccessCreate(descriptor: CFRef, trusted: ?CFRef, access: *?CFRef) i32;
+extern "c" fn SecAccessCopySelectedACLList(access: CFRef, action: u32, list: *?CFRef) i32;
+extern "c" fn SecACLCopySimpleContents(acl: CFRef, applications: *?CFRef, description: *?CFRef, prompt: *Prompt) i32;
+extern "c" fn SecACLSetSimpleContents(acl: CFRef, applications: ?CFRef, description: CFRef, prompt: *const Prompt) i32;
+extern "c" fn CFArrayGetCount(array: CFRef) isize;
+extern "c" fn CFArrayGetValueAtIndex(array: CFRef, at: isize) ?CFRef;
 extern "c" fn SecItemUpdate(query: CFRef, changes: CFRef) i32;
 extern "c" fn SecItemDelete(query: CFRef) i32;
 
@@ -191,6 +278,7 @@ extern "c" const kSecClassGenericPassword: CFRef;
 extern "c" const kSecAttrService: CFRef;
 extern "c" const kSecAttrAccount: CFRef;
 extern "c" const kSecValueData: CFRef;
+extern "c" const kSecAttrAccess: CFRef;
 extern "c" const kSecReturnData: CFRef;
 extern "c" const kSecMatchLimit: CFRef;
 extern "c" const kSecMatchLimitOne: CFRef;
