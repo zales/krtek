@@ -7,6 +7,7 @@ const database = @import("db");
 const term = @import("term.zig");
 const Form = @import("form.zig");
 const csv = @import("csv.zig");
+const dump_mod = @import("dump.zig");
 const Editor = @import("editor.zig").Editor;
 const sql_syntax = @import("editor.zig");
 const fuzzy = @import("fuzzy.zig");
@@ -2658,7 +2659,7 @@ pub const App = struct {
         } else if (std.mem.eql(u8, verb, "export")) {
             try self.exportRows(argument);
         } else if (std.mem.eql(u8, verb, "dump")) {
-            try self.dump(argument);
+            try dump_mod.dump(self, argument);
         } else if (std.mem.eql(u8, verb, "text")) {
             const value = std.fmt.parseInt(usize, argument, 10) catch {
                 self.complain(":text needs a number", .{});
@@ -2833,216 +2834,6 @@ pub const App = struct {
         self.say("{d} row(s) of {s} written to {s}", .{ rows, table.name, path });
     }
 
-    pub fn dump(self: *App, path: []const u8) !void {
-        try self.dumpTo(path, null, true, true);
-    }
-
-    /// Write an SQL dump: the whole database or one table, structure and/or data.
-    /// Built from the interface, so it comes out for either engine.
-    pub fn dumpTo(self: *App, path: []const u8, only: ?[]const u8, structure: bool, data: bool) !void {
-        if (path.len == 0) {
-            self.complain("usage: :dump <file>", .{});
-            return;
-        }
-        var arena = std.heap.ArenaAllocator.init(self.allocator);
-        defer arena.deinit();
-        const scratch = arena.allocator();
-        var out: std.ArrayListUnmanaged(u8) = .empty;
-        defer out.deinit(self.allocator);
-        try out.print(self.allocator, "-- krtek dump of {s}, {s}\n", .{ self.conn.describe(), self.conn.version() });
-        try self.conn.ddl().prologue(&out, self.allocator);
-
-        var written: usize = 0;
-        for (try self.conn.objects(scratch, self.grid.schema.items)) |object| {
-            if (only) |wanted| {
-                if (!std.mem.eql(u8, object.name, wanted)) {
-                    continue;
-                }
-            }
-            // An engine's own housekeeping is not the user's data, and dumping it
-            // writes thousands of lines nobody asked for - Kafka's
-            // __consumer_offsets among them.
-            if (object.internal) {
-                continue;
-            }
-            const table = database.Table{ .schema = object.schema, .name = object.name };
-            written += 1;
-            if (structure) {
-                if (try self.conn.definition(scratch, table)) |text| {
-                    // The semicolon is SQL's; an engine whose statements are lines does
-                    // not want one, and its splitter would hand it to the engine.
-                    const body = std.mem.trimEnd(u8, text, ";\n");
-                    if (body.len != 0) {
-                        if (self.caps().speaks_sql) {
-                            try out.print(self.allocator, "\n{s};\n", .{body});
-                        } else {
-                            try out.print(self.allocator, "\n{s}\n", .{body});
-                        }
-                    }
-                }
-                // The indexes are written from their metadata, so the dump does
-                // not depend on the engine keeping DDL text around.
-                for (try self.conn.indexes(scratch, table)) |index| {
-                    if (std.mem.eql(u8, index.kind, "PRIMARY") or index.partial) {
-                        continue; // part of the table, or not reconstructable
-                    }
-                    var members: std.ArrayListUnmanaged([]const u8) = .empty;
-                    var parts = std.mem.tokenizeSequence(u8, index.columns, ", ");
-                    while (parts.next()) |part| {
-                        try members.append(scratch, part);
-                    }
-                    if (members.items.len == 0) {
-                        continue;
-                    }
-                    try self.conn.ddl().createIndex(&out, self.allocator, table, index.name, members.items, std.mem.eql(u8, index.kind, "UNIQUE"), "");
-                }
-            }
-            if (data and object.kind == .table) {
-                try self.dumpRows(&out, table);
-            }
-        }
-        writeFile(path, out.items) catch |err| {
-            self.complain("cannot write {s}: {s}", .{ path, @errorName(err) });
-            return;
-        };
-        self.say("{d} object(s), {d} bytes written to {s}", .{ written, out.items.len, path });
-    }
-
-    fn dumpRows(self: *App, out: *std.ArrayListUnmanaged(u8), table: database.Table) !void {
-        var arena = std.heap.ArenaAllocator.init(self.allocator);
-        defer arena.deinit();
-        const names = try self.columnsOf(arena.allocator(), table.name);
-        if (names.len == 0) {
-            return;
-        }
-        // Where a row only names bytes kept elsewhere, a file of commands that put
-        // the names back would put empty things where the data was.
-        if (!self.caps().dumps_rows) {
-            try out.print(self.allocator, "-- {s} keeps the bytes, not this file: {s} was listed, not dumped\n", .{
-                self.caps().label,
-                table.name,
-            });
-            return;
-        }
-        if (!self.caps().speaks_sql) {
-            return self.dumpCommands(out, table, names);
-        }
-        const allowed = self.caps();
-        // What this table needs said before its rows, and afterwards. Asked for
-        // with the columns in hand, because whether anything is needed depends on
-        // them - a column that numbers itself is the case.
-        const defs = self.columnDefs(arena.allocator(), table.name) catch &[_]database.Column{};
-
-        var rows = (try self.conn.select(.{ .table = table })) orelse return;
-        defer rows.close();
-
-        var first = true;
-        var values: std.ArrayListUnmanaged([]const u8) = .empty;
-        while (try rows.next()) {
-            if (first) {
-                first = false;
-            } else {
-                try out.appendSlice(self.allocator, ",\n");
-            }
-            values.clearRetainingCapacity();
-            var line: std.ArrayListUnmanaged(u8) = .empty;
-            for (0..rows.columnCount()) |i| {
-                if (i != 0) {
-                    try line.appendSlice(self.allocator, ", ");
-                }
-                switch (rows.value(i)) {
-                    .null => try line.appendSlice(self.allocator, "NULL"),
-                    .int => |v| try line.print(self.allocator, "{d}", .{v}),
-                    .float => |v| try line.print(self.allocator, "{d}", .{v}),
-                    .text => |t| {
-                        // The prefix that says which encoding this is in, where the
-                        // engine has one: without it a dump replayed into SQL Server
-                        // loses every character its codepage does not have.
-                        try line.appendSlice(self.allocator, allowed.text_prefix);
-                        try database.quote(&line, self.allocator, t);
-                    },
-                    .blob => |b| {
-                        try line.appendSlice(self.allocator, allowed.blob_prefix);
-                        for (b) |byte| {
-                            try line.print(self.allocator, "{x:0>2}", .{byte});
-                        }
-                        try line.appendSlice(self.allocator, allowed.blob_suffix);
-                    },
-                }
-            }
-            if (out.items.len == 0 or std.mem.endsWith(u8, out.items, ";\n") or std.mem.endsWith(u8, out.items, "\n\n")) {}
-            if (first == false and std.mem.endsWith(u8, out.items, "\n") and !std.mem.endsWith(u8, out.items, ",\n")) {
-                try out.append(self.allocator, '\n');
-                try self.conn.ddl().beforeRows(out, self.allocator, table, defs);
-                try out.appendSlice(self.allocator, "INSERT INTO ");
-                try database.quoteTable(out, self.allocator, table);
-                try out.appendSlice(self.allocator, " (");
-                for (names, 0..) |name, i| {
-                    if (i != 0) {
-                        try out.appendSlice(self.allocator, ", ");
-                    }
-                    try database.quoteName(out, self.allocator, name);
-                }
-                try out.appendSlice(self.allocator, ") VALUES\n");
-            }
-            try out.append(self.allocator, '(');
-            try out.appendSlice(self.allocator, line.items);
-            try out.append(self.allocator, ')');
-            line.deinit(self.allocator);
-        }
-        if (!first) {
-            try out.appendSlice(self.allocator, ";\n");
-            try self.conn.ddl().afterRows(out, self.allocator, table, defs);
-        }
-    }
-
-    /// A dump for an engine that has no SQL: every row as the command that would put
-    /// it back, in the engine's own language and asked of the engine itself. A file of
-    /// INSERT statements - which is what this wrote for every engine before - is not
-    /// something Redis or Kafka can read, so the dump was unusable exactly where it
-    /// was most needed.
-    ///
-    /// What comes out goes back in: the lines are what the editor takes, so importing
-    /// the file as a script replays them.
-    fn dumpCommands(
-        self: *App,
-        out: *std.ArrayListUnmanaged(u8),
-        table: database.Table,
-        names: []const []const u8,
-    ) !void {
-        var rows = (try self.conn.select(.{ .table = table })) orelse return;
-        defer rows.close();
-        var arena = std.heap.ArenaAllocator.init(self.allocator);
-        defer arena.deinit();
-        var written: usize = 0;
-        while (try rows.next()) {
-            _ = arena.reset(.retain_capacity);
-            const a = arena.allocator();
-            var cells: std.ArrayListUnmanaged(database.ask.Cell) = .empty;
-            for (0..rows.columnCount()) |i| {
-                const name = if (i < names.len) names[i] else rows.name(i);
-                const value: ?[]const u8 = switch (rows.value(i)) {
-                    .null => null,
-                    .int => |number| try std.fmt.allocPrint(a, "{d}", .{number}),
-                    .float => |number| try std.fmt.allocPrint(a, "{d}", .{number}),
-                    .text, .blob => |bytes| try a.dupe(u8, bytes),
-                };
-                try cells.append(a, .{ .column = try a.dupe(u8, name), .value = value });
-            }
-            const line = self.conn.wording(a, .{ .change = .{
-                .kind = .insert,
-                .table = table,
-                .cells = cells.items,
-            } }) catch continue;
-            try out.appendSlice(self.allocator, line);
-            try out.append(self.allocator, '\n');
-            written += 1;
-        }
-        if (written == 0) {
-            try out.appendSlice(self.allocator, "-- nothing in it\n");
-        }
-    }
-
     /// The full, unflattened value under the cursor, for the detail view.
     pub fn cellDetail(self: *App, arena: std.mem.Allocator) !?[]const u8 {
         if (self.cursor.row >= self.grid.rows.items.len or self.cursor.col >= self.grid.cols.items.len) {
@@ -3068,80 +2859,6 @@ pub const App = struct {
             .float => |value| try std.fmt.allocPrint(arena, "{d}", .{value}),
             .text, .blob => |bytes| try arena.dupe(u8, bytes),
         };
-    }
-
-    /// What the copy keys put in the clipboard. The value under the cursor is
-    /// fetched whole, the way the detail view does it, so a copied BLOB or a long
-    /// text is not the flattened one line from the grid.
-    pub fn copyCell(self: *App) !void {
-        var arena = std.heap.ArenaAllocator.init(self.allocator);
-        defer arena.deinit();
-        const text = (try self.cellDetail(arena.allocator())) orelse {
-            self.complain("there is no value under the cursor", .{});
-            return;
-        };
-        try self.screen.copy(text);
-        self.say("{d} byte(s) copied", .{text.len});
-    }
-
-    /// The row under the cursor, as tab separated text, which is what a
-    /// spreadsheet and every editor understand.
-    pub fn copyRow(self: *App) !void {
-        if (self.cursor.row >= self.grid.rows.items.len) {
-            self.complain("there is no row under the cursor", .{});
-            return;
-        }
-        var out: std.ArrayListUnmanaged(u8) = .empty;
-        defer out.deinit(self.allocator);
-        for (self.grid.rows.items[self.cursor.row].cells, 0..) |cell, i| {
-            if (self.isHidden(i)) {
-                continue;
-            }
-            if (out.items.len != 0) {
-                try out.append(self.allocator, '\t');
-            }
-            // Flattened here and nowhere else: this is one line of tab separated
-            // fields, and a newline inside one would make it two lines that nothing
-            // can tell apart again. The CSV copy beside it keeps the value whole,
-            // because CSV has quotes to carry it in.
-            try out.appendSlice(self.allocator, cell.text);
-        }
-        try self.screen.copy(out.items);
-        self.say("the row is in the clipboard", .{});
-    }
-
-    /// The whole page, header included, as CSV.
-    pub fn copyPage(self: *App) !void {
-        var out: std.ArrayListUnmanaged(u8) = .empty;
-        defer out.deinit(self.allocator);
-        var written: usize = 0;
-        for (self.grid.cols.items, 0..) |name, i| {
-            if (self.isHidden(i)) {
-                continue;
-            }
-            if (written != 0) {
-                try out.append(self.allocator, ',');
-            }
-            try csv.writeField(&out, self.allocator, name, ',');
-            written += 1;
-        }
-        try out.append(self.allocator, '\n');
-        for (self.grid.rows.items) |row| {
-            written = 0;
-            for (row.cells, 0..) |cell, i| {
-                if (self.isHidden(i)) {
-                    continue;
-                }
-                if (written != 0) {
-                    try out.append(self.allocator, ',');
-                }
-                try csv.writeField(&out, self.allocator, cell.whole(), ',');
-                written += 1;
-            }
-            try out.append(self.allocator, '\n');
-        }
-        try self.screen.copy(out.items);
-        self.say("{d} row(s) copied as CSV", .{self.grid.rows.items.len});
     }
 
     /// The last statement that was run, so a query built in the app can be
@@ -3366,7 +3083,7 @@ pub const App = struct {
         self.typing.form = null;
     }
 
-    fn newForm(self: *App, purpose: Form.Purpose, title: []const u8, hint: []const u8) !*Form.Form {
+    pub fn newForm(self: *App, purpose: Form.Purpose, title: []const u8, hint: []const u8) !*Form.Form {
         self.closeForm();
         self.typing.form = Form.Form.init(self.allocator, purpose, title);
         self.typing.form.?.hint = hint;
@@ -3652,31 +3369,6 @@ pub const App = struct {
         }
     }
 
-    pub fn openExportForm(self: *App) !void {
-        const form = try self.newForm(.export_data, "export", "");
-        try form.choice("what", &[_][]const u8{ "whole database", "this table", "the grid" }, if (!self.hasTable()) 2 else 1);
-        try form.choice("format", &[_][]const u8{ "sql", "csv", "tsv" }, 0);
-        try form.toggle("structure", true);
-        try form.toggle("data", true);
-        try form.text("file", "dump.sql", 40);
-    }
-
-    pub fn openImportForm(self: *App) !void {
-        // Importing is inserting, so an engine that takes no new rows takes no
-        // file of them either.
-        const refused = self.caps().no_insert;
-        if (refused.len != 0) {
-            self.complain("{s}", .{refused});
-            return;
-        }
-        const form = try self.newForm(.import_data, "import", "");
-        try form.choice("kind", &[_][]const u8{ "sql script", "csv into a table" }, 0);
-        try form.text("file", "", 40);
-        try form.text("into table", self.grid.name orelse "", 30);
-        try form.toggle("first line is a header", true);
-        try form.choice("separator", &[_][]const u8{ ",", ";", "tab" }, 0);
-    }
-
     /// Pick a schema on an engine that has them.
     pub fn openSchemaForm(self: *App) !void {
         if (!self.caps().schemas) {
@@ -3816,12 +3508,12 @@ pub const App = struct {
                 return;
             },
             .export_data => {
-                try self.runExport(form);
+                try dump_mod.runExport(self, form);
                 self.closeForm();
                 return;
             },
             .import_data => {
-                try self.runImport(form);
+                try dump_mod.runImport(self, form);
                 self.closeForm();
                 return;
             },
@@ -4133,69 +3825,7 @@ pub const App = struct {
         self.say("{d} hit(s) in {d} column(s)", .{ self.grid.rows.items.len, parts });
     }
 
-    fn runExport(self: *App, form: *Form.Form) !void {
-        const what = form.valueOf(0);
-        const format = form.valueOf(1);
-        const path = form.valueOf(4);
-        if (path.len == 0) {
-            self.complain("give the export a file name", .{});
-            return;
-        }
-        if (std.mem.eql(u8, format, "sql")) {
-            if (std.mem.eql(u8, what, "the grid")) {
-                self.complain("a grid can only go out as csv or tsv", .{});
-                return;
-            }
-            const only = if (std.mem.eql(u8, what, "this table")) self.grid.name else null;
-            try self.dumpTo(path, only, form.isOn(2), form.isOn(3));
-            return;
-        }
-        const separator: u8 = if (std.mem.eql(u8, format, "tsv")) '\t' else ',';
-        if (std.mem.eql(u8, what, "the grid")) {
-            try self.writeGrid(path, separator);
-            return;
-        }
-        const table = if (std.mem.eql(u8, what, "this table")) (self.grid.name orelse "") else "";
-        if (table.len == 0) {
-            self.complain("csv exports one table at a time", .{});
-            return;
-        }
-        try self.writeQuery(path, table, separator);
-    }
-
-    fn runImport(self: *App, form: *Form.Form) !void {
-        const path = form.valueOf(1);
-        if (path.len == 0) {
-            self.complain("give the import a file name", .{});
-            return;
-        }
-        var arena = std.heap.ArenaAllocator.init(self.allocator);
-        defer arena.deinit();
-        const body = csv.readFile(arena.allocator(), path) catch |err| {
-            self.complain("cannot read {s}: {s}", .{ path, @errorName(err) });
-            return;
-        };
-        if (std.mem.eql(u8, form.valueOf(0), "sql script")) {
-            const script = try self.allocator.dupe(u8, body);
-            defer self.allocator.free(script);
-            self.closeForm();
-            try self.runBatch(script);
-            return;
-        }
-        const table = form.valueOf(2);
-        if (table.len == 0) {
-            self.complain("say which table to import into", .{});
-            return;
-        }
-        const separator: u8 = switch (form.field(4).?.pick) {
-            1 => ';',
-            2 => '\t',
-            else => ',',
-        };
-        try self.importCsv(arena.allocator(), table, body, separator, form.isOn(3));
-    }
-
-    fn importCsv(
+    pub fn importCsv(
         self: *App,
         a: std.mem.Allocator,
         wanted: []const u8,
@@ -4380,7 +4010,7 @@ pub fn writeDelimited(out: *std.ArrayListUnmanaged(u8), allocator: std.mem.Alloc
 }
 
 /// std.fs is mid-rework in this Zig version and libc is linked anyway.
-fn writeFile(path: []const u8, bytes: []const u8) !void {
+pub fn writeFile(path: []const u8, bytes: []const u8) !void {
     var buffer: [std.fs.max_path_bytes]u8 = undefined;
     if (path.len >= buffer.len) {
         return error.NameTooLong;

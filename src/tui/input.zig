@@ -6,6 +6,7 @@ const app_mod = @import("app.zig");
 const fuzzy = @import("fuzzy.zig");
 const term = @import("term.zig");
 const database = @import("db");
+const dump_mod = @import("dump.zig");
 const draw = @import("draw.zig");
 
 const App = app_mod.App;
@@ -410,9 +411,15 @@ fn afterPrefix(app: *App, pending: u21, key: Key) !void {
     }
     switch (key) {
         .char => |point| switch (point) {
-            'c' => try app.copyCell(),
-            'r' => try app.copyRow(),
-            'p' => try app.copyPage(),
+            'c' => try dump_mod.copyCell(
+                app,
+            ),
+            'r' => try dump_mod.copyRow(
+                app,
+            ),
+            'p' => try dump_mod.copyPage(
+                app,
+            ),
             's' => try app.copyLastSql(),
             else => app.say("nothing copied", .{}),
         },
@@ -786,8 +793,12 @@ fn letter(app: *App, point: u21, size: term.Size) !void {
         'N' => try app.openRenameForm(),
         'Y' => try app.openCopyForm(),
         'F' => try app.openSearchForm(),
-        'E' => try app.openExportForm(),
-        'M' => try app.openImportForm(),
+        'E' => try dump_mod.openExportForm(
+            app,
+        ),
+        'M' => try dump_mod.openImportForm(
+            app,
+        ),
         'O' => app.view = .connections,
         'f' => try app.openFiles(),
         '#' => try app.openSchemaForm(),
