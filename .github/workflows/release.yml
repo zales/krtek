@@ -77,27 +77,6 @@ jobs:
       - name: package
         run: ./tests/package.sh "${{ inputs.tag || github.ref_name }}" "macos-${{ matrix.arch }}"
 
-      # And once more, dynamic, for Homebrew - which is a package manager and can
-      # be told what this needs instead of being handed a binary with everything
-      # already inside it. Half the download, and the client libraries are then
-      # Homebrew's to keep up to date rather than frozen at whatever was current
-      # when this release was cut. The static one stays for everybody who has no
-      # package manager, which is what it is for.
-      - name: build for homebrew, dynamic
-        run: |
-          zig build -Doptimize=ReleaseSafe -Dstrip -Dcpu=baseline \
-            -Dversion="${{ inputs.tag || github.ref_name }}" \
-            -Dlibpq="$(brew --prefix libpq)" -Dmariadb="$(brew --prefix mariadb-connector-c)"
-          otool -L zig-out/bin/krtek
-          # The opposite check to the one above: these have to be there, or the
-          # formula's dependencies are declared for nothing and the binary is
-          # secretly static again.
-          otool -L zig-out/bin/krtek | grep -q libcrypto || {
-            echo "::error::the homebrew build is not linked against openssl"; exit 1; }
-
-      - name: package for homebrew
-        run: ./tests/package.sh "${{ inputs.tag || github.ref_name }}" "macos-${{ matrix.arch }}-brew"
-
       - uses: actions/upload-artifact@v4
         with:
           name: macos-${{ matrix.arch }}
@@ -243,11 +222,7 @@ jobs:
           SQL Server, Redis, Kafka, S3, Azure Blob, RabbitMQ, SFTP and Kubernetes,
           behind one interface.
 
-          Every archive holds one binary that **needs nothing installed**. Homebrew
-          is the exception and deliberately so: there the client libraries are
-          declared as dependencies and linked dynamically, which halves the download
-          and lets `brew upgrade` deliver their security fixes. In the archives:
-          SQLite,
+          Every archive holds one binary that **needs nothing installed**. SQLite,
           libpq, the MariaDB connector, libssh2 and OpenSSL are linked into it; Redis,
           Kafka, S3, Azure Blob, RabbitMQ, the Kubernetes API and SQL Server's TDS are
           spoken directly, protocol and all - down to the WebSocket a shell in a

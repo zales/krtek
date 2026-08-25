@@ -82,24 +82,16 @@ class Krtek < Formula
   version "$version"
   license "MIT"
 $(bottles)
-  # On a Mac the client libraries are Homebrew's, because Homebrew is a package
-  # manager and this is what one is for: half the download, and an OpenSSL that
-  # gets its security fixes from `brew upgrade` rather than from whenever this
-  # program is next released. Everywhere without a package manager gets the
-  # static binary instead - that is what the plain .tar.gz and the .deb are.
+  # One static binary per platform: nothing is compiled and nothing is depended
+  # on, because the client libraries are already inside it.
   on_macos do
-    depends_on "libpq"
-    depends_on "libssh2"
-    depends_on "mariadb-connector-c"
-    depends_on "openssl@3"
-
     on_arm do
-      url "$(url macos-arm64-brew)"
-      sha256 "$(sha macos-arm64-brew)"
+      url "$(url macos-arm64)"
+      sha256 "$(sha macos-arm64)"
     end
     on_intel do
-      url "$(url macos-x86_64-brew)"
-      sha256 "$(sha macos-x86_64-brew)"
+      url "$(url macos-x86_64)"
+      sha256 "$(sha macos-x86_64)"
     end
   end
 
@@ -118,30 +110,6 @@ $(bottles)
     bin.install "krtek"
     man1.install "krtek.1"
     doc.install "README.md", "LICENSE"
-
-    # The binary was linked on a runner with Homebrew in the usual place, and
-    # names each library by that path. A bottle is relocated by Homebrew itself;
-    # a tarball is not, so on a prefix that is not the usual one this would be a
-    # binary that cannot start. Every path is written again from where Homebrew
-    # says the library actually is on this machine.
-    if OS.mac?
-      names = %w[libpq libssh2 mariadb-connector-c openssl@3]
-      linked = Utils.safe_popen_read("otool", "-L", bin/"krtek").lines.drop(1)
-      linked.each do |line|
-        was = line.strip.split(" ").first
-        name = names.find { |one| was.include?("/#{one}/") }
-        next if name.nil?
-
-        now = "#{Formula[name].opt_lib}/#{File.basename(was)}"
-        next if was == now
-
-        system "install_name_tool", "-change", was, now, bin/"krtek"
-      end
-      # Anything written into a Mach-O invalidates its signature, and on Apple
-      # silicon an invalid one is a binary the kernel will not start. The tools
-      # re-sign as they go these days; this is here for the day they do not.
-      system "codesign", "--force", "--sign", "-", bin/"krtek"
-    end
   end
 
   test do
