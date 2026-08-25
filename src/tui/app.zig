@@ -824,6 +824,13 @@ pub const App = struct {
                     break :blk null;
                 };
                 const value = held orelse break :blk null;
+                // Put it back the way this option needs it kept. An item made
+                // before `touchid` existed - or made by `keychain` and switched
+                // over afterwards - still carries the access it was given then,
+                // which is the one that asks macOS's own question on every new
+                // build. Storing what was just read costs nothing and means that
+                // question is asked once rather than for ever.
+                keychain.store(entry.target, value, .anyone) catch {};
                 var reason: [160]u8 = undefined;
                 const words = std.fmt.bufPrint(&reason, "unlock the password for {s}", .{entry.name}) catch "unlock a saved password";
                 // A refusal is not a failure to connect: it falls back to asking for
