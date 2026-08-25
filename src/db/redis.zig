@@ -207,6 +207,18 @@ pub const Db = struct {
 	/// One reply, reading more from the socket whenever the buffer runs out.
 	fn read(self: *Db, arena: std.mem.Allocator) db.Error!Value {
 		while (true) {
+			// Where this reply begins. A parse that runs out of bytes has already
+			// walked the cursor past everything it did manage to read, so the next
+			// attempt has to be put back to the start - otherwise it resumes in the
+			// middle of a key and reads a letter of it as a type byte.
+			//
+			// Only a reply that arrives in more than one piece can do this, which
+			// is why it never happened on localhost: there the whole answer is in
+			// the first recv. Over a network a SCAN of a hundred keys is several
+			// kilobytes and several packets, and the first one to arrive split took
+			// the connection out for good - every command after it read from an
+			// offset that meant nothing.
+			const start = self.at;
 			if (self.parseValue(arena)) |value| {
 				// Everything before the cursor has been consumed; drop it so a long
 				// session does not grow the buffer forever.
@@ -216,7 +228,10 @@ pub const Db = struct {
 				}
 				return value;
 			} else |err| switch (err) {
-				error.Incomplete => try self.fill(),
+				error.Incomplete => {
+					self.at = start;
+					try self.fill();
+				},
 				else => return error.Driver,
 			}
 		}
@@ -1221,4 +1236,58 @@ test "a command line is split with quotes honoured" {
 	try std.testing.expectEqualStrings("SET", args[0]);
 	try std.testing.expectEqualStrings("greeting", args[1]);
 	try std.testing.expectEqualStrings("hello world", args[2]);
+}
+
+test "a reply that arrives in pieces is read from its start" {
+	// The bug this is here for: a parse that ran out of bytes left the cursor
+	// wherever it had got to, so the retry after more arrived began in the middle
+	// of a key and read a letter of it as a type byte. Every command after that
+	// read from an offset that meant nothing, and the connection was finished.
+	//
+	// It needs the reply to arrive in more than one piece, which on localhost it
+	// never does - so the two pieces are written by hand, with the second one
+	// after the reader is already waiting for it.
+	var pair: [2]std.c.fd_t = undefined;
+	if (std.c.socketpair(std.c.AF.UNIX, std.c.SOCK.STREAM, 0, &pair) != 0) {
+		return error.SkipZigTest;
+	}
+	defer _ = std.c.close(pair[0]);
+	defer _ = std.c.close(pair[1]);
+	setTimeout(pair[0], 50);
+
+	var self = Db{
+		.allocator = std.testing.allocator,
+		.socket = pair[0],
+		.replies = std.heap.ArenaAllocator.init(std.testing.allocator),
+	};
+	defer self.buffer.deinit(std.testing.allocator);
+	defer self.replies.deinit();
+
+	// What a SCAN answers with: a cursor and the keys, split where a real one
+	// splits - in the middle of a key rather than between two of them.
+	const whole = "*2\r\n$1\r\n7\r\n*2\r\n$19\r\nCACHE:FINANCE:RATES\r\n$5\r\nSHORT\r\n";
+	// Two bytes into the first key, which is where a real one is cut: between
+	// packets rather than between values.
+	const cut = 22;
+	const rest = struct {
+		fn send(fd: std.c.fd_t, bytes: []const u8) void {
+			@import("clock.zig").sleep(30);
+			_ = std.c.send(fd, bytes.ptr, bytes.len, 0);
+		}
+	}.send;
+
+	_ = std.c.send(pair[1], whole.ptr, cut, 0);
+	const helper = try std.Thread.spawn(.{}, rest, .{ pair[1], whole[cut..] });
+	defer helper.join();
+
+	const value = try self.read(self.replies.allocator());
+	const list = value.list orelse return error.TestUnexpectedResult;
+	try std.testing.expectEqual(@as(usize, 2), list.len);
+	try std.testing.expectEqualStrings("7", list[0].text.?);
+	const keys = list[1].list orelse return error.TestUnexpectedResult;
+	try std.testing.expectEqual(@as(usize, 2), keys.len);
+	try std.testing.expectEqualStrings("CACHE:FINANCE:RATES", keys[0].text.?);
+	try std.testing.expectEqualStrings("SHORT", keys[1].text.?);
+	// And the buffer is left with nothing owing, so the next reply starts clean.
+	try std.testing.expectEqual(@as(usize, 0), self.at);
 }
