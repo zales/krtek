@@ -101,6 +101,28 @@ for size in 120x40 100x30 80x24 70x22 60x20 50x16 44x14 40x12; do
 				printf '%s\n' "$far" >&2
 				fail "the last connection is out of sight at $size"
 			}
+			# Nothing is drawn over this one, so its frame has to close. It did not:
+			# the list took three rows more than it had and pushed the bottom line
+			# off the screen, which reads as a panel that goes on forever.
+			printf '%s' "$out" | grep -q '╰' || {
+				echo
+				printf '%s\n' "$out" >&2
+				fail "the panel's frame does not close at $size"
+			}
+			# On a window with room for all of it, all of it is there. Closing the
+			# frame wherever the room ran out is the right answer on a short window
+			# and the wrong one on a tall one, where it would quietly hide the keys
+			# instead - so the tall case is checked for what it should contain.
+			# The notes are the last thing drawn, so they are what falls off first
+			# when the list is sized a few rows too generously - the keys survive
+			# that and would not notice.
+			if [ "$rows" -ge 30 ]; then
+				printf '%s' "$out" | grep -q 'a file path opens SQLite' || {
+					echo
+					printf '%s\n' "$out" >&2
+					fail "the bottom of the panel was pushed off the screen at $size"
+				}
+			fi
 			;;
 		esac
 		# The header is the first line of every screen there is.

@@ -146,11 +146,14 @@ fn connections(app: *App, size: Size, rows: usize) void {
 		line += 2;
 	} else {
 		const count = app.saved.list.items.items.len;
-		// The hints below want their lines whatever the list does, so the list gets
-		// what is left rather than all of it: a list that pushes the keys off the
-		// screen is a list nobody can be told how to use.
-		const wanted = hints.len + 3;
-		const page = if (rows > top + wanted) rows - top - wanted else 1;
+		// Everything below the list wants its lines whatever the list does, so the
+		// list gets what is left rather than all of it. Counted out rather than
+		// guessed at, because guessing left the list three rows too tall and the
+		// frame's bottom line off the screen: the line saying where in the list
+		// this is, the keys, a blank, the two notes, where the file is kept, and
+		// the frame's own last row.
+		const below = 1 + hints.len + 1 + 2 + 1 + 1;
+		const page = if (rows > top + below) rows - top - below else 1;
 		// Follow the cursor, by the least that brings it back into view - so a step
 		// down scrolls by one and does not jump the list under somebody's eyes.
 		var scroll = @min(app.saved.scroll, count -| 1);
@@ -259,7 +262,12 @@ fn connections(app: *App, size: Size, rows: usize) void {
 		line += 1;
 	}
 	screen.reset();
-	box(app, top, left, width, line + 1 - top, "connect to a database", "", C.accent);
+	// Never past the last row there is. The list is sized to leave room for
+	// everything below it, but on a window too short to hold even that, what has
+	// to give is the bottom of the list rather than the frame around it: a panel
+	// whose last line is off the screen reads as one that goes on forever.
+	const bottom = @min(line, rows);
+	box(app, top, left, width, bottom + 1 - top, "connect to a database", "", C.accent);
 }
 
 fn header(app: *App, size: Size) void {
