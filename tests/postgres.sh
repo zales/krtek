@@ -33,7 +33,16 @@ docker run -d --name "$NAME" -p "$PORT:5432" -e "POSTGRES_PASSWORD=$PASSWORD" "$
 
 # -i, or the heredoc below is written to a docker client that keeps it to itself
 # and psql inside the container reads nothing at all.
-PSQL="docker exec -i -e PGPASSWORD=$PASSWORD $NAME psql -U postgres -v ON_ERROR_STOP=1"
+#
+# Over TCP rather than the socket, and that is the whole readiness check. The
+# image builds its database by starting a server of its own first, one that
+# listens on the socket and nothing else, running whatever init it has to, and
+# then shutting it down and starting the real one. Ask over the socket and the
+# answer is yes while that temporary server is up - and the first statement
+# after it lands in the shutdown: `terminating connection due to administrator
+# command`. Over TCP there is nothing to hear until the server that stays is
+# listening.
+PSQL="docker exec -i -e PGPASSWORD=$PASSWORD $NAME psql -h 127.0.0.1 -U postgres -v ON_ERROR_STOP=1"
 printf 'waiting for the server'
 tries=0
 until $PSQL -c 'SELECT 1' >/dev/null 2>&1; do

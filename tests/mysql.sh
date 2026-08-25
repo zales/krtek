@@ -29,7 +29,11 @@ docker run -d --name "$NAME" -p "$PORT:3306" -e "MYSQL_ROOT_PASSWORD=$PASSWORD" 
 
 # -i, or the heredoc below is written to a docker client that keeps it to itself
 # and the client inside the container reads nothing at all.
-MYSQL="docker exec -i $NAME mysql -uroot -p$PASSWORD --default-character-set=utf8mb4"
+#
+# Over TCP, not the socket: the image runs a server of its own to build the
+# database first, and that one listens on the socket alone. See tests/postgres.sh
+# for what asking the wrong one costs.
+MYSQL="docker exec -i $NAME mysql -h 127.0.0.1 --protocol=TCP -uroot -p$PASSWORD --default-character-set=utf8mb4"
 printf 'waiting for the server'
 tries=0
 until echo 'SELECT 1' | $MYSQL >/dev/null 2>&1; do
