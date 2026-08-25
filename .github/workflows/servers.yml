@@ -6,6 +6,11 @@ name: servers
 # answers "does it compile and does it start" in a couple of minutes, and this
 # one answers "does it still work" in rather more.
 #
+# The two engines most people open were the last to get one of these, which is
+# exactly backwards: everything exotic here was being checked against a real
+# server while PostgreSQL and MySQL were checked by hand. The MySQL suite found
+# a decimal losing its trailing zero on the first run.
+#
 # Worth the minutes. Every bug found in these drivers lately was found by one of
 # these scripts and by nothing else: a listing signed the way the server does not
 # check it, an upload freed twice on the way out, a password prompt that repeated
@@ -30,7 +35,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        suite: [sqlite, azure, s3, rabbit, sftp, kafka, k8s, mssql]
+        suite: [sqlite, postgres, mysql, azure, s3, rabbit, sftp, kafka, k8s, mssql]
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4

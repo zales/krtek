@@ -1105,6 +1105,22 @@ because browsing messages is what this driver refuses to do.
 zig build && ./tests/rabbit.sh
 ```
 
+[tests/postgres.sh](tests/postgres.sh) and [tests/mysql.sh](tests/mysql.sh) came
+last and should have come first: everything exotic here was being checked against
+a real server while the two engines most people open were checked by hand. Each
+brings up its own and looks for what that engine does differently - PostgreSQL
+reads through the catalogs, has schemas that are not databases, streams a result
+a row at a time and cancels a statement down a second connection; MySQL calls a
+database a schema, runs in `ANSI_QUOTES` so that `"name"` is a name, and alters
+with `CHANGE COLUMN`. The MySQL one earned its keep on the first run: a
+`decimal(12,2)` was going through a float on the way to the screen, so `2499.50`
+arrived as `2499.5`.
+
+```sh
+zig build && ./tests/postgres.sh
+zig build && ./tests/mysql.sh
+```
+
 [tests/mssql.sh](tests/mssql.sh) is worth more than the rest of these, because
 nothing in that driver is somebody else's code: the packet framing, the
 handshake, the login, the token stream and the types are all written here, and

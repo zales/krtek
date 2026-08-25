@@ -749,9 +749,18 @@ pub const Rows = struct {
             MYSQL_TYPE_TINY, MYSQL_TYPE_SHORT, MYSQL_TYPE_LONG, MYSQL_TYPE_LONGLONG, MYSQL_TYPE_INT24, MYSQL_TYPE_YEAR => .{
                 .int = std.fmt.parseInt(i64, text, 10) catch return .{ .text = text },
             },
-            MYSQL_TYPE_FLOAT, MYSQL_TYPE_DOUBLE, MYSQL_TYPE_DECIMAL, MYSQL_TYPE_NEWDECIMAL => .{
+            MYSQL_TYPE_FLOAT, MYSQL_TYPE_DOUBLE => .{
                 .float = std.fmt.parseFloat(f64, text) catch return .{ .text = text },
             },
+            // A DECIMAL is not a float and does not survive being one: the server
+            // sends `2499.50` and a round trip through f64 hands back `2499.5`,
+            // which is a different number to anybody reading a column of money.
+            // It stays as the text it arrived as - the same answer PostgreSQL's
+            // numeric gets - and `isNumeric` still says it is a number, so the
+            // grid puts it on the right.
+            MYSQL_TYPE_DECIMAL, MYSQL_TYPE_NEWDECIMAL => .{ .text = text },
+            // (`keepsItsDigits` is the same question, asked where a test can
+            // reach it.)
             // A BLOB and a TEXT are the same type on the wire; the character set
             // tells them apart, and 63 is `binary`.
             MYSQL_TYPE_TINY_BLOB, MYSQL_TYPE_MEDIUM_BLOB, MYSQL_TYPE_LONG_BLOB, MYSQL_TYPE_BLOB, MYSQL_TYPE_GEOMETRY => if (info.charsetnr == 63)
@@ -1268,6 +1277,13 @@ const MYSQL_WAIT_EXCEPT: c_int = 4;
 /// `MARIADB_CONNECTION_SERVER_STATUS` out of the connector's own enum.
 const MARIADB_CONNECTION_SERVER_STATUS: c_uint = 30;
 
+/// Whether this type must not be handed through a float on the way to the
+/// screen. Named rather than written out twice, so a test can ask the same
+/// question the value reader asks.
+fn keepsItsDigits(kind: c_uint) bool {
+    return kind == MYSQL_TYPE_DECIMAL or kind == MYSQL_TYPE_NEWDECIMAL;
+}
+
 const MYSQL_TYPE_DECIMAL: c_uint = 0;
 const MYSQL_TYPE_TINY: c_uint = 1;
 const MYSQL_TYPE_SHORT: c_uint = 2;
@@ -1338,3 +1354,17 @@ extern fn mysql_affected_rows(handle: *MYSQL) c_ulonglong;
 extern fn mysql_next_result(handle: *MYSQL) c_int;
 /// The connector's own accessor for things libmysqlclient never exposed.
 extern fn mariadb_get_info(handle: *MYSQL, value: c_uint, out: *anyopaque) u8;
+
+test "a decimal is not a float and is not turned into one" {
+    // The server sends `2499.50`; a round trip through f64 hands back `2499.5`,
+    // which is a different number to anybody reading a column of money. This is
+    // the rule, tested where the rule lives rather than only against a server:
+    // the two decimal types stay as the text they arrived as, and the two float
+    // types do not.
+    for ([_]c_uint{ MYSQL_TYPE_DECIMAL, MYSQL_TYPE_NEWDECIMAL }) |kind| {
+        try std.testing.expect(keepsItsDigits(kind));
+    }
+    for ([_]c_uint{ MYSQL_TYPE_FLOAT, MYSQL_TYPE_DOUBLE }) |kind| {
+        try std.testing.expect(!keepsItsDigits(kind));
+    }
+}
