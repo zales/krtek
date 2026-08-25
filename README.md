@@ -131,6 +131,20 @@ Worth having anyway, because the alternative people actually reach for is
 refusal is not a failure - it falls back to asking for the password, which is
 what somebody whose finger will not read needs.
 
+The fingerprint comes *after* the keychain has handed the password over, not
+before. That changes nothing about what is promised - this program will not use
+a saved password until somebody at the keyboard says so, and that holds
+whichever order they come in - but it means nobody is asked to touch anything
+before finding out there is nothing to unlock.
+
+**Two dialogs after a rebuild is macOS, not this.** The first read from a build
+macOS has not seen brings up *"krtek wants to use your confidential
+information"*, and that is the one asking for your login password. `Always
+Allow` settles it for that binary. Nothing here can skip it: the item is guarded
+by the keychain and the fingerprint is this program's own. When the answer is
+no, it now says so - before, the next thing on the screen was a password prompt
+with nothing to say which of the two questions it was answering.
+
 Where an engine has its own password store - `~/.pgpass` for libpq, `~/.my.cnf`
 for MySQL, `PGPASSWORD` in the environment - that is better still, and it keeps
 working either way.
