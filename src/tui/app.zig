@@ -3524,62 +3524,7 @@ pub const App = struct {
                 try self.reopen(target);
                 return;
             },
-            .connection => {
-                const name = try self.allocator.dupe(u8, form.valueNamed("name"));
-                defer self.allocator.free(name);
-                // The fields are that engine's; the target is what they come to.
-                const shape = self.shapeOf(form);
-                const target = conns.compose(self.formArena(), shape) catch "";
-                const keeps = std.meta.stringToEnum(conns.Keeps, form.valueNamed("keep the password")) orelse .ask;
-                const read_only = form.isOnNamed("read-only");
-                const typed = try self.allocator.dupe(u8, form.valueNamed("password"));
-                defer self.allocator.free(typed);
-                const editing = self.saved.editing;
-                self.saved.editing = null;
-                self.closeForm();
-                if (target.len == 0) {
-                    self.complain("a connection needs something to point at", .{});
-                    return;
-                }
-                if (editing) |at| {
-                    if (at < self.saved.list.items.items.len) {
-                        // A connection that stops using the keychain, or moves to
-                        // another target, leaves nothing behind in it.
-                        const was = self.saved.list.items.items[at];
-                        if (was.keeps.inKeychain() and (!keeps.inKeychain() or !std.mem.eql(u8, was.target, target))) {
-                            keychain.remove(was.target);
-                        }
-                        _ = self.saved.list.items.orderedRemove(at);
-                    }
-                }
-                var scratch = std.heap.ArenaAllocator.init(self.allocator);
-                defer scratch.deinit();
-                const clean = try conns.withoutPassword(scratch.allocator(), target);
-                try self.saved.list.addWith(
-                    if (name.len != 0) name else try conns.suggestName(scratch.allocator(), clean),
-                    clean,
-                    keeps,
-                    // The file keeps the password itself; the keychain keeps its own,
-                    // and an empty one here means "keep the one I am about to be
-                    // asked for".
-                    if (keeps == .file) typed else "",
-                    read_only,
-                );
-                if (keeps.inKeychain() and typed.len != 0) {
-                    keychain.store(clean, typed, if (keeps == .touchid) .anyone else .keychain) catch {
-                        self.complain("the keychain would not take the password", .{});
-                    };
-                }
-                conns.save(&self.saved.list, self.saved.path.items) catch {};
-                self.saved.at = 0;
-                // Connect with whatever was typed here, whether or not it is kept.
-                const attempt = if (typed.len != 0)
-                    try conns.withPassword(scratch.allocator(), clean, typed)
-                else
-                    target;
-                try self.connect(attempt, false);
-                return;
-            },
+            .connection => try self.saveConnection(form),
             .schema => {
                 const name = try self.allocator.dupe(u8, form.valueOf(0));
                 defer self.allocator.free(name);
@@ -3615,6 +3560,69 @@ pub const App = struct {
             .alter_table, .foreign_key, .index => try self.reload(),
             else => {},
         }
+    }
+
+    /// What the connection form came to: a target built out of its fields, an
+    /// entry in the list, the password put wherever it said, and then a
+    /// connection made with it.
+    ///
+    /// Its own function because it was a third of `submitForm` on its own, and
+    /// the only arm of that switch doing anything but writing a statement.
+    fn saveConnection(self: *App, form: *Form.Form) !void {
+        const name = try self.allocator.dupe(u8, form.valueNamed("name"));
+        defer self.allocator.free(name);
+        // The fields are that engine's; the target is what they come to.
+        const shape = self.shapeOf(form);
+        const target = conns.compose(self.formArena(), shape) catch "";
+        const keeps = std.meta.stringToEnum(conns.Keeps, form.valueNamed("keep the password")) orelse .ask;
+        const read_only = form.isOnNamed("read-only");
+        const typed = try self.allocator.dupe(u8, form.valueNamed("password"));
+        defer self.allocator.free(typed);
+        const editing = self.saved.editing;
+        self.saved.editing = null;
+        self.closeForm();
+        if (target.len == 0) {
+            self.complain("a connection needs something to point at", .{});
+            return;
+        }
+        if (editing) |at| {
+            if (at < self.saved.list.items.items.len) {
+                // A connection that stops using the keychain, or moves to
+                // another target, leaves nothing behind in it.
+                const was = self.saved.list.items.items[at];
+                if (was.keeps.inKeychain() and (!keeps.inKeychain() or !std.mem.eql(u8, was.target, target))) {
+                    keychain.remove(was.target);
+                }
+                _ = self.saved.list.items.orderedRemove(at);
+            }
+        }
+        var scratch = std.heap.ArenaAllocator.init(self.allocator);
+        defer scratch.deinit();
+        const clean = try conns.withoutPassword(scratch.allocator(), target);
+        try self.saved.list.addWith(
+            if (name.len != 0) name else try conns.suggestName(scratch.allocator(), clean),
+            clean,
+            keeps,
+            // The file keeps the password itself; the keychain keeps its own,
+            // and an empty one here means "keep the one I am about to be
+            // asked for".
+            if (keeps == .file) typed else "",
+            read_only,
+        );
+        if (keeps.inKeychain() and typed.len != 0) {
+            keychain.store(clean, typed, if (keeps == .touchid) .anyone else .keychain) catch {
+                self.complain("the keychain would not take the password", .{});
+            };
+        }
+        conns.save(&self.saved.list, self.saved.path.items) catch {};
+        self.saved.at = 0;
+        // Connect with whatever was typed here, whether or not it is kept.
+        const attempt = if (typed.len != 0)
+            try conns.withPassword(scratch.allocator(), clean, typed)
+        else
+            target;
+        try self.connect(attempt, false);
+        return;
     }
 
     /// The row form as a change: which columns it sets, to what, and which row it
