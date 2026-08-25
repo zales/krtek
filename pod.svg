@@ -1,0 +1,101 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="902" height="496" viewBox="0 0 902 496" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13.0">
+<rect width="100%" height="100%" rx="8" fill="#111114"/>
+<rect x="14.0" y="14.0" width="59.3" height="18.0" fill="#26262c"/>
+<rect x="72.8" y="14.0" width="59.3" height="18.0" fill="#26262c"/>
+<rect x="131.6" y="14.0" width="756.5" height="18.0" fill="#26262c"/>
+<rect x="14.0" y="50.0" width="202.1" height="18.0" fill="#2e2e36"/>
+<rect x="215.6" y="50.0" width="8.9" height="18.0" fill="#2e2e36"/>
+<rect x="14.0" y="446.0" width="286.1" height="18.0" fill="#26262c"/>
+<rect x="299.6" y="446.0" width="588.5" height="18.0" fill="#26262c"/>
+<text x="14.0" y="27.3" fill="#e0e0e6" font-weight="600" xml:space="preserve" textLength="58.8" lengthAdjust="spacing"> krtek </text>
+<text x="72.8" y="27.3" fill="#8aa7f0" xml:space="preserve" textLength="58.8" lengthAdjust="spacing">default</text>
+<text x="131.6" y="27.3" fill="#9a9aa6" xml:space="preserve" textLength="756.0" lengthAdjust="spacing">                                                      Kubernetes v1.31.5+k3s1  18 objects </text>
+<text x="14.0" y="45.3" fill="#9a9aa6" xml:space="preserve" textLength="92.4" lengthAdjust="spacing"> NAMESPACE </text>
+<text x="106.4" y="45.3" fill="#8aa7f0" xml:space="preserve" textLength="67.2" lengthAdjust="spacing">payments</text>
+<text x="173.6" y="45.3" fill="#7c7c88" xml:space="preserve" textLength="58.8" lengthAdjust="spacing">     #│</text>
+<text x="232.4" y="45.3" fill="#8aa7f0" font-weight="600" xml:space="preserve" textLength="201.6" lengthAdjust="spacing"> billing-b9558874d-6kzwq</text>
+<text x="434.0" y="45.3" fill="#9a9aa6" xml:space="preserve" textLength="453.6" lengthAdjust="spacing">   pods                                               </text>
+<text x="14.0" y="63.3" fill="#e0e0e6" xml:space="preserve" textLength="201.6" lengthAdjust="spacing"> ▪ pods                 </text>
+<text x="215.6" y="63.3" fill="#7c7c88" xml:space="preserve" textLength="8.4" lengthAdjust="spacing">?</text>
+<text x="224.0" y="63.3" fill="#7c7c88" xml:space="preserve" textLength="8.4" lengthAdjust="spacing">│</text>
+<text x="232.4" y="63.3" fill="#9a9aa6" xml:space="preserve" textLength="100.8" lengthAdjust="spacing">        name</text>
+<text x="333.2" y="63.3" fill="#e0e0e6" xml:space="preserve" textLength="210.0" lengthAdjust="spacing">  billing-b9558874d-6kzwq</text>
+<text x="14.0" y="81.3" fill="#e0e0e6" xml:space="preserve" textLength="201.6" lengthAdjust="spacing"> ▪ deployments          </text>
+<text x="215.6" y="81.3" fill="#7c7c88" xml:space="preserve" textLength="16.8" lengthAdjust="spacing">?│</text>
+<text x="232.4" y="81.3" fill="#9a9aa6" xml:space="preserve" textLength="100.8" lengthAdjust="spacing">       ready</text>
+<text x="333.2" y="81.3" fill="#e0e0e6" xml:space="preserve" textLength="554.4" lengthAdjust="spacing">  0/1                                                             </text>
+<text x="14.0" y="99.3" fill="#e0e0e6" xml:space="preserve" textLength="201.6" lengthAdjust="spacing"> ▪ statefulsets         </text>
+<text x="215.6" y="99.3" fill="#7c7c88" xml:space="preserve" textLength="16.8" lengthAdjust="spacing">?│</text>
+<text x="232.4" y="99.3" fill="#9a9aa6" xml:space="preserve" textLength="100.8" lengthAdjust="spacing">      status</text>
+<text x="333.2" y="99.3" fill="#e0e0e6" xml:space="preserve" textLength="554.4" lengthAdjust="spacing">  Error                                                           </text>
+<text x="14.0" y="117.3" fill="#e0e0e6" xml:space="preserve" textLength="201.6" lengthAdjust="spacing"> ▪ daemonsets           </text>
+<text x="215.6" y="117.3" fill="#7c7c88" xml:space="preserve" textLength="16.8" lengthAdjust="spacing">?│</text>
+<text x="232.4" y="117.3" fill="#9a9aa6" xml:space="preserve" textLength="100.8" lengthAdjust="spacing">    restarts</text>
+<text x="333.2" y="117.3" fill="#e0e0e6" xml:space="preserve" textLength="554.4" lengthAdjust="spacing">  4                                                               </text>
+<text x="14.0" y="135.3" fill="#e0e0e6" xml:space="preserve" textLength="201.6" lengthAdjust="spacing"> ▪ replicasets          </text>
+<text x="215.6" y="135.3" fill="#7c7c88" xml:space="preserve" textLength="16.8" lengthAdjust="spacing">?│</text>
+<text x="232.4" y="135.3" fill="#9a9aa6" xml:space="preserve" textLength="100.8" lengthAdjust="spacing">         age</text>
+<text x="333.2" y="135.3" fill="#e0e0e6" xml:space="preserve" textLength="554.4" lengthAdjust="spacing">  1m                                                              </text>
+<text x="14.0" y="153.3" fill="#e0e0e6" xml:space="preserve" textLength="201.6" lengthAdjust="spacing"> ▪ jobs                 </text>
+<text x="215.6" y="153.3" fill="#7c7c88" xml:space="preserve" textLength="16.8" lengthAdjust="spacing">?│</text>
+<text x="232.4" y="153.3" fill="#9a9aa6" xml:space="preserve" textLength="100.8" lengthAdjust="spacing">          ip</text>
+<text x="333.2" y="153.3" fill="#e0e0e6" xml:space="preserve" textLength="554.4" lengthAdjust="spacing">  10.42.0.8                                                       </text>
+<text x="14.0" y="171.3" fill="#e0e0e6" xml:space="preserve" textLength="201.6" lengthAdjust="spacing"> ▪ cronjobs             </text>
+<text x="215.6" y="171.3" fill="#7c7c88" xml:space="preserve" textLength="16.8" lengthAdjust="spacing">?│</text>
+<text x="232.4" y="171.3" fill="#9a9aa6" xml:space="preserve" textLength="100.8" lengthAdjust="spacing">        node</text>
+<text x="333.2" y="171.3" fill="#e0e0e6" xml:space="preserve" textLength="554.4" lengthAdjust="spacing">  5950dd828eb6                                                    </text>
+<text x="14.0" y="189.3" fill="#e0e0e6" xml:space="preserve" textLength="201.6" lengthAdjust="spacing"> ▪ services             </text>
+<text x="215.6" y="189.3" fill="#7c7c88" xml:space="preserve" textLength="16.8" lengthAdjust="spacing">?│</text>
+<text x="232.4" y="189.3" fill="#9a9aa6" xml:space="preserve" textLength="100.8" lengthAdjust="spacing">   namespace</text>
+<text x="333.2" y="189.3" fill="#e0e0e6" xml:space="preserve" textLength="554.4" lengthAdjust="spacing">  payments                                                        </text>
+<text x="14.0" y="207.3" fill="#e0e0e6" xml:space="preserve" textLength="201.6" lengthAdjust="spacing"> ▪ ingresses            </text>
+<text x="215.6" y="207.3" fill="#7c7c88" xml:space="preserve" textLength="16.8" lengthAdjust="spacing">?│</text>
+<text x="232.4" y="207.3" fill="#9a9aa6" xml:space="preserve" textLength="100.8" lengthAdjust="spacing">      labels</text>
+<text x="333.2" y="207.3" fill="#e0e0e6" xml:space="preserve" textLength="554.4" lengthAdjust="spacing">  app=billing,pod-template-hash=b9558874d                         </text>
+<text x="14.0" y="225.3" fill="#e0e0e6" xml:space="preserve" textLength="201.6" lengthAdjust="spacing"> ▪ configmaps           </text>
+<text x="215.6" y="225.3" fill="#7c7c88" xml:space="preserve" textLength="16.8" lengthAdjust="spacing">?│</text>
+<text x="14.0" y="243.3" fill="#e0e0e6" xml:space="preserve" textLength="201.6" lengthAdjust="spacing"> ▪ secrets              </text>
+<text x="215.6" y="243.3" fill="#7c7c88" xml:space="preserve" textLength="16.8" lengthAdjust="spacing">?│</text>
+<text x="232.4" y="243.3" fill="#9a9aa6" xml:space="preserve" textLength="100.8" lengthAdjust="spacing">   container</text>
+<text x="333.2" y="243.3" fill="#e0e0e6" xml:space="preserve" textLength="554.4" lengthAdjust="spacing">  billing                                                         </text>
+<text x="14.0" y="261.3" fill="#e0e0e6" xml:space="preserve" textLength="201.6" lengthAdjust="spacing"> ▪ persistentvolum      </text>
+<text x="215.6" y="261.3" fill="#7c7c88" xml:space="preserve" textLength="16.8" lengthAdjust="spacing">?│</text>
+<text x="232.4" y="261.3" fill="#9a9aa6" xml:space="preserve" textLength="100.8" lengthAdjust="spacing">       image</text>
+<text x="333.2" y="261.3" fill="#e0e0e6" xml:space="preserve" textLength="554.4" lengthAdjust="spacing">  docker.io/library/busybox:1.36                                  </text>
+<text x="14.0" y="279.3" fill="#e0e0e6" xml:space="preserve" textLength="201.6" lengthAdjust="spacing"> ▪ serviceaccounts      </text>
+<text x="215.6" y="279.3" fill="#7c7c88" xml:space="preserve" textLength="16.8" lengthAdjust="spacing">?│</text>
+<text x="232.4" y="279.3" fill="#9a9aa6" xml:space="preserve" textLength="100.8" lengthAdjust="spacing">       state</text>
+<text x="333.2" y="279.3" fill="#e0e0e6" xml:space="preserve" textLength="554.4" lengthAdjust="spacing">  terminated: Error (1) at 2026-08-22T21:12:45Z                   </text>
+<text x="14.0" y="297.3" fill="#e0e0e6" xml:space="preserve" textLength="201.6" lengthAdjust="spacing"> ▪ events               </text>
+<text x="215.6" y="297.3" fill="#7c7c88" xml:space="preserve" textLength="16.8" lengthAdjust="spacing">?│</text>
+<text x="232.4" y="297.3" fill="#9a9aa6" xml:space="preserve" textLength="100.8" lengthAdjust="spacing">    restarts</text>
+<text x="333.2" y="297.3" fill="#e0e0e6" xml:space="preserve" textLength="554.4" lengthAdjust="spacing">  4                                                               </text>
+<text x="14.0" y="315.3" fill="#e0e0e6" xml:space="preserve" textLength="201.6" lengthAdjust="spacing"> ▪ nodes                </text>
+<text x="215.6" y="315.3" fill="#7c7c88" xml:space="preserve" textLength="16.8" lengthAdjust="spacing">?│</text>
+<text x="232.4" y="315.3" fill="#9a9aa6" xml:space="preserve" textLength="100.8" lengthAdjust="spacing">   last exit</text>
+<text x="333.2" y="315.3" fill="#e0e0e6" xml:space="preserve" textLength="554.4" lengthAdjust="spacing">  terminated: Error (1) at 2026-08-22T21:11:54Z                   </text>
+<text x="14.0" y="333.3" fill="#e0e0e6" xml:space="preserve" textLength="201.6" lengthAdjust="spacing"> ▪ namespaces           </text>
+<text x="215.6" y="333.3" fill="#7c7c88" xml:space="preserve" textLength="16.8" lengthAdjust="spacing">?│</text>
+<text x="14.0" y="351.3" fill="#e0e0e6" xml:space="preserve" textLength="201.6" lengthAdjust="spacing"> ▪ persistentvolum      </text>
+<text x="215.6" y="351.3" fill="#7c7c88" xml:space="preserve" textLength="16.8" lengthAdjust="spacing">?│</text>
+<text x="232.4" y="351.3" fill="#9a9aa6" xml:space="preserve" textLength="100.8" lengthAdjust="spacing">   Scheduled</text>
+<text x="333.2" y="351.3" fill="#e0e0e6" xml:space="preserve" textLength="554.4" lengthAdjust="spacing">  Successfully assigned payments/billing-b9558874d-6kzwq to 5950… </text>
+<text x="14.0" y="369.3" fill="#e0e0e6" xml:space="preserve" textLength="201.6" lengthAdjust="spacing"> ▪ storageclasses       </text>
+<text x="215.6" y="369.3" fill="#7c7c88" xml:space="preserve" textLength="16.8" lengthAdjust="spacing">?│</text>
+<text x="232.4" y="369.3" fill="#9a9aa6" xml:space="preserve" textLength="100.8" lengthAdjust="spacing">     Pulling</text>
+<text x="333.2" y="369.3" fill="#e0e0e6" xml:space="preserve" textLength="554.4" lengthAdjust="spacing">  Pulling image "busybox:1.36"                                    </text>
+<text x="224.0" y="387.3" fill="#7c7c88" xml:space="preserve" textLength="8.4" lengthAdjust="spacing">│</text>
+<text x="232.4" y="387.3" fill="#9a9aa6" xml:space="preserve" textLength="100.8" lengthAdjust="spacing">      Pulled</text>
+<text x="333.2" y="387.3" fill="#e0e0e6" xml:space="preserve" textLength="554.4" lengthAdjust="spacing">  Successfully pulled image "busybox:1.36" in 2.233s (2.233s inc… </text>
+<text x="224.0" y="405.3" fill="#7c7c88" xml:space="preserve" textLength="8.4" lengthAdjust="spacing">│</text>
+<text x="232.4" y="405.3" fill="#9a9aa6" xml:space="preserve" textLength="100.8" lengthAdjust="spacing">     Created</text>
+<text x="333.2" y="405.3" fill="#e0e0e6" xml:space="preserve" textLength="554.4" lengthAdjust="spacing">  Created container billing                                       </text>
+<text x="224.0" y="423.3" fill="#7c7c88" xml:space="preserve" textLength="8.4" lengthAdjust="spacing">│</text>
+<text x="232.4" y="423.3" fill="#9a9aa6" xml:space="preserve" textLength="100.8" lengthAdjust="spacing">     Started</text>
+<text x="333.2" y="423.3" fill="#e0e0e6" xml:space="preserve" textLength="554.4" lengthAdjust="spacing">  Started container billing                                       </text>
+<text x="224.0" y="441.3" fill="#7c7c88" xml:space="preserve" textLength="8.4" lengthAdjust="spacing">│</text>
+<text x="232.4" y="441.3" fill="#9a9aa6" xml:space="preserve" textLength="100.8" lengthAdjust="spacing">      Pulled</text>
+<text x="333.2" y="441.3" fill="#e0e0e6" xml:space="preserve" textLength="554.4" lengthAdjust="spacing">  Container image "busybox:1.36" already present on machine       </text>
+<text x="14.0" y="459.3" fill="#71c68f" xml:space="preserve" textLength="285.6" lengthAdjust="spacing"> default - Kubernetes v1.31.5+k3s1</text>
+<text x="14.0" y="477.3" fill="#7c7c88" xml:space="preserve" textLength="873.6" lengthAdjust="spacing"> l logs   s shell   t terminal   y as JSON   x delete this pod   esc back                               </text>
+</svg>

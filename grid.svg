@@ -1,0 +1,56 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="868" height="280" viewBox="0 0 868 280" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13.0">
+<rect width="100%" height="100%" rx="8" fill="#111114"/>
+<rect x="14.0" y="14.0" width="59.3" height="18.0" fill="#26262c"/>
+<rect x="72.8" y="14.0" width="109.7" height="18.0" fill="#26262c"/>
+<rect x="182.0" y="14.0" width="672.5" height="18.0" fill="#26262c"/>
+<rect x="232.4" y="50.0" width="445.7" height="18.0" fill="#26262c"/>
+<rect x="677.6" y="50.0" width="176.9" height="18.0" fill="#26262c"/>
+<rect x="14.0" y="68.0" width="202.1" height="18.0" fill="#4c4c56"/>
+<rect x="215.6" y="68.0" width="8.9" height="18.0" fill="#4c4c56"/>
+<rect x="232.4" y="68.0" width="34.1" height="18.0" fill="#8aa7f0"/>
+<rect x="266.0" y="68.0" width="84.5" height="18.0" fill="#4c4c56"/>
+<rect x="350.0" y="68.0" width="235.7" height="18.0" fill="#4c4c56"/>
+<rect x="585.2" y="68.0" width="92.9" height="18.0" fill="#4c4c56"/>
+<rect x="14.0" y="230.0" width="252.5" height="18.0" fill="#26262c"/>
+<rect x="266.0" y="230.0" width="588.5" height="18.0" fill="#26262c"/>
+<text x="14.0" y="27.3" fill="#e0e0e6" font-weight="600" xml:space="preserve" textLength="58.8" lengthAdjust="spacing"> krtek </text>
+<text x="72.8" y="27.3" fill="#8aa7f0" xml:space="preserve" textLength="109.2" lengthAdjust="spacing">/tmp/books.db</text>
+<text x="182.0" y="27.3" fill="#9a9aa6" xml:space="preserve" textLength="672.0" lengthAdjust="spacing">                                                       SQLite 3.50.4  3 objects </text>
+<text x="14.0" y="45.3" fill="#9a9aa6" xml:space="preserve" textLength="210.0" lengthAdjust="spacing"> TABLES &amp; VIEWS          </text>
+<text x="224.0" y="45.3" fill="#7c7c88" xml:space="preserve" textLength="8.4" lengthAdjust="spacing">│</text>
+<text x="232.4" y="45.3" fill="#8aa7f0" font-weight="600" xml:space="preserve" textLength="50.4" lengthAdjust="spacing"> books</text>
+<text x="282.8" y="45.3" fill="#9a9aa6" xml:space="preserve" textLength="571.2" lengthAdjust="spacing">  1-5 of 5   page 1/1                                               </text>
+<text x="14.0" y="63.3" fill="#e0e0e6" xml:space="preserve" textLength="201.6" lengthAdjust="spacing"> ▪ authors              </text>
+<text x="215.6" y="63.3" fill="#7c7c88" xml:space="preserve" textLength="16.8" lengthAdjust="spacing">4│</text>
+<text x="232.4" y="63.3" fill="#9a9aa6" font-weight="600" xml:space="preserve" textLength="445.2" lengthAdjust="spacing"> id  author_id title                       year price</text>
+<text x="14.0" y="81.3" fill="#e0e0e6" xml:space="preserve" textLength="201.6" lengthAdjust="spacing"> ▪ books                </text>
+<text x="215.6" y="81.3" fill="#9a9aa6" xml:space="preserve" textLength="8.4" lengthAdjust="spacing">5</text>
+<text x="224.0" y="81.3" fill="#7c7c88" xml:space="preserve" textLength="8.4" lengthAdjust="spacing">│</text>
+<text x="232.4" y="81.3" fill="#111114" xml:space="preserve" textLength="33.6" lengthAdjust="spacing">   1</text>
+<text x="266.0" y="81.3" fill="#63a8d8" xml:space="preserve" textLength="84.0" lengthAdjust="spacing">         1</text>
+<text x="350.0" y="81.3" fill="#e0e0e6" xml:space="preserve" textLength="235.2" lengthAdjust="spacing"> Válka s mloky              </text>
+<text x="585.2" y="81.3" fill="#63a8d8" xml:space="preserve" textLength="92.4" lengthAdjust="spacing"> 1936 249.5</text>
+<text x="14.0" y="99.3" fill="#e0e0e6" xml:space="preserve" textLength="201.6" lengthAdjust="spacing"> ~ in_print             </text>
+<text x="215.6" y="99.3" fill="#7c7c88" xml:space="preserve" textLength="16.8" lengthAdjust="spacing">5│</text>
+<text x="232.4" y="99.3" fill="#63a8d8" xml:space="preserve" textLength="117.6" lengthAdjust="spacing">   2         1</text>
+<text x="350.0" y="99.3" fill="#e0e0e6" xml:space="preserve" textLength="235.2" lengthAdjust="spacing"> RUR                        </text>
+<text x="585.2" y="99.3" fill="#63a8d8" xml:space="preserve" textLength="92.4" lengthAdjust="spacing"> 1920   189</text>
+<text x="224.0" y="117.3" fill="#7c7c88" xml:space="preserve" textLength="8.4" lengthAdjust="spacing">│</text>
+<text x="232.4" y="117.3" fill="#63a8d8" xml:space="preserve" textLength="117.6" lengthAdjust="spacing">   3         2</text>
+<text x="350.0" y="117.3" fill="#e0e0e6" xml:space="preserve" textLength="235.2" lengthAdjust="spacing"> Obsluhoval jsem krále      </text>
+<text x="585.2" y="117.3" fill="#63a8d8" xml:space="preserve" textLength="92.4" lengthAdjust="spacing"> 1971   199</text>
+<text x="224.0" y="135.3" fill="#7c7c88" xml:space="preserve" textLength="8.4" lengthAdjust="spacing">│</text>
+<text x="232.4" y="135.3" fill="#63a8d8" xml:space="preserve" textLength="117.6" lengthAdjust="spacing">   4         3</text>
+<text x="350.0" y="135.3" fill="#e0e0e6" xml:space="preserve" textLength="235.2" lengthAdjust="spacing"> Žert                       </text>
+<text x="585.2" y="135.3" fill="#63a8d8" xml:space="preserve" textLength="92.4" lengthAdjust="spacing"> 1967   279</text>
+<text x="224.0" y="153.3" fill="#7c7c88" xml:space="preserve" textLength="8.4" lengthAdjust="spacing">│</text>
+<text x="232.4" y="153.3" fill="#63a8d8" xml:space="preserve" textLength="117.6" lengthAdjust="spacing">   5         4</text>
+<text x="350.0" y="153.3" fill="#e0e0e6" xml:space="preserve" textLength="235.2" lengthAdjust="spacing"> Osudy dobrého vojáka Švejka</text>
+<text x="585.2" y="153.3" fill="#63a8d8" xml:space="preserve" textLength="92.4" lengthAdjust="spacing"> 1921 349.9</text>
+<text x="224.0" y="171.3" fill="#7c7c88" xml:space="preserve" textLength="8.4" lengthAdjust="spacing">│</text>
+<text x="224.0" y="189.3" fill="#7c7c88" xml:space="preserve" textLength="8.4" lengthAdjust="spacing">│</text>
+<text x="224.0" y="207.3" fill="#7c7c88" xml:space="preserve" textLength="8.4" lengthAdjust="spacing">│</text>
+<text x="224.0" y="225.3" fill="#7c7c88" xml:space="preserve" textLength="8.4" lengthAdjust="spacing">│</text>
+<text x="14.0" y="243.3" fill="#71c68f" xml:space="preserve" textLength="252.0" lengthAdjust="spacing"> /tmp/books.db - SQLite 3.50.4</text>
+<text x="14.0" y="261.3" fill="#7c7c88" xml:space="preserve" textLength="840.0" lengthAdjust="spacing"> i insert   e edit   x delete   o sort   v whole value   space mark   ctrl+k commands               </text>
+</svg>
