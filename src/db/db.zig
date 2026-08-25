@@ -299,16 +299,8 @@ pub const Caps = struct {
     /// What to cast a value to in order to compare it as text. Every engine
     /// spells it differently and MySQL does not know `TEXT` as a cast target.
     text_cast: []const u8 = "TEXT",
-    /// What goes in front of a quoted string so the engine reads it as text in
-    /// the wide encoding rather than in whatever single-byte one the database
-    /// was created with. Only SQL Server needs it, and there it is not optional:
-    /// `'příklep'` written plainly loses the `ř` on the way in, silently, and the
-    /// row comes back looking almost right.
-    text_prefix: []const u8 = "",
-    /// How a run of bytes is written into a statement. `x'` … `'` is what SQLite
-    /// and MySQL take; SQL Server writes `0x` and no quotes at all.
-    blob_prefix: []const u8 = "x'",
-    blob_suffix: []const u8 = "'",
+    /// How this engine wants a value written into a statement.
+    literal: Literal = .{},
     /// How a page of rows is asked for. Three of the four SQL engines here take
     /// `LIMIT n OFFSET m`; SQL Server takes the spelling the standard settled on
     /// instead, and will not take it without something to sort by.
@@ -916,6 +908,41 @@ pub const RowKey = struct {
 
     pub fn usable(self: RowKey) bool {
         return self.columns.len != 0;
+    }
+};
+
+/// How a value is written down so the server reads it back as what it is.
+///
+/// One idea rather than three fields: it used to be `text_prefix`,
+/// `blob_prefix` and `blob_suffix`, and every caller put them together by hand
+/// - which is how a CSV export came to write the prefix and then forget it was
+/// writing bytes. The strings are still the data, because they are what differs
+/// between engines; what is not repeated is the knowing how to use them.
+pub const Literal = struct {
+    /// What goes in front of a quoted string so the engine reads it as text in
+    /// the wide encoding rather than in whatever single-byte one the database
+    /// was created with. Only SQL Server needs it, and there it is not optional:
+    /// `'příklep'` written plainly loses the `ř` on the way in, silently, and the
+    /// row comes back looking almost right.
+    text_prefix: []const u8 = "",
+    /// How a run of bytes is written. `x'` … `'` is what SQLite and MySQL take;
+    /// SQL Server writes `0x` and no quotes at all.
+    blob_prefix: []const u8 = "x'",
+    blob_suffix: []const u8 = "'",
+
+    /// `text`, quoted and prefixed the way this engine reads it.
+    pub fn writeText(self: Literal, out: *List, a: std.mem.Allocator, text: []const u8) !void {
+        try out.appendSlice(a, self.text_prefix);
+        try quote(out, a, text);
+    }
+
+    /// `bytes`, as the hex this engine reads back as bytes.
+    pub fn writeBlob(self: Literal, out: *List, a: std.mem.Allocator, bytes: []const u8) !void {
+        try out.appendSlice(a, self.blob_prefix);
+        for (bytes) |byte| {
+            try out.print(a, "{x:0>2}", .{byte});
+        }
+        try out.appendSlice(a, self.blob_suffix);
     }
 };
 

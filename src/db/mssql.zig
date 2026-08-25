@@ -227,11 +227,13 @@ pub const Db = struct {
             // URL already says.
             .label = "SQL Server",
             .text_cast = "NVARCHAR(MAX)",
-            .text_prefix = "N",
-            // Bytes are written bare and unquoted here: `0xDEADBEEF`, where
-            // SQLite and MySQL take `x'DEADBEEF'`.
-            .blob_prefix = "0x",
-            .blob_suffix = "",
+            .literal = .{
+                .text_prefix = "N",
+                // Bytes are written bare and unquoted here: `0xDEADBEEF`, where
+                // SQLite and MySQL take `x'DEADBEEF'`.
+                .blob_prefix = "0x",
+                .blob_suffix = "",
+            },
             .paging = .offset_fetch,
         };
     }

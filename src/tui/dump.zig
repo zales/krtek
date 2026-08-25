@@ -136,20 +136,11 @@ pub fn dumpRows(app: *App, out: *std.ArrayListUnmanaged(u8), table: database.Tab
                 .null => try line.appendSlice(app.allocator, "NULL"),
                 .int => |v| try line.print(app.allocator, "{d}", .{v}),
                 .float => |v| try line.print(app.allocator, "{d}", .{v}),
-                .text => |t| {
-                    // The prefix that says which encoding this is in, where the
-                    // engine has one: without it a dump replayed into SQL Server
-                    // loses every character its codepage does not have.
-                    try line.appendSlice(app.allocator, allowed.text_prefix);
-                    try database.quote(&line, app.allocator, t);
-                },
-                .blob => |b| {
-                    try line.appendSlice(app.allocator, allowed.blob_prefix);
-                    for (b) |byte| {
-                        try line.print(app.allocator, "{x:0>2}", .{byte});
-                    }
-                    try line.appendSlice(app.allocator, allowed.blob_suffix);
-                },
+                // Written the way this engine reads it back: without the
+                // prefix, a dump replayed into SQL Server loses every character
+                // its codepage does not have.
+                .text => |t| try allowed.literal.writeText(&line, app.allocator, t),
+                .blob => |b| try allowed.literal.writeBlob(&line, app.allocator, b),
             }
         }
         if (out.items.len == 0 or std.mem.endsWith(u8, out.items, ";\n") or std.mem.endsWith(u8, out.items, "\n\n")) {}

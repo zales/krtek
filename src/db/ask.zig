@@ -218,8 +218,7 @@ fn renderValue(out: *List, a: std.mem.Allocator, item: Cell, caps: db.Caps) !voi
     if (item.raw) {
         try out.appendSlice(a, value);
     } else {
-        try out.appendSlice(a, caps.text_prefix);
-        try db.quote(out, a, value);
+        try caps.literal.writeText(out, a, value);
     }
 }
 
@@ -244,8 +243,7 @@ fn renderWhere(out: *List, a: std.mem.Allocator, where: []const Filter, text: []
         }
         try out.appendSlice(a, filter.op.sql());
         if (filter.op.takesValue()) {
-            try out.appendSlice(a, caps.text_prefix);
-            try db.quote(out, a, filter.value);
+            try caps.literal.writeText(out, a, filter.value);
         }
     }
     if (text.len != 0) {
@@ -463,7 +461,7 @@ test "text carries the prefix that says which encoding it is in" {
     const sql = try renderedAs(.{
         .table = .{ .name = "zbozi" },
         .where = &.{.{ .column = "nazev", .op = .like, .value = "%vrtačka%" }},
-    }, .{ .text_prefix = "N" });
+    }, .{ .literal = .{ .text_prefix = "N" } });
     defer testing.allocator.free(sql);
     try testing.expectEqualStrings(
         "SELECT * FROM \"zbozi\" WHERE \"nazev\" LIKE N'%vrtačka%'",
@@ -480,7 +478,7 @@ test "text carries the prefix that says which encoding it is in" {
             .{ .column = "zalozeno", .value = "SYSUTCDATETIME()", .raw = true },
         },
         .where = &.{.{ .column = "id", .value = "2" }},
-    }, .{ .text_prefix = "N" });
+    }, .{ .literal = .{ .text_prefix = "N" } });
     // The written-out expression is not a string and does not take the prefix.
     try testing.expectEqualStrings(
         "UPDATE \"zbozi\" SET \"nazev\" = N'příklep', \"zalozeno\" = SYSUTCDATETIME() WHERE \"id\" = N'2'",
