@@ -135,43 +135,96 @@ pub const Action = struct {
 	/// Words to match on besides the label.
 	also: []const u8 = "",
 	needs: ?app_mod.Focus = null,
+	/// What the engine has to be able to do for this to be worth offering. The
+	/// palette used to offer all of it to all of them, so Redis - which has one
+	/// table holding every key, and no SQL - was told it could write SQL, create
+	/// a view and add a foreign key. The keys themselves refuse, but being
+	/// refused after choosing something from a list of what you can do is a list
+	/// that was lying.
+	wants: Wants = .anything,
+	/// What to call this where the engine has no SQL. The editor is the same key
+	/// and the same panel on Redis, Kafka or a cluster - what it takes is that
+	/// engine's own commands - so hiding it there would take away the console,
+	/// and calling it "write and run SQL" was telling somebody to type something
+	/// the engine has never heard of. Empty means the label is right either way.
+	plain: []const u8 = "",
+
+	pub const Wants = enum {
+		anything,
+		/// The editor and the search across tables, which are written as SQL.
+		sql,
+		/// Creating, altering, renaming, copying, emptying or dropping the object.
+		ddl,
+		/// An index, a view, a trigger or a foreign key.
+		relations,
+		inserting,
+		editing,
+		deleting,
+		schemas,
+		files,
+	};
 };
+
+/// What this is called on this connection.
+pub fn labelFor(action: Action, caps: ?database.Caps) []const u8 {
+	if (caps) |allowed| {
+		if (!allowed.speaks_sql and action.plain.len != 0) {
+			return action.plain;
+		}
+	}
+	return action.label;
+}
+
+/// Whether this is worth offering on this connection.
+pub fn offered(action: Action, caps: database.Caps, has_files: bool) bool {
+	return switch (action.wants) {
+		.anything => true,
+		.sql => caps.speaks_sql,
+		.ddl => caps.no_ddl.len == 0,
+		.relations => caps.no_ddl.len == 0 and caps.no_relations.len == 0,
+		.inserting => caps.no_insert.len == 0,
+		.editing => caps.no_update.len == 0,
+		.deleting => caps.no_delete.len == 0,
+		.schemas => caps.schemas or caps.databases,
+		.files => has_files,
+	};
+}
 
 pub const actions = [_]Action{
 	.{ .key = 'd', .label = "browse the selected table", .also = "data rows open select", .needs = .sidebar },
 	.{ .key = 'S', .label = "structure of the table", .also = "columns indexes keys schema create" },
-	.{ .key = 's', .label = "write and run SQL", .also = "query editor statement" },
-	.{ .key = 'F', .label = "search every table", .also = "find text grep" },
+	.{ .key = 's', .label = "write and run SQL", .plain = "write and run a command", .also = "query editor statement console" },
+	.{ .key = 'F', .label = "search every table", .also = "find text grep", .wants = .sql },
 	.{ .key = '/', .label = "filter the object list", .also = "search find tables" },
 	.{ .key = 'W', .label = "filter the rows", .also = "where condition" },
 	.{ .key = 'w', .label = "choose visible columns", .also = "hide show" },
 	.{ .key = 'o', .label = "sort by this column", .also = "order asc desc" },
 	.{ .key = 'r', .label = "reload", .also = "refresh again" },
 	.{ .key = 'R', .label = "follow the table", .also = "auto reload refresh tail watch live new rows messages kafka" },
-	.{ .key = 'i', .label = "insert a row", .also = "new add", .needs = .main },
-	.{ .key = 'e', .label = "edit the row", .also = "change update", .needs = .main },
-	.{ .key = 'y', .label = "clone the row", .also = "copy duplicate", .needs = .main },
-	.{ .key = 'x', .label = "delete the marked rows", .also = "remove", .needs = .main },
+	.{ .key = 'i', .label = "insert a row", .also = "new add", .needs = .main, .wants = .inserting },
+	.{ .key = 'e', .label = "edit the row", .also = "change update", .needs = .main, .wants = .editing },
+	.{ .key = 'y', .label = "clone the row", .also = "copy duplicate", .needs = .main, .wants = .inserting },
+	.{ .key = 'x', .label = "delete the marked rows", .also = "remove", .needs = .main, .wants = .deleting },
 	.{ .key = ' ', .label = "mark the row", .also = "select tick", .needs = .main },
 	.{ .key = 'v', .label = "show the whole value", .also = "detail full text", .needs = .main },
-	.{ .key = 'c', .label = "create a table", .also = "new" },
-	.{ .key = 'a', .label = "alter the table", .also = "change columns modify" },
-	.{ .key = 'I', .label = "add an index", .also = "unique primary key" },
-	.{ .key = 'K', .label = "add a foreign key", .also = "reference relation" },
-	.{ .key = 'V', .label = "create a view", .also = "new" },
-	.{ .key = 'T', .label = "create a trigger", .also = "new" },
-	.{ .key = 'N', .label = "rename the table", .also = "move" },
-	.{ .key = 'Y', .label = "copy the table", .also = "duplicate" },
-	.{ .key = 'X', .label = "empty the table", .also = "truncate delete all" },
-	.{ .key = 'D', .label = "drop the table", .also = "delete remove" },
+	.{ .key = 'c', .label = "create a table", .also = "new", .wants = .ddl },
+	.{ .key = 'a', .label = "alter the table", .also = "change columns modify", .wants = .ddl },
+	.{ .key = 'I', .label = "add an index", .also = "unique primary key", .wants = .relations },
+	.{ .key = 'K', .label = "add a foreign key", .also = "reference relation", .wants = .relations },
+	.{ .key = 'V', .label = "create a view", .also = "new", .wants = .relations },
+	.{ .key = 'T', .label = "create a trigger", .also = "new", .wants = .relations },
+	.{ .key = 'N', .label = "rename the table", .also = "move", .wants = .ddl },
+	.{ .key = 'Y', .label = "copy the table", .also = "duplicate", .wants = .ddl },
+	.{ .key = 'X', .label = "empty the table", .also = "truncate delete all", .wants = .ddl },
+	.{ .key = 'D', .label = "drop the table", .also = "delete remove", .wants = .ddl },
 	.{ .key = 'E', .label = "export", .also = "dump sql csv save" },
 	.{ .key = 'C', .label = "copy to the clipboard", .also = "yank value row page csv sql" },
-	.{ .key = 'M', .label = "import", .also = "load sql csv file" },
+	.{ .key = 'M', .label = "import", .also = "load sql csv file", .wants = .inserting },
 	.{ .key = 'b', .label = "database information", .also = "settings pragmas size version" },
 	.{ .key = 'L', .label = "list every relation", .also = "objects tables views indexes" },
-	.{ .key = '#', .label = "switch schema", .also = "namespace search path" },
+	.{ .key = '#', .label = "switch schema", .also = "namespace search path", .wants = .schemas },
 	.{ .key = 'O', .label = "connections", .also = "open connect database server saved" },
-	.{ .key = 'f', .label = "browse the files", .also = "copy upload download transfer sftp s3 azure manager" },
+	.{ .key = 'f', .label = "browse the files", .also = "copy upload download transfer sftp s3 azure manager", .wants = .files },
 	.{ .key = 'm', .label = "messages", .also = "log reports errors" },
 	.{ .key = '?', .label = "help: the whole key map", .also = "keys shortcuts" },
 	.{ .key = ':', .label = "a command", .also = "limit text vacuum analyze check" },
@@ -207,9 +260,21 @@ fn score(action: Action, query: []const u8, hit: ?*fuzzy.Hit) ?u16 {
 
 /// The matches, in order, into `out`; returns how many there are.
 pub fn paletteMatches(query: []const u8, out: *[actions.len]usize) usize {
+	return paletteFor(query, null, false, out);
+}
+
+/// The same, on a connection: what the engine cannot do is not offered. `null`
+/// caps means every action, which is what the tests want and what the palette
+/// shows before anything is open.
+pub fn paletteFor(query: []const u8, caps: ?database.Caps, has_files: bool, out: *[actions.len]usize) usize {
 	var scores: [actions.len]u16 = undefined;
 	var count: usize = 0;
 	for (actions, 0..) |action, i| {
+		if (caps) |allowed| {
+			if (!offered(action, allowed, has_files)) {
+				continue;
+			}
+		}
 		const got = score(action, query, null) orelse continue;
 		out[count] = i;
 		scores[count] = got;
@@ -342,7 +407,7 @@ fn afterPrefix(app: *App, pending: u21, key: Key) !void {
 fn onPalette(app: *App, key: Key, size: term.Size) !void {
 	const palette = &app.palette.?;
 	var found: [actions.len]usize = undefined;
-	const count = paletteMatches(palette.query.items, &found);
+	const count = paletteFor(palette.query.items, if (app.connected) app.caps() else null, app.connected and app.conn.files() != null, &found);
 	switch (key) {
 		.escape => closePalette(app),
 		.ctrl => |code| switch (code) {
@@ -602,12 +667,23 @@ fn scrollHelp(app: *App, key: Key) bool {
 /// The keys that write a schema statement. They are refused together, because an
 /// engine that has no schema anybody writes has none of them - and each of these
 /// otherwise opens a form to be filled in before the engine says no.
-const SCHEMA_KEYS = [_]u21{ 'c', 'a', 'I', 'K', 'V', 'T', 'N', 'Y', 'X', 'D' };
+/// The keys that write the object itself.
+const SCHEMA_KEYS = [_]u21{ 'c', 'a', 'N', 'Y', 'X', 'D' };
+/// And the ones that write what hangs off it. Apart, because an engine can have
+/// the first without the second: a Kafka topic is created and dropped and has
+/// no indexes.
+const RELATION_KEYS = [_]u21{ 'I', 'K', 'V', 'T' };
 
 fn letter(app: *App, point: u21, size: term.Size) !void {
 	_ = size;
-	if (std.mem.indexOfScalar(u21, &SCHEMA_KEYS, point) != null) {
-		const refused = app.caps().no_ddl;
+	{
+		const allowed = app.caps();
+		const refused = if (std.mem.indexOfScalar(u21, &SCHEMA_KEYS, point) != null)
+			allowed.no_ddl
+		else if (std.mem.indexOfScalar(u21, &RELATION_KEYS, point) != null)
+			(if (allowed.no_ddl.len != 0) allowed.no_ddl else allowed.no_relations)
+		else
+			"";
 		if (refused.len != 0) {
 			app.complain("{s}", .{refused});
 			return;

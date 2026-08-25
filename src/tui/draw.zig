@@ -1044,7 +1044,7 @@ pub const HELP = [_][2][]const u8{
 	.{ "N Y", "rename, copy a table" },
 	.{ "D X", "drop, empty" },
 	.{ "", "DATA" },
-	.{ "s", "SQL editor: colours, completion" },
+	.{ "s", "the editor: SQL where there is SQL, the engine's own commands where there is not" },
 	.{ "F", "search every table" },
 	.{ "E M", "export, import" },
 	.{ "C c r p s", "copy value, row, page, last SQL" },
@@ -1371,7 +1371,12 @@ fn palettePanel(app: *App, size: Size, rows: usize) void {
 	const width: usize = @min(size.cols -| 4, 66);
 	const left = (size.cols -| width) / 2;
 	var found: [input.actions.len]usize = undefined;
-	const count = input.paletteMatches(palette.query.items, &found);
+	const count = input.paletteFor(
+		palette.query.items,
+		if (app.connected) app.caps() else null,
+		app.connected and app.conn.files() != null,
+		&found,
+	);
 	const room: usize = if (rows > 6) @min(rows - 4, 12) else 3;
 	const shown: usize = @min(count, room);
 	// Keep the cursor in view when the list is longer than the panel.
@@ -1403,7 +1408,8 @@ fn palettePanel(app: *App, size: Size, rows: usize) void {
 		screen.moveTo(line, left + 1);
 		screen.style(.{ .bg = if (here) C.selected else C.bar, .fg = if (here) C.accent else C.text });
 		var span: usize = write(app, if (here) " ❯ " else "   ", width - 2);
-		span += writeMatched(app, action.label, input.paletteHit(found[at], palette.query.items), width -| span -| 2, .{
+		const named = input.labelFor(action, if (app.connected) app.caps() else null);
+		span += writeMatched(app, named, input.paletteHit(found[at], palette.query.items), width -| span -| 2, .{
 			.bg = if (here) C.selected else C.bar,
 			.fg = if (here) C.accent else C.text,
 		});

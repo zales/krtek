@@ -177,9 +177,13 @@ test "an engine that refuses a change says so in one place" {
 		db.kafka.Db.caps(undefined),
 		db.rabbit.Db.caps(undefined),
 		db.sqlite.Db.caps(undefined),
+		db.redis.Db.caps(undefined),
+		db.s3.Db.caps(undefined),
+		db.azure.Db.caps(undefined),
+		db.sftp.Db.caps(undefined),
 	};
 	for (drivers) |caps| {
-		for ([_][]const u8{ caps.no_insert, caps.no_update, caps.no_delete, caps.no_ddl }) |why| {
+		for ([_][]const u8{ caps.no_insert, caps.no_update, caps.no_delete, caps.no_ddl, caps.no_relations }) |why| {
 			// Either it is allowed, or it is refused with something worth reading.
 			try std.testing.expect(why.len == 0 or why.len > 20);
 		}
@@ -198,4 +202,63 @@ test "an engine that refuses a change says so in one place" {
 	const sqlite = db.sqlite.Db.caps(undefined);
 	try std.testing.expect(sqlite.no_insert.len == 0 and sqlite.no_update.len == 0);
 	try std.testing.expect(sqlite.no_delete.len == 0 and sqlite.no_ddl.len == 0);
+}
+
+test "an engine is not offered what it cannot do" {
+	// The palette used to hold every command whatever was open, so Redis - which
+	// has one table holding every key, and no SQL - was offered "write and run
+	// SQL", "create a view" and "add a foreign key". The keys themselves refused,
+	// which means the list was telling somebody about things that were not there.
+	const input = @import("input.zig");
+	for ([_]db.Caps{
+		db.redis.Db.caps(undefined),
+		db.s3.Db.caps(undefined),
+		db.azure.Db.caps(undefined),
+		db.sftp.Db.caps(undefined),
+	}) |caps| {
+		// None of these has a schema statement of any kind, and each says why.
+		try std.testing.expect(caps.no_ddl.len > 20);
+		for (input.actions) |action| {
+			if (action.wants == .ddl or action.wants == .relations) {
+				try std.testing.expect(!input.offered(action, caps, false));
+			}
+		}
+	}
+
+	// Kafka is the one that has the object without the things that hang off it:
+	// a topic is really created and really dropped, and it has no indexes.
+	const kafka = db.kafka.Db.caps(undefined);
+	try std.testing.expect(kafka.no_ddl.len == 0);
+	try std.testing.expect(kafka.no_relations.len > 20);
+	for (input.actions) |action| {
+		if (action.wants == .ddl) {
+			try std.testing.expect(input.offered(action, kafka, false));
+		}
+		if (action.wants == .relations) {
+			try std.testing.expect(!input.offered(action, kafka, false));
+		}
+	}
+
+	// A full SQL engine is offered all of it, and nothing above may have changed
+	// that. PostgreSQL rather than SQLite, because SQLite has no schemas and so
+	// correctly does not get the one that switches them. Files pretended present,
+	// since whether a connection has any is not a property of the engine.
+	const postgres = db.postgres.Db.caps(undefined);
+	for (input.actions) |action| {
+		try std.testing.expect(input.offered(action, postgres, true));
+	}
+}
+
+test "the editor is called what the engine would call it" {
+	const input = @import("input.zig");
+	const editor = for (input.actions) |action| {
+		if (action.key == 's') break action;
+    } else unreachable;
+	// The same key and the same panel everywhere - what it takes is that engine's
+	// own commands - so it is offered everywhere, under the right name.
+	try std.testing.expect(input.offered(editor, db.redis.Db.caps(undefined), false));
+	try std.testing.expectEqualStrings("write and run SQL", input.labelFor(editor, db.sqlite.Db.caps(undefined)));
+	try std.testing.expectEqualStrings("write and run a command", input.labelFor(editor, db.redis.Db.caps(undefined)));
+	// And with nothing open, the plain name is not guessed at.
+	try std.testing.expectEqualStrings("write and run SQL", input.labelFor(editor, null));
 }

@@ -168,6 +168,7 @@ pub const Db = struct {
 			.databases = false,
 			.label = "Azure",
 			.speaks_sql = false,
+			.no_ddl = "a container is a decision about where data lives and what it costs, which is not a key press - and a blob is a file, not a table",
 			// The same as S3: a list of names without their bytes is not a dump.
 			.dumps_rows = false,
 		};

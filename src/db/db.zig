@@ -341,6 +341,13 @@ pub const Caps = struct {
 	/// dropped - which is why this is a text per engine and not a rule about
 	/// engines that do not speak SQL.
 	no_ddl: []const u8 = "",
+	/// Why an index, a view, a trigger or a foreign key cannot be written here -
+	/// empty where they can. `no_ddl` implies this one; it exists for the engine
+	/// that has the object but not the things that hang off it. A Kafka topic is
+	/// really created and really dropped, and it has no indexes, no views and no
+	/// foreign keys - so before this, four forms opened on Kafka that could only
+	/// ever be cancelled.
+	no_relations: []const u8 = "",
 	/// Why a row cannot be added, changed or removed here - empty where it can.
 	///
 	/// These are the reason and the flag at once, because a screen that refuses

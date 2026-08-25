@@ -197,6 +197,17 @@ of the key map and the explanation under the connection list are all written in 
 that matched are underlined, and the key that does it is on the right, so using it
 teaches the key map.
 
+**It holds what this connection can do, and nothing else.** It used to hold all
+of it whatever was open, so Redis - which has one table holding every key, and no
+SQL - was offered "write and run SQL", "create a view" and "add a foreign key".
+The keys themselves refused, which only meant the list was describing things that
+were not there. The engine's own capabilities decide it now, and where an engine
+calls something by another name the palette does too: the editor is *write and
+run SQL* on a database and *write and run a command* on Redis, Kafka or a
+cluster, because there it takes that engine's own commands. `#` says *database*
+on Redis, *vhost* on RabbitMQ, *namespace* on a cluster and *directory* over
+SFTP.
+
 ![the command palette](docs/palette.svg)
 
 With no argument it opens the saved connections - here one of each engine, with

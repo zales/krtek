@@ -158,9 +158,15 @@ pub const Db = struct {
 			.rebuild_to_alter = false,
 			.databases = true,
 			.label = "Redis",
+			// The numbered database is what `#` switches, and what a row is here
+			// is a key - the screen said "schema" and "row", which are the words
+			// for something else.
+			.schema_noun = "database",
+			.row_noun = "key",
 			.text_cast = "TEXT",
 			// Redis is asked with a structure; only the console takes a command.
 			.speaks_sql = false,
+			.no_ddl = "Redis has one table and it holds every key - there is nothing here to create, alter or drop",
 		};
 	}
 

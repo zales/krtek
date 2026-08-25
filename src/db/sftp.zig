@@ -143,7 +143,11 @@ pub const Db = struct {
 			.schemas = true,
 			.databases = true,
 			.label = "SFTP",
+			// What `#` switches here is the directory being looked at, and calling
+			// it a schema on a filesystem helps nobody.
+			.schema_noun = "directory",
 			.speaks_sql = false,
+			.no_ddl = "this is a filesystem: directories are made in the file manager with n, and there is nothing else here to create or alter",
 			// The names without the files are a list, not a dump.
 			.dumps_rows = false,
 		};

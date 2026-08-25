@@ -179,6 +179,7 @@ pub const Db = struct {
 			.databases = false,
 			.label = "S3",
 			.speaks_sql = false,
+			.no_ddl = "a bucket is a decision about where data lives and what it costs, which is not a key press - and an object is a file, not a table",
 			// A dump of keys without their objects is a list, and replaying it would
 			// put empty objects where the data was.
 			.dumps_rows = false,

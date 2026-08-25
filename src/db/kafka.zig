@@ -345,6 +345,9 @@ pub const Db = struct {
 			.text_cast = "TEXT",
 			// Asked with a structure; the editor is a Kafka command line.
 			.speaks_sql = false,
+			// A topic really is created and really is dropped, so `no_ddl` stays
+			// empty - but nothing hangs off a topic.
+			.no_relations = "a topic has no indexes, no views and no foreign keys - it is a log",
 			// The log is append-only, and both of these say so before a form is
 			// filled in rather than after.
 			.no_update = "a kafka record cannot be changed - the log is append-only. Write a new one with i, or PRODUCE in the editor",
