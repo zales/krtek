@@ -806,23 +806,30 @@ pub const App = struct {
 			.file => entry.secret,
 			.keychain => keychain.fetch(scratch.allocator(), entry.target) catch null,
 			.touchid => blk: {
-				// Whether there is anything to unlock, before asking anybody to put
-				// a finger on anything. The first time a connection is set to use
-				// the reader there is nothing kept for it yet, and asking then was
-				// a fingerprint dialog followed by the password prompt it was meant
-				// to replace.
-				if (!keychain.holds(entry.target)) {
+				// The keychain first, and the fingerprint after. Two reasons, and
+				// neither is about what a fingerprint guards - this program's own
+				// promise is that it will not *use* a saved password until somebody
+				// at the keyboard says so, and that holds whichever order they come
+				// in. What changes is what somebody is asked for nothing: a finger
+				// before finding out that nothing has ever been kept for this
+				// connection, or before macOS puts its own dialog up and is told no.
+				const held = keychain.fetch(scratch.allocator(), entry.target) catch |err| {
+					if (err == error.Refused) {
+						// macOS asked and was refused, which is a different thing
+						// from nothing being there - and the difference matters,
+						// because the next thing on screen is a password prompt and
+						// somebody has to know which of the two it is answering.
+						self.complain("the keychain would not release the password for {s}", .{entry.name});
+					}
 					break :blk null;
-				}
-				// A refusal is not a failure to connect - it falls back to asking
-				// for the password, which is what somebody who cannot use the
-				// reader needs to be able to do.
+				};
+				const value = held orelse break :blk null;
 				var reason: [160]u8 = undefined;
 				const words = std.fmt.bufPrint(&reason, "unlock the password for {s}", .{entry.name}) catch "unlock a saved password";
-				if (!biometry.ask(words)) {
-					break :blk null;
-				}
-				break :blk keychain.fetch(scratch.allocator(), entry.target) catch null;
+				// A refusal is not a failure to connect: it falls back to asking for
+				// the password, which is what somebody who cannot use the reader
+				// needs to be able to do.
+				break :blk if (biometry.ask(words)) value else null;
 			},
 		};
 		const with = if (secret) |value|

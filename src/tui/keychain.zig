@@ -25,6 +25,9 @@ pub const available = builtin.os.tag == .macos;
 
 const SERVICE = "krtek";
 
+/// `errSecItemNotFound`, which is an answer rather than a refusal.
+const ITEM_NOT_FOUND: i32 = -25300;
+
 /// Put `password` in the keychain for `account`, replacing what was there.
 pub fn store(account: []const u8, password: []const u8) !void {
 	if (!available) {
@@ -63,8 +66,10 @@ pub fn store(account: []const u8, password: []const u8) !void {
 	}
 }
 
-/// The password for `account`, or null when there is none or the keychain says
-/// no. The caller owns what comes back.
+/// The password for `account`: null where nothing is kept, `error.Refused`
+/// where macOS put its own dialog up and was told no. Two answers rather than
+/// one, because what follows either is a password prompt and somebody has to
+/// know which of the two they are answering. The caller owns what comes back.
 pub fn fetch(allocator: std.mem.Allocator, account: []const u8) !?[]u8 {
 	if (!available) {
 		return null;
@@ -83,40 +88,18 @@ pub fn fetch(allocator: std.mem.Allocator, account: []const u8) !?[]u8 {
 	defer release(query);
 
 	var found: ?*const anyopaque = null;
-	if (SecItemCopyMatching(query, &found) != 0) {
+	const status = SecItemCopyMatching(query, &found);
+	if (status == ITEM_NOT_FOUND) {
 		return null;
+	}
+	if (status != 0) {
+		return error.Refused;
 	}
 	const data = found orelse return null;
 	defer release(data);
 	const bytes = CFDataGetBytePtr(data) orelse return null;
 	const length: usize = @intCast(CFDataGetLength(data));
 	return try allocator.dupe(u8, bytes[0..length]);
-}
-
-/// Whether anything is kept for `account`, without asking for it.
-///
-/// Only the attributes are asked for, not the data, so this does not go near
-/// the item's access control - and that is the point: a connection set to use
-/// the reader used to put a fingerprint dialog on the screen before finding out
-/// that nothing had ever been stored for it, and then ask for the password
-/// anyway. Which is what it does the very first time, every time.
-pub fn holds(account: []const u8) bool {
-	if (!available) {
-		return false;
-	}
-	const service_key = string(SERVICE) catch return false;
-	defer release(service_key);
-	const account_key = string(account) catch return false;
-	defer release(account_key);
-	const query = dictionary(&.{
-		.{ kSecClass, kSecClassGenericPassword },
-		.{ kSecAttrService, service_key },
-		.{ kSecAttrAccount, account_key },
-		.{ kSecMatchLimit, kSecMatchLimitOne },
-	}) catch return false;
-	defer release(query);
-	var ignored: ?*const anyopaque = null;
-	return SecItemCopyMatching(query, &ignored) == 0;
 }
 
 /// Forget the password for `account`. A missing item is not an error.
@@ -216,9 +199,10 @@ test "nothing kept is not the same as something refused" {
 	if (!available) {
 		return error.SkipZigTest;
 	}
-	// The question a connection set to use the reader has to ask before putting a
-	// fingerprint dialog on the screen: is there anything here to unlock? Asking
-	// first was a dialog followed by the password prompt it was meant to replace,
-	// every first time.
-	try std.testing.expect(!holds("krtek-nothing-was-ever-stored-here"));
+	// Two answers, not one. Nothing kept is the first time a connection is set to
+	// use the keychain, and means "ask for the password". A refusal is macOS
+	// putting its own dialog up and being told no, and means saying so - what
+	// follows either is a password prompt, and somebody has to know which of the
+	// two they are answering.
+	try std.testing.expect((try fetch(std.testing.allocator, "krtek-nothing-was-ever-stored-here")) == null);
 }
