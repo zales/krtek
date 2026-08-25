@@ -859,6 +859,14 @@ PostgreSQL - and a list of every relation.
 box - plus quick in-place editing of a single cell, row marking, and deletion of
 everything marked.
 
+**A cell is one line in the grid and the whole value everywhere else.** A value
+with newlines in it would tear the grid apart, so the grid gets a flattened copy
+- but `v`, the clipboard and a CSV export get what the engine actually returned.
+A Redis `INFO` is one cell of eighty lines, and it used to arrive as one
+unbroken paragraph in the value view and as eighty lines' worth of spaces in an
+export, in a format whose quotes exist to carry newlines. The second copy is
+kept only for the cells that needed flattening.
+
 **Schema.** Create a table, alter one, add an index or a foreign key, create a
 view or a trigger, rename, copy, empty or drop. `#` switches schema on PostgreSQL
 and database on MySQL, which is the same thing there. The type list in a form is

@@ -86,7 +86,20 @@ pub const Kind = enum { nul, int, float, text, blob };
 
 pub const Cell = struct {
 	text: []const u8, // flattened to a single line
+	/// The value as it came, where flattening changed it - and empty where it
+	/// did not, so nothing is kept twice for the cells that are one line anyway.
+	///
+	/// The whole-value view re-reads a value from the engine where there is a
+	/// table and a key to re-read it by. A query result has neither: a Redis
+	/// `INFO` is one cell of eighty lines, and what the view had to show was the
+	/// grid's copy, with every newline already turned into a space.
+	original: []const u8 = "",
 	kind: Kind,
+
+	/// The value as it was, for anything that is not the grid.
+	pub fn whole(self: Cell) []const u8 {
+		return if (self.original.len != 0) self.original else self.text;
+	}
 
 	pub fn colour(self: Cell) u8 {
 		return switch (self.kind) {
@@ -2745,7 +2758,10 @@ pub const App = struct {
 				}
 				written += 1;
 				if (cell.kind != .nul) {
-					try csv.writeField(&out, self.allocator, cell.text, separator);
+					// The value, not the grid's one-line copy of it: a CSV field
+					// carries a newline perfectly well inside quotes, and an export
+					// that quietly flattens is an export that loses.
+					try csv.writeField(&out, self.allocator, cell.whole(), separator);
 				}
 			}
 			try out.appendSlice(self.allocator, "\r\n");
@@ -2783,7 +2799,7 @@ pub const App = struct {
 				}
 				const cell = try formatCell(arena.allocator(), cursor.value(i), cursor.isNumeric(i));
 				if (cell.kind != .nul) {
-					try csv.writeField(&out, self.allocator, cell.text, separator);
+					try csv.writeField(&out, self.allocator, cell.whole(), separator);
 				}
 			}
 			try out.appendSlice(self.allocator, "\r\n");
@@ -3011,8 +3027,8 @@ pub const App = struct {
 			return null;
 		}
 		const row = self.grid.rows.items[self.cursor.row];
-		const table = self.currentTable() orelse return try arena.dupe(u8, row.cells[self.cursor.col].text);
-		const key = row.key orelse return try arena.dupe(u8, row.cells[self.cursor.col].text);
+		const table = self.currentTable() orelse return try arena.dupe(u8, row.cells[self.cursor.col].whole());
+		const key = row.key orelse return try arena.dupe(u8, row.cells[self.cursor.col].whole());
 		const column = self.grid.cols.items[self.cursor.col];
 		var cursor = (try self.conn.select(.{
 			.table = table,
@@ -3062,6 +3078,10 @@ pub const App = struct {
 			if (out.items.len != 0) {
 				try out.append(self.allocator, '\t');
 			}
+			// Flattened here and nowhere else: this is one line of tab separated
+			// fields, and a newline inside one would make it two lines that nothing
+			// can tell apart again. The CSV copy beside it keeps the value whole,
+			// because CSV has quotes to carry it in.
 			try out.appendSlice(self.allocator, cell.text);
 		}
 		try self.screen.copy(out.items);
@@ -3093,7 +3113,7 @@ pub const App = struct {
 				if (written != 0) {
 					try out.append(self.allocator, ',');
 				}
-				try csv.writeField(&out, self.allocator, cell.text, ',');
+				try csv.writeField(&out, self.allocator, cell.whole(), ',');
 				written += 1;
 			}
 			try out.append(self.allocator, '\n');
@@ -4306,7 +4326,11 @@ pub fn formatCell(arena: std.mem.Allocator, value: database.Value, numeric: bool
 		.int => |v| .{ .text = try std.fmt.allocPrint(arena, "{d}", .{v}), .kind = .int },
 		.float => |v| .{ .text = try std.fmt.allocPrint(arena, "{d}", .{v}), .kind = .float },
 		.blob => |b| .{ .text = try std.fmt.allocPrint(arena, "<{d} B>", .{b.len}), .kind = .blob },
-		.text => |t| .{ .text = try flatten(arena, t), .kind = if (numeric) .float else .text },
+		.text => |t| .{
+			.text = try flatten(arena, t),
+			.original = if (std.mem.indexOfAny(u8, t, "\n\r\t") != null) try arena.dupe(u8, t) else "",
+			.kind = if (numeric) .float else .text,
+		},
 	};
 }
 
@@ -4489,6 +4513,30 @@ test "a cell is one line, whatever was in it" {
 	try testing.expectEqualStrings("a b c d", try flatten(arena, "a\nb\rc\td"));
 	try testing.expectEqualStrings("nic", try flatten(arena, "nic"));
 	try testing.expectEqualStrings("", try flatten(arena, ""));
+}
+
+test "the grid gets one line and everything else gets the value" {
+	var scratch = std.heap.ArenaAllocator.init(testing.allocator);
+	defer scratch.deinit();
+	const arena = scratch.allocator();
+
+	// A Redis INFO is one cell of eighty lines. Flattened it is what the grid
+	// needs and what the whole-value view and a CSV export must not be given -
+	// the view showed one unbroken paragraph, and the export lost the newlines
+	// for good, in a format whose quotes exist to carry them.
+	const many = try formatCell(arena, .{ .text = "prvni\ndruhy" }, false);
+	try testing.expectEqualStrings("prvni druhy", many.text);
+	try testing.expectEqualStrings("prvni\ndruhy", many.whole());
+
+	// And nothing is kept twice for a value that was one line to begin with.
+	const one = try formatCell(arena, .{ .text = "ahoj" }, false);
+	try testing.expectEqualStrings("ahoj", one.text);
+	try testing.expectEqualStrings("ahoj", one.whole());
+	try testing.expectEqual(@as(usize, 0), one.original.len);
+
+	// A number has no second form to keep.
+	const number = try formatCell(arena, .{ .int = 42 }, true);
+	try testing.expectEqualStrings("42", number.whole());
 }
 
 test "counting pages never divides by nothing" {
