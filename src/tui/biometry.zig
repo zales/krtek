@@ -20,7 +20,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
-
 /// Only macOS has one, and only where there is a sensor with a finger enrolled.
 /// Checked once: it cannot change while the program runs.
 pub var available: bool = false;

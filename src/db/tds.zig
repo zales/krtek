@@ -909,7 +909,6 @@ fn fixedSize(kind: u8) u32 {
     };
 }
 
-
 /// One cell.
 ///
 /// A value's length is not in the value: it is in the column, in the shape of
@@ -1091,8 +1090,14 @@ fn guid(arena: std.mem.Allocator, bytes: []const u8) ![]const u8 {
         std.mem.readInt(u32, bytes[0..4], .little),
         std.mem.readInt(u16, bytes[4..6], .little),
         std.mem.readInt(u16, bytes[6..8], .little),
-        bytes[8],  bytes[9],  bytes[10], bytes[11],
-        bytes[12], bytes[13], bytes[14], bytes[15],
+        bytes[8],
+        bytes[9],
+        bytes[10],
+        bytes[11],
+        bytes[12],
+        bytes[13],
+        bytes[14],
+        bytes[15],
     });
 }
 

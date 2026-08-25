@@ -14,33 +14,33 @@ const keychain = @import("keychain");
 const ACCOUNT = "krtek-selftest://demo";
 
 pub fn main(init: std.process.Init) !void {
-	_ = init;
-	if (!keychain.available) {
-		std.debug.print("no keychain on this platform\n", .{});
-		return;
-	}
-	const a = std.heap.c_allocator;
+    _ = init;
+    if (!keychain.available) {
+        std.debug.print("no keychain on this platform\n", .{});
+        return;
+    }
+    const a = std.heap.c_allocator;
 
-	try keychain.store(ACCOUNT, "hunter2");
-	std.debug.print("stored\n", .{});
+    try keychain.store(ACCOUNT, "hunter2");
+    std.debug.print("stored\n", .{});
 
-	if (try keychain.fetch(a, ACCOUNT)) |got| {
-		defer a.free(got);
-		std.debug.print("read back: {s}\n", .{got});
-		if (!std.mem.eql(u8, got, "hunter2")) {
-			std.debug.print("  ...which is not what was stored\n", .{});
-		}
-	} else {
-		std.debug.print("could not read it back - denied, or not there\n", .{});
-	}
+    if (try keychain.fetch(a, ACCOUNT)) |got| {
+        defer a.free(got);
+        std.debug.print("read back: {s}\n", .{got});
+        if (!std.mem.eql(u8, got, "hunter2")) {
+            std.debug.print("  ...which is not what was stored\n", .{});
+        }
+    } else {
+        std.debug.print("could not read it back - denied, or not there\n", .{});
+    }
 
-	// Storing again has to update rather than add a second item.
-	try keychain.store(ACCOUNT, "changed");
-	if (try keychain.fetch(a, ACCOUNT)) |got| {
-		defer a.free(got);
-		std.debug.print("after update: {s}\n", .{got});
-	}
+    // Storing again has to update rather than add a second item.
+    try keychain.store(ACCOUNT, "changed");
+    if (try keychain.fetch(a, ACCOUNT)) |got| {
+        defer a.free(got);
+        std.debug.print("after update: {s}\n", .{got});
+    }
 
-	keychain.remove(ACCOUNT);
-	std.debug.print("after remove: {?s}\n", .{try keychain.fetch(a, ACCOUNT)});
+    keychain.remove(ACCOUNT);
+    std.debug.print("after remove: {?s}\n", .{try keychain.fetch(a, ACCOUNT)});
 }

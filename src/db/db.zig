@@ -58,84 +58,84 @@ pub const sigv4 = @import("s3/sigv4.zig");
 /// which columns are numbers. The one thing that is really the driver's is what
 /// its own `Value` means, which it says by having an `asValue` method.
 pub fn Built(comptime Owner: type, comptime Held: type) type {
-	return struct {
-		const Self = @This();
+    return struct {
+        const Self = @This();
 
-		/// Whose reply arena the rows are kept in. They live exactly as long as
-		/// the answer they were made from, which is what that arena is for.
-		owner: *Owner,
-		names: []const []const u8 = &.{},
-		/// Which columns are numbers, for a grid that right-aligns them. Absent
-		/// means none, which is what a driver with nothing to say leaves it as.
-		numeric: []const bool = &.{},
-		rows: std.ArrayListUnmanaged([]const Held) = .empty,
-		/// The table these came from, where they came from one. Empty means they
-		/// are an answer rather than a table, and so cannot be edited.
-		table: []const u8 = "",
-		/// What a statement changed, for the engines that count.
-		changed: i64 = 0,
-		at: usize = 0,
-		started: bool = false,
+        /// Whose reply arena the rows are kept in. They live exactly as long as
+        /// the answer they were made from, which is what that arena is for.
+        owner: *Owner,
+        names: []const []const u8 = &.{},
+        /// Which columns are numbers, for a grid that right-aligns them. Absent
+        /// means none, which is what a driver with nothing to say leaves it as.
+        numeric: []const bool = &.{},
+        rows: std.ArrayListUnmanaged([]const Held) = .empty,
+        /// The table these came from, where they came from one. Empty means they
+        /// are an answer rather than a table, and so cannot be edited.
+        table: []const u8 = "",
+        /// What a statement changed, for the engines that count.
+        changed: i64 = 0,
+        at: usize = 0,
+        started: bool = false,
 
-		pub fn add(self: *Self, values: []const Held) Error!void {
-			const arena = self.owner.replies.allocator();
-			try self.rows.append(arena, try arena.dupe(Held, values));
-		}
+        pub fn add(self: *Self, values: []const Held) Error!void {
+            const arena = self.owner.replies.allocator();
+            try self.rows.append(arena, try arena.dupe(Held, values));
+        }
 
-		/// Before the first row rather than on it, so the first `next` lands on
-		/// the first row like every other cursor here.
-		pub fn next(self: *Self) Error!bool {
-			if (!self.started) {
-				self.started = true;
-			} else {
-				self.at += 1;
-			}
-			return self.at < self.rows.items.len;
-		}
+        /// Before the first row rather than on it, so the first `next` lands on
+        /// the first row like every other cursor here.
+        pub fn next(self: *Self) Error!bool {
+            if (!self.started) {
+                self.started = true;
+            } else {
+                self.at += 1;
+            }
+            return self.at < self.rows.items.len;
+        }
 
-		pub fn close(self: *Self) void {
-			self.at = 0;
-			self.rows.clearRetainingCapacity();
-		}
+        pub fn close(self: *Self) void {
+            self.at = 0;
+            self.rows.clearRetainingCapacity();
+        }
 
-		pub fn columnCount(self: *Self) usize {
-			return self.names.len;
-		}
+        pub fn columnCount(self: *Self) usize {
+            return self.names.len;
+        }
 
-		pub fn name(self: *Self, at: usize) []const u8 {
-			return if (at < self.names.len) self.names[at] else "";
-		}
+        pub fn name(self: *Self, at: usize) []const u8 {
+            return if (at < self.names.len) self.names[at] else "";
+        }
 
-		/// Out of range is null rather than an error: a grid that asks for a
-		/// column that is not there has already gone wrong, and crashing is not
-		/// the way to say so.
-		pub fn value(self: *Self, at: usize) Value {
-			if (self.at >= self.rows.items.len) {
-				return .{ .null = {} };
-			}
-			const row = self.rows.items[self.at];
-			if (at >= row.len) {
-				return .{ .null = {} };
-			}
-			return row[at].asValue();
-		}
+        /// Out of range is null rather than an error: a grid that asks for a
+        /// column that is not there has already gone wrong, and crashing is not
+        /// the way to say so.
+        pub fn value(self: *Self, at: usize) Value {
+            if (self.at >= self.rows.items.len) {
+                return .{ .null = {} };
+            }
+            const row = self.rows.items[self.at];
+            if (at >= row.len) {
+                return .{ .null = {} };
+            }
+            return row[at].asValue();
+        }
 
-		pub fn sourceTable(self: *Self, _: usize) []const u8 {
-			return self.table;
-		}
+        pub fn sourceTable(self: *Self, _: usize) []const u8 {
+            return self.table;
+        }
 
-		pub fn sourceColumn(self: *Self, at: usize) []const u8 {
-			return if (self.table.len != 0) self.name(at) else "";
-		}
+        pub fn sourceColumn(self: *Self, at: usize) []const u8 {
+            return if (self.table.len != 0) self.name(at) else "";
+        }
 
-		pub fn isNumeric(self: *Self, at: usize) bool {
-			return at < self.numeric.len and self.numeric[at];
-		}
+        pub fn isNumeric(self: *Self, at: usize) bool {
+            return at < self.numeric.len and self.numeric[at];
+        }
 
-		pub fn affected(self: *Self) i64 {
-			return self.changed;
-		}
-	};
+        pub fn affected(self: *Self) i64 {
+            return self.changed;
+        }
+    };
 }
 
 /// What the interface asks for, as a structure: see the file for why.
@@ -148,34 +148,34 @@ pub const store = @import("store.zig");
 // analysis is lazy, so a file nothing reaches into contributes no tests - which
 // is why they are named here.
 comptime {
-	_ = ask;
-	_ = store;
-	_ = sqlite;
-	_ = postgres;
-	_ = mysql;
-	_ = mssql;
-	_ = redis;
-	_ = kafka;
-	_ = s3;
-	_ = azure;
-	_ = rabbit;
-	_ = sftp;
-	_ = k8s;
-	_ = k8s_yaml;
-	_ = k8s_exec;
-	_ = k8s_config;
-	_ = k8s_api;
-	_ = k8s_target;
-	_ = net;
-	_ = ws;
-	_ = tds;
-	_ = http;
-	_ = ssh;
-	_ = clock;
-	_ = targets;
-	_ = typed;
-	_ = random;
-	_ = sigv4;
+    _ = ask;
+    _ = store;
+    _ = sqlite;
+    _ = postgres;
+    _ = mysql;
+    _ = mssql;
+    _ = redis;
+    _ = kafka;
+    _ = s3;
+    _ = azure;
+    _ = rabbit;
+    _ = sftp;
+    _ = k8s;
+    _ = k8s_yaml;
+    _ = k8s_exec;
+    _ = k8s_config;
+    _ = k8s_api;
+    _ = k8s_target;
+    _ = net;
+    _ = ws;
+    _ = tds;
+    _ = http;
+    _ = ssh;
+    _ = clock;
+    _ = targets;
+    _ = typed;
+    _ = random;
+    _ = sigv4;
 }
 
 pub const Error = error{ Driver, OutOfMemory };
@@ -185,84 +185,84 @@ pub const Error = error{ Driver, OutOfMemory };
 /// cancel request to the server. What the callback does meanwhile - draw a
 /// spinner, look at the keyboard - is none of the interface's business.
 pub const Progress = struct {
-	context: *anyopaque,
-	keep_going: *const fn (context: *anyopaque) bool,
-	/// Called by a driver when it starts a statement. Without it the caller would
-	/// have to guess where one statement ends and the next begins, and guessing
-	/// from the gap between calls is wrong exactly when it matters: a query whose
-	/// rows arrive seconds apart looks like a new statement every time.
-	begin: *const fn (context: *anyopaque) void,
+    context: *anyopaque,
+    keep_going: *const fn (context: *anyopaque) bool,
+    /// Called by a driver when it starts a statement. Without it the caller would
+    /// have to guess where one statement ends and the next begins, and guessing
+    /// from the gap between calls is wrong exactly when it matters: a query whose
+    /// rows arrive seconds apart looks like a new statement every time.
+    begin: *const fn (context: *anyopaque) void,
 
-	pub fn call(self: Progress) bool {
-		return self.keep_going(self.context);
-	}
+    pub fn call(self: Progress) bool {
+        return self.keep_going(self.context);
+    }
 
-	pub fn starting(self: Progress) void {
-		self.begin(self.context);
-	}
+    pub fn starting(self: Progress) void {
+        self.begin(self.context);
+    }
 };
 
 /// One cell. Text and blob point into the driver's memory and stay valid until
 /// the cursor moves on.
 pub const Value = union(enum) {
-	null: void,
-	int: i64,
-	float: f64,
-	text: []const u8,
-	blob: []const u8,
+    null: void,
+    int: i64,
+    float: f64,
+    text: []const u8,
+    blob: []const u8,
 
-	/// `Built` asks each of its cells what it is worth, because most drivers
-	/// keep something of their own in a row. A driver that already decided when
-	/// it read the bytes keeps these, and this is that answer.
-	pub fn asValue(self: Value) Value {
-		return self;
-	}
+    /// `Built` asks each of its cells what it is worth, because most drivers
+    /// keep something of their own in a row. A driver that already decided when
+    /// it read the bytes keeps these, and this is that answer.
+    pub fn asValue(self: Value) Value {
+        return self;
+    }
 };
 
 pub const Kind = enum { table, view };
 
 pub const Object = struct {
-	/// Empty on an engine without schemas.
-	schema: []const u8 = "",
-	name: []const u8,
-	/// What this one is among the others, for an engine whose list is long enough
-	/// to need dividing: Kubernetes has eighteen kinds and they fall into
-	/// workloads, network, config and the rest. Empty everywhere else, where a
-	/// list of tables is a list of tables and a heading over it would say nothing.
-	group: []const u8 = "",
-	kind: Kind = .table,
-	rows: ?i64 = null,
-	/// The engine's own housekeeping rather than the user's data - Kafka's
-	/// __consumer_offsets. Still shown, because looking at it is sometimes the
-	/// point, but left out of a dump.
-	internal: bool = false,
+    /// Empty on an engine without schemas.
+    schema: []const u8 = "",
+    name: []const u8,
+    /// What this one is among the others, for an engine whose list is long enough
+    /// to need dividing: Kubernetes has eighteen kinds and they fall into
+    /// workloads, network, config and the rest. Empty everywhere else, where a
+    /// list of tables is a list of tables and a heading over it would say nothing.
+    group: []const u8 = "",
+    kind: Kind = .table,
+    rows: ?i64 = null,
+    /// The engine's own housekeeping rather than the user's data - Kafka's
+    /// __consumer_offsets. Still shown, because looking at it is sometimes the
+    /// point, but left out of a dump.
+    internal: bool = false,
 };
 
 pub const Column = struct {
-	name: []const u8,
-	type: []const u8 = "",
-	notnull: bool = false,
-	dflt: ?[]const u8 = null,
-	pk: bool = false,
-	unique: bool = false,
-	/// What this column was called before an alter form touched it.
-	original: []const u8 = "",
+    name: []const u8,
+    type: []const u8 = "",
+    notnull: bool = false,
+    dflt: ?[]const u8 = null,
+    pk: bool = false,
+    unique: bool = false,
+    /// What this column was called before an alter form touched it.
+    original: []const u8 = "",
 };
 
 pub const Index = struct {
-	name: []const u8,
-	/// PRIMARY, UNIQUE or INDEX.
-	kind: []const u8,
-	columns: []const u8,
-	partial: bool = false,
+    name: []const u8,
+    /// PRIMARY, UNIQUE or INDEX.
+    kind: []const u8,
+    columns: []const u8,
+    partial: bool = false,
 };
 
 pub const ForeignKey = struct {
-	column: []const u8,
-	target_table: []const u8,
-	target_column: []const u8,
-	on_update: []const u8 = "NO ACTION",
-	on_delete: []const u8 = "NO ACTION",
+    column: []const u8,
+    target_table: []const u8,
+    target_column: []const u8,
+    on_update: []const u8 = "NO ACTION",
+    on_delete: []const u8 = "NO ACTION",
 };
 
 /// Something that can be done to the row the cursor is on, offered on the screen
@@ -270,180 +270,180 @@ pub const ForeignKey = struct {
 /// the interface neither knows nor needs to know what a log or a shell is - it
 /// draws a key and a word, and runs what it was given.
 pub const Action = struct {
-	key: u21,
-	label: []const u8,
-	statement: []const u8,
-	/// Ask before running it. For the ones nothing takes back.
-	confirm: bool = false,
-	/// Hands the terminal over rather than filling the grid.
-	terminal: bool = false,
+    key: u21,
+    label: []const u8,
+    statement: []const u8,
+    /// Ask before running it. For the ones nothing takes back.
+    confirm: bool = false,
+    /// Hands the terminal over rather than filling the grid.
+    terminal: bool = false,
 };
 
 pub const Setting = struct {
-	label: []const u8,
-	value: []const u8,
+    label: []const u8,
+    value: []const u8,
 };
 
 /// What the interface may ask of this engine.
 pub const Caps = struct {
-	/// Tables live in schemas the user can switch between.
-	schemas: bool = false,
-	/// A row can be addressed without a key, through a hidden column.
-	hidden_row_id: bool = false,
-	/// Changing a column means writing a new table and copying the rows.
-	rebuild_to_alter: bool = false,
-	/// Several databases are reachable from one connection.
-	databases: bool = false,
-	/// The name shown in the interface.
-	label: []const u8 = "",
-	/// What to cast a value to in order to compare it as text. Every engine
-	/// spells it differently and MySQL does not know `TEXT` as a cast target.
-	text_cast: []const u8 = "TEXT",
-	/// What goes in front of a quoted string so the engine reads it as text in
-	/// the wide encoding rather than in whatever single-byte one the database
-	/// was created with. Only SQL Server needs it, and there it is not optional:
-	/// `'příklep'` written plainly loses the `ř` on the way in, silently, and the
-	/// row comes back looking almost right.
-	text_prefix: []const u8 = "",
-	/// How a run of bytes is written into a statement. `x'` … `'` is what SQLite
-	/// and MySQL take; SQL Server writes `0x` and no quotes at all.
-	blob_prefix: []const u8 = "x'",
-	blob_suffix: []const u8 = "'",
-	/// How a page of rows is asked for. Three of the four SQL engines here take
-	/// `LIMIT n OFFSET m`; SQL Server takes the spelling the standard settled on
-	/// instead, and will not take it without something to sort by.
-	paging: enum { limit_offset, offset_fetch } = .limit_offset,
-	/// The engine takes SQL. When it does not, the interface asks for rows only
-	/// through `ask.Select` and changes them only through `ask.Change`, and what
-	/// the user writes in the editor is passed to the engine as its own kind of
-	/// command - which turns the editor into a console for it.
-	speaks_sql: bool = true,
-	/// A dump can hold this engine's rows. False where a row only *names* bytes
-	/// kept elsewhere: an S3 listing without the objects is a list, and replaying
-	/// it would put empty objects where the data was.
-	dumps_rows: bool = true,
-	/// A deleted row does not come back. A database has a transaction to take one
-	/// out of and a cluster has nothing of the kind, so `x` asks first - the same
-	/// way it does where a row is a file.
-	final_deletes: bool = false,
-	/// What one row is called, where "row" is the wrong word for it.
-	row_noun: []const u8 = "row",
-	/// And what a schema is called. PostgreSQL has schemas, MySQL calls the same
-	/// switch a database, RabbitMQ a vhost and Kubernetes a namespace - and a
-	/// screen that says "schema" to somebody looking at a cluster is asking them
-	/// to translate.
-	schema_noun: []const u8 = "schema",
-	/// Why no schema statement can be written here - empty where they can. One
-	/// text for the lot of them, because where an engine has no schema anybody
-	/// writes it has none of them: creating a table, altering one, an index, a
-	/// key, a view, a trigger, a rename, a copy, a truncate and a drop are all the
-	/// same answer. Kafka is not one of these - a topic really is created and
-	/// dropped - which is why this is a text per engine and not a rule about
-	/// engines that do not speak SQL.
-	no_ddl: []const u8 = "",
-	/// Why an index, a view, a trigger or a foreign key cannot be written here -
-	/// empty where they can. `no_ddl` implies this one; it exists for the engine
-	/// that has the object but not the things that hang off it. A Kafka topic is
-	/// really created and really dropped, and it has no indexes, no views and no
-	/// foreign keys - so before this, four forms opened on Kafka that could only
-	/// ever be cancelled.
-	no_relations: []const u8 = "",
-	/// Why a row cannot be added, changed or removed here - empty where it can.
-	///
-	/// These are the reason and the flag at once, because a screen that refuses
-	/// has to say why in the same breath. Three engines cannot do one of these at
-	/// all: a Kafka record cannot be changed or deleted because the log is
-	/// append-only, a RabbitMQ queue is declared rather than altered, and a
-	/// Kubernetes object is a document with a controller behind it. Before this
-	/// the interface offered all three to all of them and let the driver refuse
-	/// after the form had been filled in, which is the worst moment to find out.
-	///
-	/// Connection-wide only. Where it varies by table - RabbitMQ's topology,
-	/// which of a cluster's kinds may be deleted - the driver still answers for
-	/// itself, and does it before anything is typed.
-	no_insert: []const u8 = "",
-	no_update: []const u8 = "",
-	no_delete: []const u8 = "",
+    /// Tables live in schemas the user can switch between.
+    schemas: bool = false,
+    /// A row can be addressed without a key, through a hidden column.
+    hidden_row_id: bool = false,
+    /// Changing a column means writing a new table and copying the rows.
+    rebuild_to_alter: bool = false,
+    /// Several databases are reachable from one connection.
+    databases: bool = false,
+    /// The name shown in the interface.
+    label: []const u8 = "",
+    /// What to cast a value to in order to compare it as text. Every engine
+    /// spells it differently and MySQL does not know `TEXT` as a cast target.
+    text_cast: []const u8 = "TEXT",
+    /// What goes in front of a quoted string so the engine reads it as text in
+    /// the wide encoding rather than in whatever single-byte one the database
+    /// was created with. Only SQL Server needs it, and there it is not optional:
+    /// `'příklep'` written plainly loses the `ř` on the way in, silently, and the
+    /// row comes back looking almost right.
+    text_prefix: []const u8 = "",
+    /// How a run of bytes is written into a statement. `x'` … `'` is what SQLite
+    /// and MySQL take; SQL Server writes `0x` and no quotes at all.
+    blob_prefix: []const u8 = "x'",
+    blob_suffix: []const u8 = "'",
+    /// How a page of rows is asked for. Three of the four SQL engines here take
+    /// `LIMIT n OFFSET m`; SQL Server takes the spelling the standard settled on
+    /// instead, and will not take it without something to sort by.
+    paging: enum { limit_offset, offset_fetch } = .limit_offset,
+    /// The engine takes SQL. When it does not, the interface asks for rows only
+    /// through `ask.Select` and changes them only through `ask.Change`, and what
+    /// the user writes in the editor is passed to the engine as its own kind of
+    /// command - which turns the editor into a console for it.
+    speaks_sql: bool = true,
+    /// A dump can hold this engine's rows. False where a row only *names* bytes
+    /// kept elsewhere: an S3 listing without the objects is a list, and replaying
+    /// it would put empty objects where the data was.
+    dumps_rows: bool = true,
+    /// A deleted row does not come back. A database has a transaction to take one
+    /// out of and a cluster has nothing of the kind, so `x` asks first - the same
+    /// way it does where a row is a file.
+    final_deletes: bool = false,
+    /// What one row is called, where "row" is the wrong word for it.
+    row_noun: []const u8 = "row",
+    /// And what a schema is called. PostgreSQL has schemas, MySQL calls the same
+    /// switch a database, RabbitMQ a vhost and Kubernetes a namespace - and a
+    /// screen that says "schema" to somebody looking at a cluster is asking them
+    /// to translate.
+    schema_noun: []const u8 = "schema",
+    /// Why no schema statement can be written here - empty where they can. One
+    /// text for the lot of them, because where an engine has no schema anybody
+    /// writes it has none of them: creating a table, altering one, an index, a
+    /// key, a view, a trigger, a rename, a copy, a truncate and a drop are all the
+    /// same answer. Kafka is not one of these - a topic really is created and
+    /// dropped - which is why this is a text per engine and not a rule about
+    /// engines that do not speak SQL.
+    no_ddl: []const u8 = "",
+    /// Why an index, a view, a trigger or a foreign key cannot be written here -
+    /// empty where they can. `no_ddl` implies this one; it exists for the engine
+    /// that has the object but not the things that hang off it. A Kafka topic is
+    /// really created and really dropped, and it has no indexes, no views and no
+    /// foreign keys - so before this, four forms opened on Kafka that could only
+    /// ever be cancelled.
+    no_relations: []const u8 = "",
+    /// Why a row cannot be added, changed or removed here - empty where it can.
+    ///
+    /// These are the reason and the flag at once, because a screen that refuses
+    /// has to say why in the same breath. Three engines cannot do one of these at
+    /// all: a Kafka record cannot be changed or deleted because the log is
+    /// append-only, a RabbitMQ queue is declared rather than altered, and a
+    /// Kubernetes object is a document with a controller behind it. Before this
+    /// the interface offered all three to all of them and let the driver refuse
+    /// after the form had been filled in, which is the worst moment to find out.
+    ///
+    /// Connection-wide only. Where it varies by table - RabbitMQ's topology,
+    /// which of a cluster's kinds may be deleted - the driver still answers for
+    /// itself, and does it before anything is typed.
+    no_insert: []const u8 = "",
+    no_update: []const u8 = "",
+    no_delete: []const u8 = "",
 };
 
 /// One statement out of a batch, with the text the user wrote.
 pub const Statement = struct {
-	sql: []const u8,
+    sql: []const u8,
 };
 
 // ------------------------------------------------------------------ cursors
 
 pub const Rows = union(enum) {
-	sqlite: sqlite.Rows,
-	postgres: postgres.Rows,
-	mysql: mysql.Rows,
-	mssql: mssql.Rows,
-	redis: redis.Rows,
-	kafka: kafka.Rows,
-	s3: s3.Rows,
-	azure: azure.Rows,
-	rabbit: rabbit.Rows,
-	sftp: sftp.Rows,
-	k8s: k8s.Rows,
+    sqlite: sqlite.Rows,
+    postgres: postgres.Rows,
+    mysql: mysql.Rows,
+    mssql: mssql.Rows,
+    redis: redis.Rows,
+    kafka: kafka.Rows,
+    s3: s3.Rows,
+    azure: azure.Rows,
+    rabbit: rabbit.Rows,
+    sftp: sftp.Rows,
+    k8s: k8s.Rows,
 
-	pub fn next(self: *Rows) Error!bool {
-		switch (self.*) {
-			inline else => |*rows| return rows.next(),
-		}
-	}
+    pub fn next(self: *Rows) Error!bool {
+        switch (self.*) {
+            inline else => |*rows| return rows.next(),
+        }
+    }
 
-	pub fn close(self: *Rows) void {
-		switch (self.*) {
-			inline else => |*rows| rows.close(),
-		}
-	}
+    pub fn close(self: *Rows) void {
+        switch (self.*) {
+            inline else => |*rows| rows.close(),
+        }
+    }
 
-	pub fn columnCount(self: *Rows) usize {
-		switch (self.*) {
-			inline else => |*rows| return rows.columnCount(),
-		}
-	}
+    pub fn columnCount(self: *Rows) usize {
+        switch (self.*) {
+            inline else => |*rows| return rows.columnCount(),
+        }
+    }
 
-	pub fn name(self: *Rows, at: usize) []const u8 {
-		switch (self.*) {
-			inline else => |*rows| return rows.name(at),
-		}
-	}
+    pub fn name(self: *Rows, at: usize) []const u8 {
+        switch (self.*) {
+            inline else => |*rows| return rows.name(at),
+        }
+    }
 
-	pub fn value(self: *Rows, at: usize) Value {
-		switch (self.*) {
-			inline else => |*rows| return rows.value(at),
-		}
-	}
+    pub fn value(self: *Rows, at: usize) Value {
+        switch (self.*) {
+            inline else => |*rows| return rows.value(at),
+        }
+    }
 
-	/// The table a column comes from, empty when it is an expression. Used to
-	/// decide whether a query result can be edited.
-	pub fn sourceTable(self: *Rows, at: usize) []const u8 {
-		switch (self.*) {
-			inline else => |*rows| return rows.sourceTable(at),
-		}
-	}
+    /// The table a column comes from, empty when it is an expression. Used to
+    /// decide whether a query result can be edited.
+    pub fn sourceTable(self: *Rows, at: usize) []const u8 {
+        switch (self.*) {
+            inline else => |*rows| return rows.sourceTable(at),
+        }
+    }
 
-	pub fn sourceColumn(self: *Rows, at: usize) []const u8 {
-		switch (self.*) {
-			inline else => |*rows| return rows.sourceColumn(at),
-		}
-	}
+    pub fn sourceColumn(self: *Rows, at: usize) []const u8 {
+        switch (self.*) {
+            inline else => |*rows| return rows.sourceColumn(at),
+        }
+    }
 
-	/// Whether the column holds numbers, so the grid can align it right even
-	/// when the engine hands the value over as text.
-	pub fn isNumeric(self: *Rows, at: usize) bool {
-		switch (self.*) {
-			inline else => |*rows| return rows.isNumeric(at),
-		}
-	}
+    /// Whether the column holds numbers, so the grid can align it right even
+    /// when the engine hands the value over as text.
+    pub fn isNumeric(self: *Rows, at: usize) bool {
+        switch (self.*) {
+            inline else => |*rows| return rows.isNumeric(at),
+        }
+    }
 
-	/// Rows changed by this statement, once it has been walked to the end.
-	pub fn affected(self: *Rows) i64 {
-		switch (self.*) {
-			inline else => |*rows| return rows.affected(),
-		}
-	}
+    /// Rows changed by this statement, once it has been walked to the end.
+    pub fn affected(self: *Rows) i64 {
+        switch (self.*) {
+            inline else => |*rows| return rows.affected(),
+        }
+    }
 };
 
 // --------------------------------------------------------------- connection
@@ -452,689 +452,689 @@ pub const Rows = union(enum) {
 /// nothing else so far. Dispatched the way `Rows` is, because it is the same
 /// shape of thing - one driver's, held by the interface.
 pub const Shell = union(enum) {
-	k8s: *k8s.Shell,
+    k8s: *k8s.Shell,
 
-	pub fn deinit(self: Shell) void {
-		switch (self) {
-			inline else => |session| {
-				const allocator = session.allocator;
-				session.deinit();
-				allocator.destroy(session);
-			},
-		}
-	}
+    pub fn deinit(self: Shell) void {
+        switch (self) {
+            inline else => |session| {
+                const allocator = session.allocator;
+                session.deinit();
+                allocator.destroy(session);
+            },
+        }
+    }
 
-	/// The socket, so a caller can wait on this and a terminal together.
-	pub fn handle(self: Shell) std.c.fd_t {
-		switch (self) {
-			inline else => |session| return session.handle(),
-		}
-	}
+    /// The socket, so a caller can wait on this and a terminal together.
+    pub fn handle(self: Shell) std.c.fd_t {
+        switch (self) {
+            inline else => |session| return session.handle(),
+        }
+    }
 
-	pub fn write(self: Shell, bytes: []const u8) Error!void {
-		switch (self) {
-			inline else => |session| return session.write(bytes),
-		}
-	}
+    pub fn write(self: Shell, bytes: []const u8) Error!void {
+        switch (self) {
+            inline else => |session| return session.write(bytes),
+        }
+    }
 
-	pub fn resize(self: Shell, cols: u16, rows: u16) void {
-		switch (self) {
-			inline else => |session| session.resize(cols, rows),
-		}
-	}
+    pub fn resize(self: Shell, cols: u16, rows: u16) void {
+        switch (self) {
+            inline else => |session| session.resize(cols, rows),
+        }
+    }
 
-	/// Whatever has come back by now, appended. False when it is over.
-	pub fn read(self: Shell, out: *List) Error!bool {
-		switch (self) {
-			inline else => |session| return session.read(out),
-		}
-	}
+    /// Whatever has come back by now, appended. False when it is over.
+    pub fn read(self: Shell, out: *List) Error!bool {
+        switch (self) {
+            inline else => |session| return session.read(out),
+        }
+    }
 
-	/// Why it ended, where that is worth saying.
-	pub fn why(self: Shell, arena: std.mem.Allocator) []const u8 {
-		switch (self) {
-			inline else => |session| return session.why(arena),
-		}
-	}
+    /// Why it ended, where that is worth saying.
+    pub fn why(self: Shell, arena: std.mem.Allocator) []const u8 {
+        switch (self) {
+            inline else => |session| return session.why(arena),
+        }
+    }
 };
 
 pub const Db = union(enum) {
-	sqlite: *sqlite.Db,
-	postgres: *postgres.Db,
-	mysql: *mysql.Db,
-	mssql: *mssql.Db,
-	redis: *redis.Db,
-	kafka: *kafka.Db,
-	s3: *s3.Db,
-	azure: *azure.Db,
-	rabbit: *rabbit.Db,
-	sftp: *sftp.Db,
-	k8s: *k8s.Db,
+    sqlite: *sqlite.Db,
+    postgres: *postgres.Db,
+    mysql: *mysql.Db,
+    mssql: *mssql.Db,
+    redis: *redis.Db,
+    kafka: *kafka.Db,
+    s3: *s3.Db,
+    azure: *azure.Db,
+    rabbit: *rabbit.Db,
+    sftp: *sftp.Db,
+    k8s: *k8s.Db,
 
-	/// Open whatever the target describes: a file path, or a URL like
-	/// postgres://user:password@host:port/database.
-	pub fn open(allocator: std.mem.Allocator, target: []const u8, report: *std.ArrayListUnmanaged(u8)) !Db {
-		if (kafka.owns(target)) {
-			return .{ .kafka = try kafka.Db.open(allocator, target, report) };
-		}
-		if (s3.owns(target)) {
-			return .{ .s3 = try s3.Db.open(allocator, target, report) };
-		}
-		if (azure.owns(target)) {
-			return .{ .azure = try azure.Db.open(allocator, target, report) };
-		}
-		if (rabbit.owns(target)) {
-			return .{ .rabbit = try rabbit.Db.open(allocator, target, report) };
-		}
-		if (sftp.owns(target)) {
-			return .{ .sftp = try sftp.Db.open(allocator, target, report) };
-		}
-		if (k8s.owns(target)) {
-			return .{ .k8s = try k8s.Db.open(allocator, target, report) };
-		}
-		if (redis.owns(target)) {
-			return .{ .redis = try redis.Db.open(allocator, target, report) };
-		}
-		if (mysql.owns(target)) {
-			return .{ .mysql = try mysql.Db.open(allocator, target, report) };
-		}
-		if (mssql.owns(target)) {
-			return .{ .mssql = try mssql.Db.open(allocator, target, report) };
-		}
-		if (isPostgresUrl(target)) {
-			return .{ .postgres = try postgres.Db.open(allocator, target, report) };
-		}
-		return .{ .sqlite = try sqlite.Db.open(allocator, target, report) };
-	}
+    /// Open whatever the target describes: a file path, or a URL like
+    /// postgres://user:password@host:port/database.
+    pub fn open(allocator: std.mem.Allocator, target: []const u8, report: *std.ArrayListUnmanaged(u8)) !Db {
+        if (kafka.owns(target)) {
+            return .{ .kafka = try kafka.Db.open(allocator, target, report) };
+        }
+        if (s3.owns(target)) {
+            return .{ .s3 = try s3.Db.open(allocator, target, report) };
+        }
+        if (azure.owns(target)) {
+            return .{ .azure = try azure.Db.open(allocator, target, report) };
+        }
+        if (rabbit.owns(target)) {
+            return .{ .rabbit = try rabbit.Db.open(allocator, target, report) };
+        }
+        if (sftp.owns(target)) {
+            return .{ .sftp = try sftp.Db.open(allocator, target, report) };
+        }
+        if (k8s.owns(target)) {
+            return .{ .k8s = try k8s.Db.open(allocator, target, report) };
+        }
+        if (redis.owns(target)) {
+            return .{ .redis = try redis.Db.open(allocator, target, report) };
+        }
+        if (mysql.owns(target)) {
+            return .{ .mysql = try mysql.Db.open(allocator, target, report) };
+        }
+        if (mssql.owns(target)) {
+            return .{ .mssql = try mssql.Db.open(allocator, target, report) };
+        }
+        if (isPostgresUrl(target)) {
+            return .{ .postgres = try postgres.Db.open(allocator, target, report) };
+        }
+        return .{ .sqlite = try sqlite.Db.open(allocator, target, report) };
+    }
 
-	pub fn close(self: Db) void {
-		switch (self) {
-			inline else => |driver| driver.close(),
-		}
-	}
+    pub fn close(self: Db) void {
+        switch (self) {
+            inline else => |driver| driver.close(),
+        }
+    }
 
-	/// Watch every statement from now on, or stop watching with null.
-	pub fn watch(self: Db, progress: ?Progress) void {
-		switch (self) {
-			inline else => |driver| driver.watch(progress),
-		}
-	}
+    /// Watch every statement from now on, or stop watching with null.
+    pub fn watch(self: Db, progress: ?Progress) void {
+        switch (self) {
+            inline else => |driver| driver.watch(progress),
+        }
+    }
 
-	pub fn caps(self: Db) Caps {
-		switch (self) {
-			inline else => |driver| return driver.caps(),
-		}
-	}
+    pub fn caps(self: Db) Caps {
+        switch (self) {
+            inline else => |driver| return driver.caps(),
+        }
+    }
 
-	/// This connection seen as somewhere files live, where it is one at all. A
-	/// database is not: a table is not a directory and pretending otherwise
-	/// would put a file manager in front of things that hold rows.
-	pub fn files(self: Db) ?store.Store {
-		return switch (self) {
-			.sftp => |driver| driver.files(),
-			.s3 => |driver| driver.files(),
-			.azure => |driver| driver.files(),
-			else => null,
-		};
-	}
+    /// This connection seen as somewhere files live, where it is one at all. A
+    /// database is not: a table is not a directory and pretending otherwise
+    /// would put a file manager in front of things that hold rows.
+    pub fn files(self: Db) ?store.Store {
+        return switch (self) {
+            .sftp => |driver| driver.files(),
+            .s3 => |driver| driver.files(),
+            .azure => |driver| driver.files(),
+            else => null,
+        };
+    }
 
-	/// How many requests this connection has made, where the driver counts them at
-	/// all. Null where it does not: an engine reached through a library does its own
-	/// talking and there is nothing here to count.
-	pub fn requests(self: Db) ?usize {
-		switch (self) {
-			inline else => |driver| {
-				if (@hasField(@TypeOf(driver.*), "requests")) {
-					return driver.requests;
-				}
-				return null;
-			},
-		}
-	}
+    /// How many requests this connection has made, where the driver counts them at
+    /// all. Null where it does not: an engine reached through a library does its own
+    /// talking and there is nothing here to count.
+    pub fn requests(self: Db) ?usize {
+        switch (self) {
+            inline else => |driver| {
+                if (@hasField(@TypeOf(driver.*), "requests")) {
+                    return driver.requests;
+                }
+                return null;
+            },
+        }
+    }
 
-	/// The engine's version, for the header.
-	pub fn version(self: Db) []const u8 {
-		switch (self) {
-			inline else => |driver| return driver.version(),
-		}
-	}
+    /// The engine's version, for the header.
+    pub fn version(self: Db) []const u8 {
+        switch (self) {
+            inline else => |driver| return driver.version(),
+        }
+    }
 
-	/// What the connection calls itself: a file path or host/database.
-	pub fn describe(self: Db) []const u8 {
-		switch (self) {
-			inline else => |driver| return driver.describe(),
-		}
-	}
+    /// What the connection calls itself: a file path or host/database.
+    pub fn describe(self: Db) []const u8 {
+        switch (self) {
+            inline else => |driver| return driver.describe(),
+        }
+    }
 
-	pub fn message(self: Db) []const u8 {
-		switch (self) {
-			inline else => |driver| return driver.message(),
-		}
-	}
+    pub fn message(self: Db) []const u8 {
+        switch (self) {
+            inline else => |driver| return driver.message(),
+        }
+    }
 
-	/// Run a statement, ignoring any rows.
-	pub fn exec(self: Db, sql: []const u8) Error!void {
-		switch (self) {
-			inline else => |driver| return driver.exec(sql),
-		}
-	}
+    /// Run a statement, ignoring any rows.
+    pub fn exec(self: Db, sql: []const u8) Error!void {
+        switch (self) {
+            inline else => |driver| return driver.exec(sql),
+        }
+    }
 
-	/// Start one statement. `rest` receives what was left of the batch.
-	pub fn query(self: Db, sql: []const u8, rest: ?*[]const u8) Error!?Rows {
-		switch (self) {
-			inline else => |driver| return driver.query(sql, rest),
-		}
-	}
+    /// Start one statement. `rest` receives what was left of the batch.
+    pub fn query(self: Db, sql: []const u8, rest: ?*[]const u8) Error!?Rows {
+        switch (self) {
+            inline else => |driver| return driver.query(sql, rest),
+        }
+    }
 
-	// --- rows, asked for rather than written ---
-	//
-	// A driver that declares `select`, `apply` or `wording` answers the request
-	// itself; the rest are SQL engines and the request is rendered for them here,
-	// once, rather than in three drivers or in the interface.
+    // --- rows, asked for rather than written ---
+    //
+    // A driver that declares `select`, `apply` or `wording` answers the request
+    // itself; the rest are SQL engines and the request is rendered for them here,
+    // once, rather than in three drivers or in the interface.
 
-	/// Ask for rows.
-	pub fn select(self: Db, request: ask.Select) Error!?Rows {
-		switch (self) {
-			inline else => |driver| {
-				if (@hasDecl(@TypeOf(driver.*), "select")) {
-					return driver.select(request);
-				}
-				const sql = try self.wording(driver.allocator, .{ .select = request });
-				defer driver.allocator.free(sql);
-				return driver.query(sql, null);
-			},
-		}
-	}
+    /// Ask for rows.
+    pub fn select(self: Db, request: ask.Select) Error!?Rows {
+        switch (self) {
+            inline else => |driver| {
+                if (@hasDecl(@TypeOf(driver.*), "select")) {
+                    return driver.select(request);
+                }
+                const sql = try self.wording(driver.allocator, .{ .select = request });
+                defer driver.allocator.free(sql);
+                return driver.query(sql, null);
+            },
+        }
+    }
 
-	/// How many rows match. Null when the engine cannot say, which is not the
-	/// same as none.
-	pub fn count(self: Db, request: ask.Select) ?i64 {
-		var counting = request;
-		counting.count = true;
-		var rows = (self.select(counting) catch return null) orelse return null;
-		defer rows.close();
-		if (!(rows.next() catch return null)) {
-			return null;
-		}
-		return switch (rows.value(0)) {
-			.int => |value| value,
-			.float => |value| @intFromFloat(value),
-			.text => |text| std.fmt.parseInt(i64, text, 10) catch null,
-			else => null,
-		};
-	}
+    /// How many rows match. Null when the engine cannot say, which is not the
+    /// same as none.
+    pub fn count(self: Db, request: ask.Select) ?i64 {
+        var counting = request;
+        counting.count = true;
+        var rows = (self.select(counting) catch return null) orelse return null;
+        defer rows.close();
+        if (!(rows.next() catch return null)) {
+            return null;
+        }
+        return switch (rows.value(0)) {
+            .int => |value| value,
+            .float => |value| @intFromFloat(value),
+            .text => |text| std.fmt.parseInt(i64, text, 10) catch null,
+            else => null,
+        };
+    }
 
-	/// Insert, update or delete one row.
-	pub fn apply(self: Db, change: ask.Change) Error!void {
-		switch (self) {
-			inline else => |driver| {
-				if (@hasDecl(@TypeOf(driver.*), "apply")) {
-					return driver.apply(change);
-				}
-				const sql = try self.wording(driver.allocator, .{ .change = change });
-				defer driver.allocator.free(sql);
-				return driver.exec(sql);
-			},
-		}
-	}
+    /// Insert, update or delete one row.
+    pub fn apply(self: Db, change: ask.Change) Error!void {
+        switch (self) {
+            inline else => |driver| {
+                if (@hasDecl(@TypeOf(driver.*), "apply")) {
+                    return driver.apply(change);
+                }
+                const sql = try self.wording(driver.allocator, .{ .change = change });
+                defer driver.allocator.free(sql);
+                return driver.exec(sql);
+            },
+        }
+    }
 
-	/// The request in the engine's own words, for the history, the report and the
-	/// clipboard: SQL where there is SQL, and `SCAN user:*` or `FETCH orders 0`
-	/// where there is not. Owned by the caller.
-	pub fn wording(self: Db, allocator: std.mem.Allocator, request: Request) Error![]u8 {
-		switch (self) {
-			inline else => |driver| {
-				if (@hasDecl(@TypeOf(driver.*), "wording")) {
-					return driver.wording(allocator, request);
-				}
-				var out: List = .empty;
-				errdefer out.deinit(allocator);
-				switch (request) {
-					.select => |value| try ask.renderSelect(&out, allocator, value, driver.caps()),
-					.change => |value| try ask.renderChange(&out, allocator, value, driver.caps()),
-				}
-				return out.toOwnedSlice(allocator);
-			},
-		}
-	}
+    /// The request in the engine's own words, for the history, the report and the
+    /// clipboard: SQL where there is SQL, and `SCAN user:*` or `FETCH orders 0`
+    /// where there is not. Owned by the caller.
+    pub fn wording(self: Db, allocator: std.mem.Allocator, request: Request) Error![]u8 {
+        switch (self) {
+            inline else => |driver| {
+                if (@hasDecl(@TypeOf(driver.*), "wording")) {
+                    return driver.wording(allocator, request);
+                }
+                var out: List = .empty;
+                errdefer out.deinit(allocator);
+                switch (request) {
+                    .select => |value| try ask.renderSelect(&out, allocator, value, driver.caps()),
+                    .change => |value| try ask.renderChange(&out, allocator, value, driver.caps()),
+                }
+                return out.toOwnedSlice(allocator);
+            },
+        }
+    }
 
-	pub fn inTransaction(self: Db) bool {
-		switch (self) {
-			inline else => |driver| return driver.inTransaction(),
-		}
-	}
+    pub fn inTransaction(self: Db) bool {
+        switch (self) {
+            inline else => |driver| return driver.inTransaction(),
+        }
+    }
 
-	// --- schema ---
+    // --- schema ---
 
-	pub fn objects(self: Db, arena: std.mem.Allocator, schema: []const u8) Error![]Object {
-		switch (self) {
-			inline else => |driver| return driver.objects(arena, schema),
-		}
-	}
+    pub fn objects(self: Db, arena: std.mem.Allocator, schema: []const u8) Error![]Object {
+        switch (self) {
+            inline else => |driver| return driver.objects(arena, schema),
+        }
+    }
 
-	pub fn schemas(self: Db, arena: std.mem.Allocator) Error![][]const u8 {
-		switch (self) {
-			inline else => |driver| return driver.schemas(arena),
-		}
-	}
+    pub fn schemas(self: Db, arena: std.mem.Allocator) Error![][]const u8 {
+        switch (self) {
+            inline else => |driver| return driver.schemas(arena),
+        }
+    }
 
-	pub fn columns(self: Db, arena: std.mem.Allocator, table: Table) Error![]Column {
-		switch (self) {
-			inline else => |driver| return driver.columns(arena, table),
-		}
-	}
+    pub fn columns(self: Db, arena: std.mem.Allocator, table: Table) Error![]Column {
+        switch (self) {
+            inline else => |driver| return driver.columns(arena, table),
+        }
+    }
 
-	pub fn indexes(self: Db, arena: std.mem.Allocator, table: Table) Error![]Index {
-		switch (self) {
-			inline else => |driver| return driver.indexes(arena, table),
-		}
-	}
+    pub fn indexes(self: Db, arena: std.mem.Allocator, table: Table) Error![]Index {
+        switch (self) {
+            inline else => |driver| return driver.indexes(arena, table),
+        }
+    }
 
-	pub fn foreignKeys(self: Db, arena: std.mem.Allocator, table: Table) Error![]ForeignKey {
-		switch (self) {
-			inline else => |driver| return driver.foreignKeys(arena, table),
-		}
-	}
+    pub fn foreignKeys(self: Db, arena: std.mem.Allocator, table: Table) Error![]ForeignKey {
+        switch (self) {
+            inline else => |driver| return driver.foreignKeys(arena, table),
+        }
+    }
 
-	/// The CREATE statement, or something close enough to show.
-	pub fn definition(self: Db, arena: std.mem.Allocator, table: Table) Error!?[]const u8 {
-		switch (self) {
-			inline else => |driver| return driver.definition(arena, table),
-		}
-	}
+    /// The CREATE statement, or something close enough to show.
+    pub fn definition(self: Db, arena: std.mem.Allocator, table: Table) Error!?[]const u8 {
+        switch (self) {
+            inline else => |driver| return driver.definition(arena, table),
+        }
+    }
 
-	pub fn rowCount(self: Db, table: Table) ?i64 {
-		switch (self) {
-			inline else => |driver| return driver.rowCount(table),
-		}
-	}
+    pub fn rowCount(self: Db, table: Table) ?i64 {
+        switch (self) {
+            inline else => |driver| return driver.rowCount(table),
+        }
+    }
 
-	/// Columns that address one row, and whether they have to be selected
-	/// separately because they are not part of `*`.
-	pub fn rowKey(self: Db, arena: std.mem.Allocator, table: Table) Error!RowKey {
-		switch (self) {
-			inline else => |driver| return driver.rowKey(arena, table),
-		}
-	}
+    /// Columns that address one row, and whether they have to be selected
+    /// separately because they are not part of `*`.
+    pub fn rowKey(self: Db, arena: std.mem.Allocator, table: Table) Error!RowKey {
+        switch (self) {
+            inline else => |driver| return driver.rowKey(arena, table),
+        }
+    }
 
-	/// What an alter has to preserve on this engine. SQLite has to write the
-	/// table again and put its indexes and triggers back; PostgreSQL alters in
-	/// place and needs nothing.
-	pub fn alterContext(self: Db, arena: std.mem.Allocator, table: Table, cols: []const Column) Error!AlterContext {
-		switch (self) {
-			inline else => |driver| return driver.alterContext(arena, table, cols),
-		}
-	}
+    /// What an alter has to preserve on this engine. SQLite has to write the
+    /// table again and put its indexes and triggers back; PostgreSQL alters in
+    /// place and needs nothing.
+    pub fn alterContext(self: Db, arena: std.mem.Allocator, table: Table, cols: []const Column) Error!AlterContext {
+        switch (self) {
+            inline else => |driver| return driver.alterContext(arena, table, cols),
+        }
+    }
 
-	/// Engine facts for the info view.
-	pub fn settings(self: Db, arena: std.mem.Allocator) Error![]Setting {
-		switch (self) {
-			inline else => |driver| return driver.settings(arena),
-		}
-	}
+    /// Engine facts for the info view.
+    pub fn settings(self: Db, arena: std.mem.Allocator) Error![]Setting {
+        switch (self) {
+            inline else => |driver| return driver.settings(arena),
+        }
+    }
 
-	/// Split a batch the way this engine parses it.
-	/// Whether running this again would do the same thing rather than something
-	/// more. Asked before a grid full of a statement's rows is refreshed - by the
-	/// follow key, which repeats it on a clock - because a console with `PRODUCE`
-	/// and `SET` and `SCALE` in it has statements that must happen once.
-	///
-	/// An engine that speaks SQL is answered here: a statement that only reads
-	/// says so in its first word. Anything else has a console of its own and
-	/// answers for itself, and says no until it does - the safe way round.
-	pub fn repeatable(self: Db, statement: []const u8) bool {
-		switch (self) {
-			inline else => |driver| {
-				if (@hasDecl(@TypeOf(driver.*), "repeatable")) {
-					return driver.repeatable(statement);
-				}
-				if (!self.caps().speaks_sql) {
-					return false;
-				}
-				return readsOnly(statement);
-			},
-		}
-	}
+    /// Split a batch the way this engine parses it.
+    /// Whether running this again would do the same thing rather than something
+    /// more. Asked before a grid full of a statement's rows is refreshed - by the
+    /// follow key, which repeats it on a clock - because a console with `PRODUCE`
+    /// and `SET` and `SCALE` in it has statements that must happen once.
+    ///
+    /// An engine that speaks SQL is answered here: a statement that only reads
+    /// says so in its first word. Anything else has a console of its own and
+    /// answers for itself, and says no until it does - the safe way round.
+    pub fn repeatable(self: Db, statement: []const u8) bool {
+        switch (self) {
+            inline else => |driver| {
+                if (@hasDecl(@TypeOf(driver.*), "repeatable")) {
+                    return driver.repeatable(statement);
+                }
+                if (!self.caps().speaks_sql) {
+                    return false;
+                }
+                return readsOnly(statement);
+            },
+        }
+    }
 
-	/// What is worth knowing about one row, for the screen that opens on it.
-	/// Null where an engine has nothing to add beyond the row itself, which is
-	/// every engine whose rows are already all of it.
-	pub fn rowDetail(self: Db, arena: std.mem.Allocator, table: Table, name: []const u8) Error!?[]Setting {
-		switch (self) {
-			inline else => |driver| {
-				if (@hasDecl(@TypeOf(driver.*), "rowDetail")) {
-					return driver.rowDetail(arena, table, name);
-				}
-				return null;
-			},
-		}
-	}
+    /// What is worth knowing about one row, for the screen that opens on it.
+    /// Null where an engine has nothing to add beyond the row itself, which is
+    /// every engine whose rows are already all of it.
+    pub fn rowDetail(self: Db, arena: std.mem.Allocator, table: Table, name: []const u8) Error!?[]Setting {
+        switch (self) {
+            inline else => |driver| {
+                if (@hasDecl(@TypeOf(driver.*), "rowDetail")) {
+                    return driver.rowDetail(arena, table, name);
+                }
+                return null;
+            },
+        }
+    }
 
-	/// What can be done to that row, in the engine's own words.
-	pub fn rowActions(self: Db, arena: std.mem.Allocator, table: Table, name: []const u8) Error![]Action {
-		switch (self) {
-			inline else => |driver| {
-				if (@hasDecl(@TypeOf(driver.*), "rowActions")) {
-					return driver.rowActions(arena, table, name);
-				}
-				return &.{};
-			},
-		}
-	}
+    /// What can be done to that row, in the engine's own words.
+    pub fn rowActions(self: Db, arena: std.mem.Allocator, table: Table, name: []const u8) Error![]Action {
+        switch (self) {
+            inline else => |driver| {
+                if (@hasDecl(@TypeOf(driver.*), "rowActions")) {
+                    return driver.rowActions(arena, table, name);
+                }
+                return &.{};
+            },
+        }
+    }
 
-	/// Which container a shell is open in, or nothing. The interface asks so it
-	/// can say where what is typed is going, and keep the editor open while the
-	/// answer is somewhere.
-	pub fn sessionIn(self: Db) []const u8 {
-		switch (self) {
-			inline else => |driver| {
-				if (@hasDecl(@TypeOf(driver.*), "sessionIn")) {
-					return driver.sessionIn();
-				}
-				return "";
-			},
-		}
-	}
+    /// Which container a shell is open in, or nothing. The interface asks so it
+    /// can say where what is typed is going, and keep the editor open while the
+    /// answer is somewhere.
+    pub fn sessionIn(self: Db) []const u8 {
+        switch (self) {
+            inline else => |driver| {
+                if (@hasDecl(@TypeOf(driver.*), "sessionIn")) {
+                    return driver.sessionIn();
+                }
+                return "";
+            },
+        }
+    }
 
-	/// Whether running this needs asking about first, and what to call it when
-	/// asking - or null where it does not. An engine answers for its own console:
-	/// this program cannot know that one line of it makes things and another
-	/// only looks.
-	pub fn confirming(self: Db, statement: []const u8) ?[]const u8 {
-		switch (self) {
-			inline else => |driver| {
-				if (@hasDecl(@TypeOf(driver.*), "confirming")) {
-					return driver.confirming(statement);
-				}
-				return null;
-			},
-		}
-	}
+    /// Whether running this needs asking about first, and what to call it when
+    /// asking - or null where it does not. An engine answers for its own console:
+    /// this program cannot know that one line of it makes things and another
+    /// only looks.
+    pub fn confirming(self: Db, statement: []const u8) ?[]const u8 {
+        switch (self) {
+            inline else => |driver| {
+                if (@hasDecl(@TypeOf(driver.*), "confirming")) {
+                    return driver.confirming(statement);
+                }
+                return null;
+            },
+        }
+    }
 
-	/// Whether this statement wants the terminal rather than the grid. Only one
-	/// engine has anything to say here, and the rest say no by not answering.
-	pub fn wantsTerminal(self: Db, statement: []const u8) bool {
-		switch (self) {
-			inline else => |driver| {
-				if (@hasDecl(@TypeOf(driver.*), "wantsTerminal")) {
-					return driver.wantsTerminal(statement);
-				}
-				return false;
-			},
-		}
-	}
+    /// Whether this statement wants the terminal rather than the grid. Only one
+    /// engine has anything to say here, and the rest say no by not answering.
+    pub fn wantsTerminal(self: Db, statement: []const u8) bool {
+        switch (self) {
+            inline else => |driver| {
+                if (@hasDecl(@TypeOf(driver.*), "wantsTerminal")) {
+                    return driver.wantsTerminal(statement);
+                }
+                return false;
+            },
+        }
+    }
 
-	/// Open the session that statement asked for.
-	pub fn shell(self: Db, statement: []const u8) Error!?Shell {
-		switch (self) {
-			inline else => |driver| {
-				if (@hasDecl(@TypeOf(driver.*), "shell")) {
-					return driver.shell(statement);
-				}
-				return null;
-			},
-		}
-	}
+    /// Open the session that statement asked for.
+    pub fn shell(self: Db, statement: []const u8) Error!?Shell {
+        switch (self) {
+            inline else => |driver| {
+                if (@hasDecl(@TypeOf(driver.*), "shell")) {
+                    return driver.shell(statement);
+                }
+                return null;
+            },
+        }
+    }
 
-	pub fn split(self: Db, arena: std.mem.Allocator, sql: []const u8) Error![]Statement {
-		switch (self) {
-			inline else => |driver| return driver.split(arena, sql),
-		}
-	}
+    pub fn split(self: Db, arena: std.mem.Allocator, sql: []const u8) Error![]Statement {
+        switch (self) {
+            inline else => |driver| return driver.split(arena, sql),
+        }
+    }
 
-	// --- schema changes, as SQL the caller then runs ---
+    // --- schema changes, as SQL the caller then runs ---
 
-	pub fn ddl(self: Db) Ddl {
-		switch (self) {
-			inline else => |driver| return driver.ddl(),
-		}
-	}
+    pub fn ddl(self: Db) Ddl {
+        switch (self) {
+            inline else => |driver| return driver.ddl(),
+        }
+    }
 };
 
 /// One request, for the sake of putting it into words.
 pub const Request = union(enum) {
-	select: ask.Select,
-	change: ask.Change,
+    select: ask.Select,
+    change: ask.Change,
 };
 
 /// A table, with the schema it lives in on the engines that have them.
 pub const Table = struct {
-	schema: []const u8 = "",
-	name: []const u8,
+    schema: []const u8 = "",
+    name: []const u8,
 
-	pub fn eql(self: Table, other: Table) bool {
-		return std.mem.eql(u8, self.name, other.name) and std.mem.eql(u8, self.schema, other.schema);
-	}
+    pub fn eql(self: Table, other: Table) bool {
+        return std.mem.eql(u8, self.name, other.name) and std.mem.eql(u8, self.schema, other.schema);
+    }
 };
 
 pub const RowKey = struct {
-	columns: []const []const u8 = &.{},
-	/// The key is not part of `SELECT *` and has to be asked for; `expression`
-	/// is what to select for it (SQLite's `rowid`).
-	hidden: bool = false,
-	expression: []const u8 = "",
+    columns: []const []const u8 = &.{},
+    /// The key is not part of `SELECT *` and has to be asked for; `expression`
+    /// is what to select for it (SQLite's `rowid`).
+    hidden: bool = false,
+    expression: []const u8 = "",
 
-	pub fn usable(self: RowKey) bool {
-		return self.columns.len != 0;
-	}
+    pub fn usable(self: RowKey) bool {
+        return self.columns.len != 0;
+    }
 };
 
 /// SQL generation for schema changes; each driver brings its own.
 pub const Ddl = union(enum) {
-	sqlite: sqlite.Ddl,
-	postgres: postgres.Ddl,
-	mysql: mysql.Ddl,
-	mssql: mssql.Ddl,
-	redis: redis.Ddl,
-	kafka: kafka.Ddl,
-	s3: s3.Ddl,
-	azure: azure.Ddl,
-	rabbit: rabbit.Ddl,
-	sftp: sftp.Ddl,
-	k8s: k8s.Ddl,
+    sqlite: sqlite.Ddl,
+    postgres: postgres.Ddl,
+    mysql: mysql.Ddl,
+    mssql: mssql.Ddl,
+    redis: redis.Ddl,
+    kafka: kafka.Ddl,
+    s3: s3.Ddl,
+    azure: azure.Ddl,
+    rabbit: rabbit.Ddl,
+    sftp: sftp.Ddl,
+    k8s: k8s.Ddl,
 
-	pub fn createTable(self: Ddl, out: *List, a: std.mem.Allocator, table: Table, cols: []const Column, keys: []const ForeignKey) !void {
-		switch (self) {
-			inline else => |driver| return driver.createTable(out, a, table, cols, keys),
-		}
-	}
+    pub fn createTable(self: Ddl, out: *List, a: std.mem.Allocator, table: Table, cols: []const Column, keys: []const ForeignKey) !void {
+        switch (self) {
+            inline else => |driver| return driver.createTable(out, a, table, cols, keys),
+        }
+    }
 
-	/// Apply a new column list to an existing table, renames included.
-	pub fn alterTable(self: Ddl, out: *List, a: std.mem.Allocator, table: Table, new_name: []const u8, cols: []const Column, context: AlterContext) !void {
-		switch (self) {
-			inline else => |driver| return driver.alterTable(out, a, table, new_name, cols, context),
-		}
-	}
+    /// Apply a new column list to an existing table, renames included.
+    pub fn alterTable(self: Ddl, out: *List, a: std.mem.Allocator, table: Table, new_name: []const u8, cols: []const Column, context: AlterContext) !void {
+        switch (self) {
+            inline else => |driver| return driver.alterTable(out, a, table, new_name, cols, context),
+        }
+    }
 
-	pub fn addForeignKey(self: Ddl, out: *List, a: std.mem.Allocator, table: Table, key: ForeignKey, context: AlterContext) !void {
-		switch (self) {
-			inline else => |driver| return driver.addForeignKey(out, a, table, key, context),
-		}
-	}
+    pub fn addForeignKey(self: Ddl, out: *List, a: std.mem.Allocator, table: Table, key: ForeignKey, context: AlterContext) !void {
+        switch (self) {
+            inline else => |driver| return driver.addForeignKey(out, a, table, key, context),
+        }
+    }
 
-	pub fn createIndex(self: Ddl, out: *List, a: std.mem.Allocator, table: Table, name: []const u8, cols: []const []const u8, unique: bool, where: []const u8) !void {
-		switch (self) {
-			inline else => |driver| return driver.createIndex(out, a, table, name, cols, unique, where),
-		}
-	}
+    pub fn createIndex(self: Ddl, out: *List, a: std.mem.Allocator, table: Table, name: []const u8, cols: []const []const u8, unique: bool, where: []const u8) !void {
+        switch (self) {
+            inline else => |driver| return driver.createIndex(out, a, table, name, cols, unique, where),
+        }
+    }
 
-	pub fn createView(self: Ddl, out: *List, a: std.mem.Allocator, table: Table, select: []const u8) !void {
-		switch (self) {
-			inline else => |driver| return driver.createView(out, a, table, select),
-		}
-	}
+    pub fn createView(self: Ddl, out: *List, a: std.mem.Allocator, table: Table, select: []const u8) !void {
+        switch (self) {
+            inline else => |driver| return driver.createView(out, a, table, select),
+        }
+    }
 
-	pub fn createTrigger(self: Ddl, out: *List, a: std.mem.Allocator, table: Table, name: []const u8, when: []const u8, event: []const u8, condition: []const u8, body: []const u8) !void {
-		switch (self) {
-			inline else => |driver| return driver.createTrigger(out, a, table, name, when, event, condition, body),
-		}
-	}
+    pub fn createTrigger(self: Ddl, out: *List, a: std.mem.Allocator, table: Table, name: []const u8, when: []const u8, event: []const u8, condition: []const u8, body: []const u8) !void {
+        switch (self) {
+            inline else => |driver| return driver.createTrigger(out, a, table, name, when, event, condition, body),
+        }
+    }
 
-	pub fn renameTable(self: Ddl, out: *List, a: std.mem.Allocator, table: Table, to: []const u8) !void {
-		switch (self) {
-			inline else => |driver| return driver.renameTable(out, a, table, to),
-		}
-	}
+    pub fn renameTable(self: Ddl, out: *List, a: std.mem.Allocator, table: Table, to: []const u8) !void {
+        switch (self) {
+            inline else => |driver| return driver.renameTable(out, a, table, to),
+        }
+    }
 
-	pub fn copyTable(self: Ddl, out: *List, a: std.mem.Allocator, table: Table, to: []const u8, with_rows: bool) !void {
-		switch (self) {
-			inline else => |driver| return driver.copyTable(out, a, table, to, with_rows),
-		}
-	}
+    pub fn copyTable(self: Ddl, out: *List, a: std.mem.Allocator, table: Table, to: []const u8, with_rows: bool) !void {
+        switch (self) {
+            inline else => |driver| return driver.copyTable(out, a, table, to, with_rows),
+        }
+    }
 
-	pub fn dropObject(self: Ddl, out: *List, a: std.mem.Allocator, kind: Kind, table: Table) !void {
-		switch (self) {
-			inline else => |driver| return driver.dropObject(out, a, kind, table),
-		}
-	}
+    pub fn dropObject(self: Ddl, out: *List, a: std.mem.Allocator, kind: Kind, table: Table) !void {
+        switch (self) {
+            inline else => |driver| return driver.dropObject(out, a, kind, table),
+        }
+    }
 
-	pub fn truncate(self: Ddl, out: *List, a: std.mem.Allocator, table: Table) !void {
-		switch (self) {
-			inline else => |driver| return driver.truncate(out, a, table),
-		}
-	}
+    pub fn truncate(self: Ddl, out: *List, a: std.mem.Allocator, table: Table) !void {
+        switch (self) {
+            inline else => |driver| return driver.truncate(out, a, table),
+        }
+    }
 
-	/// INSERT with values the caller has already quoted.
-	pub fn insertRow(self: Ddl, out: *List, a: std.mem.Allocator, table: Table, cols: []const []const u8, values: []const []const u8) !void {
-		_ = self;
-		try out.appendSlice(a, "INSERT INTO ");
-		try quoteTable(out, a, table);
-		if (cols.len == 0) {
-			try out.appendSlice(a, " DEFAULT VALUES;\n");
-			return;
-		}
-		try out.appendSlice(a, " (");
-		for (cols, 0..) |column, i| {
-			if (i != 0) {
-				try out.appendSlice(a, ", ");
-			}
-			try quoteName(out, a, column);
-		}
-		try out.appendSlice(a, ") VALUES (");
-		for (values, 0..) |value, i| {
-			if (i != 0) {
-				try out.appendSlice(a, ", ");
-			}
-			try out.appendSlice(a, value);
-		}
-		try out.appendSlice(a, ");\n");
-	}
+    /// INSERT with values the caller has already quoted.
+    pub fn insertRow(self: Ddl, out: *List, a: std.mem.Allocator, table: Table, cols: []const []const u8, values: []const []const u8) !void {
+        _ = self;
+        try out.appendSlice(a, "INSERT INTO ");
+        try quoteTable(out, a, table);
+        if (cols.len == 0) {
+            try out.appendSlice(a, " DEFAULT VALUES;\n");
+            return;
+        }
+        try out.appendSlice(a, " (");
+        for (cols, 0..) |column, i| {
+            if (i != 0) {
+                try out.appendSlice(a, ", ");
+            }
+            try quoteName(out, a, column);
+        }
+        try out.appendSlice(a, ") VALUES (");
+        for (values, 0..) |value, i| {
+            if (i != 0) {
+                try out.appendSlice(a, ", ");
+            }
+            try out.appendSlice(a, value);
+        }
+        try out.appendSlice(a, ");\n");
+    }
 
-	/// What a dump has to say before anything else, for an engine whose files
-	/// depend on a setting rather than only on what is in them. Optional.
-	pub fn prologue(self: Ddl, out: *List, a: std.mem.Allocator) !void {
-		switch (self) {
-			inline else => |driver| {
-				if (@hasDecl(@TypeOf(driver), "prologue")) {
-					return driver.prologue(out, a);
-				}
-			},
-		}
-	}
+    /// What a dump has to say before anything else, for an engine whose files
+    /// depend on a setting rather than only on what is in them. Optional.
+    pub fn prologue(self: Ddl, out: *List, a: std.mem.Allocator) !void {
+        switch (self) {
+            inline else => |driver| {
+                if (@hasDecl(@TypeOf(driver), "prologue")) {
+                    return driver.prologue(out, a);
+                }
+            },
+        }
+    }
 
-	/// What a dump has to say before and after the rows of one table, for an
-	/// engine that needs telling. Optional, and only SQL Server has anything to
-	/// say: a column that numbers itself will not take a value until the table
-	/// has been told to accept one.
-	pub fn beforeRows(self: Ddl, out: *List, a: std.mem.Allocator, table: Table, cols: []const Column) !void {
-		switch (self) {
-			inline else => |driver| {
-				if (@hasDecl(@TypeOf(driver), "beforeRows")) {
-					return driver.beforeRows(out, a, table, cols);
-				}
-			},
-		}
-	}
+    /// What a dump has to say before and after the rows of one table, for an
+    /// engine that needs telling. Optional, and only SQL Server has anything to
+    /// say: a column that numbers itself will not take a value until the table
+    /// has been told to accept one.
+    pub fn beforeRows(self: Ddl, out: *List, a: std.mem.Allocator, table: Table, cols: []const Column) !void {
+        switch (self) {
+            inline else => |driver| {
+                if (@hasDecl(@TypeOf(driver), "beforeRows")) {
+                    return driver.beforeRows(out, a, table, cols);
+                }
+            },
+        }
+    }
 
-	pub fn afterRows(self: Ddl, out: *List, a: std.mem.Allocator, table: Table, cols: []const Column) !void {
-		switch (self) {
-			inline else => |driver| {
-				if (@hasDecl(@TypeOf(driver), "afterRows")) {
-					return driver.afterRows(out, a, table, cols);
-				}
-			},
-		}
-	}
+    pub fn afterRows(self: Ddl, out: *List, a: std.mem.Allocator, table: Table, cols: []const Column) !void {
+        switch (self) {
+            inline else => |driver| {
+                if (@hasDecl(@TypeOf(driver), "afterRows")) {
+                    return driver.afterRows(out, a, table, cols);
+                }
+            },
+        }
+    }
 
-	/// Types offered in the column form.
-	pub fn types(self: Ddl) []const []const u8 {
-		switch (self) {
-			inline else => |driver| return driver.types(),
-		}
-	}
+    /// Types offered in the column form.
+    pub fn types(self: Ddl) []const []const u8 {
+        switch (self) {
+            inline else => |driver| return driver.types(),
+        }
+    }
 };
 
 /// What an alter needs to know beyond the new columns: SQLite rebuilds the
 /// table and has to put these back, PostgreSQL ignores them.
 pub const AlterContext = struct {
-	/// The new column list; a rebuild needs it to write the table again.
-	columns: []const Column = &.{},
-	keys: []const ForeignKey = &.{},
-	replay: []const []const u8 = &.{},
+    /// The new column list; a rebuild needs it to write the table again.
+    columns: []const Column = &.{},
+    keys: []const ForeignKey = &.{},
+    replay: []const []const u8 = &.{},
 };
 
 /// Whether a SQL statement is one that only reads. The first word decides it,
 /// and anything not on the list is taken to write - a `WITH … DELETE` exists and
 /// a wrong yes here repeats a deletion on a timer.
 pub fn readsOnly(statement: []const u8) bool {
-	const text = std.mem.trimStart(u8, statement, " \t\r\n(");
-	const reading = [_][]const u8{ "SELECT", "SHOW", "EXPLAIN", "PRAGMA", "DESCRIBE", "DESC", "VALUES", "TABLE" };
-	for (reading) |word| {
-		if (text.len < word.len or !std.ascii.eqlIgnoreCase(text[0..word.len], word)) {
-			continue;
-		}
-		// The whole word, so `SELECTED` is not a SELECT.
-		if (text.len == word.len or !isWordByte(text[word.len])) {
-			return true;
-		}
-	}
-	// A `WITH` may end in anything, and often ends in a write.
-	return false;
+    const text = std.mem.trimStart(u8, statement, " \t\r\n(");
+    const reading = [_][]const u8{ "SELECT", "SHOW", "EXPLAIN", "PRAGMA", "DESCRIBE", "DESC", "VALUES", "TABLE" };
+    for (reading) |word| {
+        if (text.len < word.len or !std.ascii.eqlIgnoreCase(text[0..word.len], word)) {
+            continue;
+        }
+        // The whole word, so `SELECTED` is not a SELECT.
+        if (text.len == word.len or !isWordByte(text[word.len])) {
+            return true;
+        }
+    }
+    // A `WITH` may end in anything, and often ends in a write.
+    return false;
 }
 
 fn isWordByte(byte: u8) bool {
-	return std.ascii.isAlphanumeric(byte) or byte == '_';
+    return std.ascii.isAlphanumeric(byte) or byte == '_';
 }
 
 test "a statement that only reads is the only one worth repeating" {
-	const reads = [_][]const u8{
-		"SELECT 1",
-		"  select * from books",
-		"\n\tSELECT\n  1",
-		"(SELECT 1)",
-		"show tables",
-		"EXPLAIN SELECT 1",
-		"pragma table_info(books)",
-		"DESCRIBE books",
-		"VALUES (1)",
-		"TABLE books",
-	};
-	for (reads) |statement| {
-		if (!readsOnly(statement)) {
-			std.debug.print("should read: {s}\n", .{statement});
-			return error.TestUnexpectedResult;
-		}
-	}
-	const writes = [_][]const u8{
-		"INSERT INTO books (title) VALUES ('x')",
-		"insert into authors (name) values ('x') returning id",
-		"UPDATE books SET year = 1 RETURNING id",
-		"DELETE FROM books RETURNING id",
-		"WITH gone AS (DELETE FROM books RETURNING id) SELECT * FROM gone",
-		"CREATE TABLE t (a int)",
-		"DROP TABLE books",
-		"VACUUM",
-		// A word that merely starts like one of them is not one of them.
-		"SELECTED",
-		"DESCRIBED",
-		"",
-	};
-	for (writes) |statement| {
-		if (readsOnly(statement)) {
-			std.debug.print("should not read: {s}\n", .{statement});
-			return error.TestUnexpectedResult;
-		}
-	}
+    const reads = [_][]const u8{
+        "SELECT 1",
+        "  select * from books",
+        "\n\tSELECT\n  1",
+        "(SELECT 1)",
+        "show tables",
+        "EXPLAIN SELECT 1",
+        "pragma table_info(books)",
+        "DESCRIBE books",
+        "VALUES (1)",
+        "TABLE books",
+    };
+    for (reads) |statement| {
+        if (!readsOnly(statement)) {
+            std.debug.print("should read: {s}\n", .{statement});
+            return error.TestUnexpectedResult;
+        }
+    }
+    const writes = [_][]const u8{
+        "INSERT INTO books (title) VALUES ('x')",
+        "insert into authors (name) values ('x') returning id",
+        "UPDATE books SET year = 1 RETURNING id",
+        "DELETE FROM books RETURNING id",
+        "WITH gone AS (DELETE FROM books RETURNING id) SELECT * FROM gone",
+        "CREATE TABLE t (a int)",
+        "DROP TABLE books",
+        "VACUUM",
+        // A word that merely starts like one of them is not one of them.
+        "SELECTED",
+        "DESCRIBED",
+        "",
+    };
+    for (writes) |statement| {
+        if (readsOnly(statement)) {
+            std.debug.print("should not read: {s}\n", .{statement});
+            return error.TestUnexpectedResult;
+        }
+    }
 }
 
 pub const List = std.ArrayListUnmanaged(u8);
@@ -1144,46 +1144,46 @@ pub const List = std.ArrayListUnmanaged(u8);
 /// Both engines quote identifiers with double quotes and strings with single
 /// ones, doubling the quote inside. A driver that differs overrides these.
 pub fn quoteName(out: *List, a: std.mem.Allocator, name: []const u8) !void {
-	try out.append(a, '"');
-	for (name) |char| {
-		if (char == '"') {
-			try out.append(a, '"');
-		}
-		try out.append(a, char);
-	}
-	try out.append(a, '"');
+    try out.append(a, '"');
+    for (name) |char| {
+        if (char == '"') {
+            try out.append(a, '"');
+        }
+        try out.append(a, char);
+    }
+    try out.append(a, '"');
 }
 
 pub fn quote(out: *List, a: std.mem.Allocator, text: []const u8) !void {
-	try out.append(a, '\'');
-	for (text) |char| {
-		if (char == '\'') {
-			try out.append(a, '\'');
-		}
-		try out.append(a, char);
-	}
-	try out.append(a, '\'');
+    try out.append(a, '\'');
+    for (text) |char| {
+        if (char == '\'') {
+            try out.append(a, '\'');
+        }
+        try out.append(a, char);
+    }
+    try out.append(a, '\'');
 }
 
 /// `schema.name`, or just the name where there are no schemas.
 pub fn quoteTable(out: *List, a: std.mem.Allocator, table: Table) !void {
-	if (table.schema.len != 0) {
-		try quoteName(out, a, table.schema);
-		try out.append(a, '.');
-	}
-	try quoteName(out, a, table.name);
+    if (table.schema.len != 0) {
+        try quoteName(out, a, table.schema);
+        try out.append(a, '.');
+    }
+    try quoteName(out, a, table.name);
 }
 
 /// How this engine's parser sees a batch.
 pub const SplitOptions = struct {
-	/// $tag$ ... $tag$ bodies, as PostgreSQL uses for functions.
-	dollar_quotes: bool = false,
-	/// Block comments nest.
-	nested_comments: bool = false,
-	/// [identifier]
-	brackets: bool = false,
-	/// `identifier`
-	backticks: bool = false,
+    /// $tag$ ... $tag$ bodies, as PostgreSQL uses for functions.
+    dollar_quotes: bool = false,
+    /// Block comments nest.
+    nested_comments: bool = false,
+    /// [identifier]
+    brackets: bool = false,
+    /// `identifier`
+    backticks: bool = false,
 };
 
 /// Split a batch on the semicolons that are not inside a string, an identifier,
@@ -1193,144 +1193,143 @@ pub const SplitOptions = struct {
 /// because a batch may create something and then use it, and such a statement
 /// cannot be parsed before the one before it has run.
 pub fn splitStatements(arena: std.mem.Allocator, sql: []const u8, options: SplitOptions) Error![]Statement {
-	var list: std.ArrayListUnmanaged(Statement) = .empty;
-	var start: usize = 0;
-	var i: usize = 0;
-	while (i < sql.len) {
-		const char = sql[i];
-		switch (char) {
-			'\'', '"' => i = closing(sql, i, char),
-			'`' => i = if (options.backticks) closing(sql, i, '`') else i + 1,
-			'[' => i = if (options.brackets) (std.mem.indexOfScalarPos(u8, sql, i, ']') orelse sql.len -| 1) + 1 else i + 1,
-			'-' => {
-				if (i + 1 < sql.len and sql[i + 1] == '-') {
-					i = std.mem.indexOfScalarPos(u8, sql, i, '\n') orelse sql.len;
-				} else {
-					i += 1;
-				}
-			},
-			'/' => {
-				if (i + 1 < sql.len and sql[i + 1] == '*') {
-					var depth: usize = 1;
-					i += 2;
-					while (i + 1 < sql.len and depth != 0) {
-						if (options.nested_comments and sql[i] == '/' and sql[i + 1] == '*') {
-							depth += 1;
-							i += 2;
-						} else if (sql[i] == '*' and sql[i + 1] == '/') {
-							depth -= 1;
-							i += 2;
-						} else {
-							i += 1;
-						}
-					}
-				} else {
-					i += 1;
-				}
-			},
-			'$' => {
-				if (!options.dollar_quotes) {
-					i += 1;
-					continue;
-				}
-				var at = i + 1;
-				while (at < sql.len and (std.ascii.isAlphanumeric(sql[at]) or sql[at] == '_')) : (at += 1) {}
-				if (at < sql.len and sql[at] == '$') {
-					const tag = sql[i .. at + 1];
-					const close = std.mem.indexOfPos(u8, sql, at + 1, tag);
-					i = if (close) |found| found + tag.len else sql.len;
-				} else {
-					i += 1;
-				}
-			},
-			';' => {
-				const text = std.mem.trim(u8, sql[start..i], " \t\r\n;");
-				if (text.len != 0) {
-					try list.append(arena, .{ .sql = text });
-				}
-				i += 1;
-				start = i;
-			},
-			else => i += 1,
-		}
-	}
-	const tail = std.mem.trim(u8, sql[start..], " \t\r\n;");
-	if (tail.len != 0) {
-		try list.append(arena, .{ .sql = tail });
-	}
-	return list.items;
+    var list: std.ArrayListUnmanaged(Statement) = .empty;
+    var start: usize = 0;
+    var i: usize = 0;
+    while (i < sql.len) {
+        const char = sql[i];
+        switch (char) {
+            '\'', '"' => i = closing(sql, i, char),
+            '`' => i = if (options.backticks) closing(sql, i, '`') else i + 1,
+            '[' => i = if (options.brackets) (std.mem.indexOfScalarPos(u8, sql, i, ']') orelse sql.len -| 1) + 1 else i + 1,
+            '-' => {
+                if (i + 1 < sql.len and sql[i + 1] == '-') {
+                    i = std.mem.indexOfScalarPos(u8, sql, i, '\n') orelse sql.len;
+                } else {
+                    i += 1;
+                }
+            },
+            '/' => {
+                if (i + 1 < sql.len and sql[i + 1] == '*') {
+                    var depth: usize = 1;
+                    i += 2;
+                    while (i + 1 < sql.len and depth != 0) {
+                        if (options.nested_comments and sql[i] == '/' and sql[i + 1] == '*') {
+                            depth += 1;
+                            i += 2;
+                        } else if (sql[i] == '*' and sql[i + 1] == '/') {
+                            depth -= 1;
+                            i += 2;
+                        } else {
+                            i += 1;
+                        }
+                    }
+                } else {
+                    i += 1;
+                }
+            },
+            '$' => {
+                if (!options.dollar_quotes) {
+                    i += 1;
+                    continue;
+                }
+                var at = i + 1;
+                while (at < sql.len and (std.ascii.isAlphanumeric(sql[at]) or sql[at] == '_')) : (at += 1) {}
+                if (at < sql.len and sql[at] == '$') {
+                    const tag = sql[i .. at + 1];
+                    const close = std.mem.indexOfPos(u8, sql, at + 1, tag);
+                    i = if (close) |found| found + tag.len else sql.len;
+                } else {
+                    i += 1;
+                }
+            },
+            ';' => {
+                const text = std.mem.trim(u8, sql[start..i], " \t\r\n;");
+                if (text.len != 0) {
+                    try list.append(arena, .{ .sql = text });
+                }
+                i += 1;
+                start = i;
+            },
+            else => i += 1,
+        }
+    }
+    const tail = std.mem.trim(u8, sql[start..], " \t\r\n;");
+    if (tail.len != 0) {
+        try list.append(arena, .{ .sql = tail });
+    }
+    return list.items;
 }
 
 /// Past a quoted run, doubled quotes included.
 fn closing(sql: []const u8, at: usize, quote_char: u8) usize {
-	var i = at + 1;
-	while (i < sql.len) : (i += 1) {
-		if (sql[i] != quote_char) {
-			continue;
-		}
-		if (i + 1 < sql.len and sql[i + 1] == quote_char) {
-			i += 1;
-			continue;
-		}
-		return i + 1;
-	}
-	return sql.len;
+    var i = at + 1;
+    while (i < sql.len) : (i += 1) {
+        if (sql[i] != quote_char) {
+            continue;
+        }
+        if (i + 1 < sql.len and sql[i + 1] == quote_char) {
+            i += 1;
+            continue;
+        }
+        return i + 1;
+    }
+    return sql.len;
 }
 
 fn isPostgresUrl(target: []const u8) bool {
-	for ([_][]const u8{ "postgres://", "postgresql://" }) |prefix| {
-		if (std.ascii.startsWithIgnoreCase(target, prefix)) {
-			return true;
-		}
-	}
-	// A bare keyword string, the way psql accepts it.
-	return std.mem.indexOf(u8, target, "host=") != null or std.mem.indexOf(u8, target, "dbname=") != null;
+    for ([_][]const u8{ "postgres://", "postgresql://" }) |prefix| {
+        if (std.ascii.startsWithIgnoreCase(target, prefix)) {
+            return true;
+        }
+    }
+    // A bare keyword string, the way psql accepts it.
+    return std.mem.indexOf(u8, target, "host=") != null or std.mem.indexOf(u8, target, "dbname=") != null;
 }
 
 test "a postgres target is told apart from a file" {
-	try std.testing.expect(isPostgresUrl("postgres://localhost/demo"));
-	try std.testing.expect(isPostgresUrl("postgresql://u:p@h:5433/demo"));
-	try std.testing.expect(isPostgresUrl("host=127.0.0.1 dbname=demo"));
-	try std.testing.expect(!isPostgresUrl("demo.db"));
-	try std.testing.expect(!isPostgresUrl("/var/lib/postgres_backup.sqlite"));
+    try std.testing.expect(isPostgresUrl("postgres://localhost/demo"));
+    try std.testing.expect(isPostgresUrl("postgresql://u:p@h:5433/demo"));
+    try std.testing.expect(isPostgresUrl("host=127.0.0.1 dbname=demo"));
+    try std.testing.expect(!isPostgresUrl("demo.db"));
+    try std.testing.expect(!isPostgresUrl("/var/lib/postgres_backup.sqlite"));
 }
 
 test "quoting doubles the quote character" {
-	const a = std.testing.allocator;
-	var out: List = .empty;
-	defer out.deinit(a);
-	try quoteName(&out, a, "we\"ird");
-	try quote(&out, a, "it's");
-	try quoteTable(&out, a, .{ .schema = "shop", .name = "orders" });
-	try std.testing.expectEqualStrings("\"we\"\"ird\"'it''s'\"shop\".\"orders\"", out.items);
+    const a = std.testing.allocator;
+    var out: List = .empty;
+    defer out.deinit(a);
+    try quoteName(&out, a, "we\"ird");
+    try quote(&out, a, "it's");
+    try quoteTable(&out, a, .{ .schema = "shop", .name = "orders" });
+    try std.testing.expectEqualStrings("\"we\"\"ird\"'it''s'\"shop\".\"orders\"", out.items);
 }
 
 test "the splitter leaves semicolons inside strings, bodies and comments alone" {
-	var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-	defer arena.deinit();
-	const a = arena.allocator();
-	const pg: SplitOptions = .{ .dollar_quotes = true, .nested_comments = true };
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const pg: SplitOptions = .{ .dollar_quotes = true, .nested_comments = true };
 
-	const strings = try splitStatements(a, "SELECT 'a;b'; SELECT 2", pg);
-	try std.testing.expectEqual(@as(usize, 2), strings.len);
-	try std.testing.expectEqualStrings("SELECT 'a;b'", strings[0].sql);
-	try std.testing.expectEqualStrings("SELECT 2", strings[1].sql);
+    const strings = try splitStatements(a, "SELECT 'a;b'; SELECT 2", pg);
+    try std.testing.expectEqual(@as(usize, 2), strings.len);
+    try std.testing.expectEqualStrings("SELECT 'a;b'", strings[0].sql);
+    try std.testing.expectEqualStrings("SELECT 2", strings[1].sql);
 
-	const dollar = try splitStatements(a,
-		"CREATE FUNCTION f() RETURNS int AS $$ BEGIN; RETURN 1; END $$ LANGUAGE plpgsql; SELECT f()", pg);
-	try std.testing.expectEqual(@as(usize, 2), dollar.len);
-	try std.testing.expect(std.mem.indexOf(u8, dollar[0].sql, "RETURN 1") != null);
+    const dollar = try splitStatements(a, "CREATE FUNCTION f() RETURNS int AS $$ BEGIN; RETURN 1; END $$ LANGUAGE plpgsql; SELECT f()", pg);
+    try std.testing.expectEqual(@as(usize, 2), dollar.len);
+    try std.testing.expect(std.mem.indexOf(u8, dollar[0].sql, "RETURN 1") != null);
 
-	const comments = try splitStatements(a, "SELECT 1; -- ; not one\nSELECT 2; /* a ; /* nested */ */ SELECT 3", pg);
-	try std.testing.expectEqual(@as(usize, 3), comments.len);
+    const comments = try splitStatements(a, "SELECT 1; -- ; not one\nSELECT 2; /* a ; /* nested */ */ SELECT 3", pg);
+    try std.testing.expectEqual(@as(usize, 3), comments.len);
 
-	const quoted = try splitStatements(a, "SELECT \"we;ird\" FROM t", pg);
-	try std.testing.expectEqual(@as(usize, 1), quoted.len);
+    const quoted = try splitStatements(a, "SELECT \"we;ird\" FROM t", pg);
+    try std.testing.expectEqual(@as(usize, 1), quoted.len);
 
-	try std.testing.expectEqual(@as(usize, 0), (try splitStatements(a, "  ;; \n", pg)).len);
+    try std.testing.expectEqual(@as(usize, 0), (try splitStatements(a, "  ;; \n", pg)).len);
 
-	// a dollar sign is just a character for SQLite
-	const sqlite_options: SplitOptions = .{ .brackets = true, .backticks = true };
-	const brackets = try splitStatements(a, "SELECT [we;ird], `also;this` FROM t; SELECT 2", sqlite_options);
-	try std.testing.expectEqual(@as(usize, 2), brackets.len);
+    // a dollar sign is just a character for SQLite
+    const sqlite_options: SplitOptions = .{ .brackets = true, .backticks = true };
+    const brackets = try splitStatements(a, "SELECT [we;ird], `also;this` FROM t; SELECT 2", sqlite_options);
+    try std.testing.expectEqual(@as(usize, 2), brackets.len);
 }

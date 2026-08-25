@@ -30,6 +30,14 @@ jobs:
         with:
           version: 0.16.0
 
+      # One way of writing it, decided by the compiler rather than by whoever
+      # touched the file last. Before this the repository was tab-indented by
+      # habit, nothing checked it, and three files written in one afternoon came
+      # out with spaces - which nobody noticed until a `sed` range stopped
+      # matching. Vendored C is not Zig's to format.
+      - name: written the way zig writes it
+        run: zig fmt --check src/ tests/ build.zig
+
       - run: brew install pkgconf libpq mariadb-connector-c openssl@3 libssh2
       - run: ./fetch-sqlite.sh
 

@@ -732,9 +732,9 @@ fn stripBrackets(text: []const u8) []const u8 {
 pub const Ddl = struct {
     pub fn types(_: Ddl) []const []const u8 {
         return &[_][]const u8{
-            "int",            "bigint",        "nvarchar(255)", "nvarchar(max)",
-            "decimal(10,2)",  "datetime2",     "date",          "bit",
-            "uniqueidentifier", "varbinary(max)", "float",       "money",
+            "int",              "bigint",         "nvarchar(255)", "nvarchar(max)",
+            "decimal(10,2)",    "datetime2",      "date",          "bit",
+            "uniqueidentifier", "varbinary(max)", "float",         "money",
         };
     }
 

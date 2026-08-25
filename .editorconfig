@@ -1,0 +1,12 @@
+root = true
+
+# Zig is written the way `zig fmt` writes it, which is four spaces. CI checks
+# it; this is so an editor does not have to be told twice.
+[*.zig]
+indent_style = space
+indent_size = 4
+insert_final_newline = true
+trim_trailing_whitespace = true
+
+[*.{sh,yml,yaml}]
+indent_style = tab

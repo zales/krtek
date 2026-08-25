@@ -13,33 +13,33 @@
 const std = @import("std");
 
 pub fn bytes(into: []u8) !void {
-	const fd = std.c.open("/dev/urandom", .{ .ACCMODE = .RDONLY });
-	if (fd < 0) {
-		return error.NoRandom;
-	}
-	defer _ = std.c.close(fd);
-	var got: usize = 0;
-	while (got < into.len) {
-		const read = std.c.read(fd, into[got..].ptr, into.len - got);
-		if (read <= 0) {
-			return error.NoRandom;
-		}
-		got += @intCast(read);
-	}
+    const fd = std.c.open("/dev/urandom", .{ .ACCMODE = .RDONLY });
+    if (fd < 0) {
+        return error.NoRandom;
+    }
+    defer _ = std.c.close(fd);
+    var got: usize = 0;
+    while (got < into.len) {
+        const read = std.c.read(fd, into[got..].ptr, into.len - got);
+        if (read <= 0) {
+            return error.NoRandom;
+        }
+        got += @intCast(read);
+    }
 }
 
 // ------------------------------------------------------------------- tests
 
 test "randomness is available, and different every time" {
-	var first: [24]u8 = undefined;
-	var second: [24]u8 = undefined;
-	try bytes(&first);
-	try bytes(&second);
-	try std.testing.expect(!std.mem.eql(u8, &first, &second));
-	// And not simply left as it was.
-	try std.testing.expect(!std.mem.allEqual(u8, &first, 0));
+    var first: [24]u8 = undefined;
+    var second: [24]u8 = undefined;
+    try bytes(&first);
+    try bytes(&second);
+    try std.testing.expect(!std.mem.eql(u8, &first, &second));
+    // And not simply left as it was.
+    try std.testing.expect(!std.mem.allEqual(u8, &first, 0));
 
-	// A buffer of no length is not an error, and does not touch anything.
-	var none: [0]u8 = undefined;
-	try bytes(&none);
+    // A buffer of no length is not an error, and does not touch anything.
+    var none: [0]u8 = undefined;
+    try bytes(&none);
 }
