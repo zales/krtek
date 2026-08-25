@@ -52,6 +52,9 @@ PY
 
 fail() { echo "FAIL: $1" >&2; exit 1; }
 
+# The screens, as the target and the keys that reach each one. No spaces in any
+# of it: the loop below splits on whitespace, so `select 1` came apart into two
+# entries and the second one opened a SQLite file called `1` in this directory.
 # The screens, as the target and the keys that reach each one. A dash for the
 # target means no argument, which is what opens the list of connections - and
 # the two screens drawn over that list are where the frames went wrong.
@@ -59,7 +62,7 @@ screens='grid:db:{down}{enter}
 structure:db:{down}{enter}|S
 help:db:?
 palette:db:{ctrl-k}|exp
-editor:db:s|select 1
+editor:db:s|select
 filter:db:{down}{enter}|W
 insert:db:{down}{enter}|i
 connections:-:{sleep}
@@ -77,6 +80,10 @@ for size in 120x40 100x30 80x24 70x22 60x20 50x16 44x14 40x12; do
 		name=${one%%:*}
 		rest=${one#*:}
 		target=${rest%%:*}
+		# Anything without both colons is a line that came apart on a space, which
+		# is worth saying loudly rather than quietly opening whatever it turned out
+		# to be.
+		[ "$rest" = "$one" ] && fail "the screen list has a space in it: $one"
 		keys=$(printf '%s' "${rest#*:}" | tr '|' ' ')
 		[ "$target" = "db" ] && target="$DB"
 		[ "$target" = "-" ] && target=""
