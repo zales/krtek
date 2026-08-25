@@ -19,14 +19,14 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-const clock = @import("db").clock;
+
 
 /// Only macOS has one, and only where there is a sensor with a finger enrolled.
 /// Checked once: it cannot change while the program runs.
 pub var available: bool = false;
 
 pub fn detect() void {
-    if (builtin.os.tag != .macos) {
+    if (comptime builtin.os.tag != .macos) {
         return;
     }
     const context = newContext() orelse return;
@@ -41,6 +41,13 @@ pub fn detect() void {
 /// The policy is the one that also takes the login password, so a finger that
 /// will not read is a nuisance rather than a dead end.
 pub fn ask(reason: []const u8) bool {
+    // Comptime, not a runtime check on `available`: everything below this line
+    // is the Objective-C runtime, and a Linux build that merely *compiles* the
+    // calls fails to link over four symbols that are not there. `comptime`
+    // makes the rest of this function stop existing off macOS.
+    if (comptime builtin.os.tag != .macos) {
+        return false;
+    }
     if (!available) {
         return false;
     }
@@ -74,7 +81,11 @@ pub fn ask(reason: []const u8) bool {
         if (answer.done.load(.acquire) != 0) {
             return answer.okay.load(.acquire) != 0;
         }
-        clock.sleep(20);
+        // Twenty milliseconds, without reaching for the database module to get
+        // it: this file has nothing else to do with that one.
+        const pause = std.c.timespec{ .sec = 0, .nsec = 20 * 1_000_000 };
+        var left: std.c.timespec = undefined;
+        _ = std.c.nanosleep(&pause, &left);
     }
     return false;
 }
