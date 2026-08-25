@@ -64,9 +64,27 @@ pub fn handle(app: *App, key: Key, size: term.Size) !void {
 		return;
 	}
 	if (app.detail) {
-		// The detail box only closes; navigation would be confusing under it.
+		// The keys that move inside the value, and everything else closes it.
+		// Nothing under the box moves while it is open, so these mean the value
+		// and nothing else.
+		const last = app.detail_lines -| app.detail_page;
 		switch (key) {
-			.escape, .enter, .char => app.detail = false,
+			.down => app.detail_at = @min(app.detail_at + 1, last),
+			.up => app.detail_at -|= 1,
+			.page_down => app.detail_at = @min(app.detail_at + app.detail_page, last),
+			.page_up => app.detail_at -|= app.detail_page,
+			.home => app.detail_at = 0,
+			.end => app.detail_at = last,
+			.char => |point| switch (point) {
+				'j' => app.detail_at = @min(app.detail_at + 1, last),
+				'k' => app.detail_at -|= 1,
+				'n' => app.detail_at = @min(app.detail_at + app.detail_page, last),
+				'p' => app.detail_at -|= app.detail_page,
+				'g' => app.detail_at = 0,
+				'G' => app.detail_at = last,
+				else => app.detail = false,
+			},
+			.escape, .enter => app.detail = false,
 			.ctrl => |code| if (code == 'c') {
 				app.quit = true;
 			},
@@ -749,6 +767,8 @@ fn letter(app: *App, point: u21, size: term.Size) !void {
 		'v' => {
 			if (app.focus == .main and app.grid.rows.items.len > 0) {
 				app.detail = true;
+				// At the top of the value, not wherever the last one was left.
+				app.detail_at = 0;
 			}
 		},
 		'x' => try app.deleteRows(),

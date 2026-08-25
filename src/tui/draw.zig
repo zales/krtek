@@ -1030,7 +1030,7 @@ pub const HELP = [_][2][]const u8{
 	.{ "q ctrl+c", "quit" },
 	.{ "", "ROWS" },
 	.{ "enter", "open the row: a form, or a screen about it" },
-	.{ "v", "show the whole value" },
+	.{ "v", "show the whole value; arrows scroll a long one" },
 	.{ "e", "edit the cell, NULL clears it" },
 	.{ "i y", "insert, clone a row" },
 	.{ "space", "mark a row" },
@@ -1259,6 +1259,13 @@ fn detail(app: *App, size: Size, side: usize, rows: usize) !void {
 	}
 	// One row for each of the frame's edges, on top of the value itself.
 	const height: usize = @max(4, @min(@min(rows - 2, 15), lines + 1));
+	// What the keys move through, left where they can read it.
+	const page = height -| 2;
+	app.detail_page = @max(1, page);
+	app.detail_lines = lines -| 1;
+	if (app.detail_at + page > lines -| 1) {
+		app.detail_at = (lines -| 1) -| page;
+	}
 
 	const column = if (app.cursor.col < app.grid.cols.items.len) app.grid.cols.items[app.cursor.col] else "";
 
@@ -1331,6 +1338,20 @@ fn detail(app: *App, size: Size, side: usize, rows: usize) !void {
 	var line = top + 1;
 
 	var rest = text;
+	// Past what has been scrolled by, consuming it exactly as the drawing below
+	// does - a line longer than the box wraps, and a scroll that counted stored
+	// lines would jump over the wrapped part of one.
+	var skipped: usize = 0;
+	while (skipped < app.detail_at and rest.len != 0) : (skipped += 1) {
+		const newline = std.mem.indexOfScalar(u8, rest, '\n');
+		const chunk = if (newline) |at| rest[0..at] else rest;
+		const piece = term.fit(chunk, width - 4);
+		if (piece.text.len < chunk.len) {
+			rest = rest[piece.text.len..];
+		} else {
+			rest = if (newline) |at| rest[at + 1 ..] else "";
+		}
+	}
 	while (line + 1 < top + height) : (line += 1) {
 		screen.moveTo(line, left + 1);
 		screen.style(.{ .bg = C.selected, .fg = C.text });
@@ -1351,7 +1372,17 @@ fn detail(app: *App, size: Size, side: usize, rows: usize) !void {
 		}
 	}
 	screen.reset();
-	box(app, top, left, width, height, column, "enter/esc closes", C.accent);
+	// Where in the value this is, when there is more of it than fits.
+	var strip: [64]u8 = undefined;
+	const hint = if (app.detail_lines > page)
+		std.fmt.bufPrint(&strip, "{d}-{d} of {d}   up down scroll   esc closes", .{
+			app.detail_at + 1,
+			@min(app.detail_at + page, app.detail_lines),
+			app.detail_lines,
+		}) catch "enter/esc closes"
+	else
+		"enter/esc closes";
+	box(app, top, left, width, height, column, hint, C.accent);
 }
 
 fn note(app: *App, left: usize, width: usize, text: []const u8) void {
@@ -1530,7 +1561,10 @@ fn footerHints(app: *App) []const u8 {
 		};
 	}
 	if (app.detail) {
-		return " esc closes the value   ctrl+k commands";
+		return if (app.detail_lines > app.detail_page)
+			" up down scroll   pgup pgdn a page   home end the ends   esc closes"
+		else
+			" esc closes the value   ctrl+k commands";
 	}
 	if (app.typing.editor != null) {
 		return " ctrl+s runs   tab completes   ctrl+p earlier   ctrl+w word back   esc closes";

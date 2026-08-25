@@ -859,6 +859,11 @@ PostgreSQL - and a list of every relation.
 box - plus quick in-place editing of a single cell, row marking, and deletion of
 everything marked.
 
+`v` opens the value on its own, and scrolls where there is more of it than
+fits - arrows, `pgup`/`pgdn`, `home`/`end`. It counts lines as drawn rather than
+as stored, because a line longer than the box wraps, and a scroll that counted
+the stored ones would jump over the wrapped half of one.
+
 **A cell is one line in the grid and the whole value everywhere else.** A value
 with newlines in it would tear the grid apart, so the grid gets a flattened copy
 - but `v`, the clipboard and a CSV export get what the engine actually returned.

@@ -432,6 +432,14 @@ pub const App = struct {
 	view: View = .grid,
 	focus: Focus = .sidebar,
 	detail: bool = false,
+	/// The first line of the value shown in the detail box, and how many of them
+	/// fit. A Redis `INFO` is a hundred lines and the box holds fifteen, so
+	/// without these the other eighty-five could not be reached. Counted in lines
+	/// as drawn rather than as stored: a long line wraps, and what somebody
+	/// scrolls past is what is on the screen.
+	detail_at: usize = 0,
+	detail_page: usize = 1,
+	detail_lines: usize = 1,
 
 
 	object: Opened,
