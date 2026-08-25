@@ -1107,19 +1107,23 @@ fn parse(allocator: std.mem.Allocator, target: []const u8) !Parts {
 		else
 			credentials;
 	}
+	// The query first, and whatever else the target has or has not got. It used
+	// to be read only from inside the part after the `/`, so a target with no
+	// database on it - `redis://host`, which is what somebody types - kept its
+	// `?password=…` as part of the host name, and the app said it could not reach
+	// `host?password=hunter2:6379`. Which also put the password on the screen.
+	if (std.mem.indexOfScalar(u8, rest, '?')) |question| {
+		var parameters = std.mem.tokenizeAny(u8, rest[question + 1 ..], "&");
+		while (parameters.next()) |parameter| {
+			if (std.ascii.startsWithIgnoreCase(parameter, "password=")) {
+				password = parameter["password=".len..];
+			}
+		}
+		rest = rest[0..question];
+	}
 	var index: u8 = 0;
 	if (std.mem.indexOfScalar(u8, rest, '/')) |slash| {
-		var tail = rest[slash + 1 ..];
-		if (std.mem.indexOfScalar(u8, tail, '?')) |question| {
-			var parameters = std.mem.tokenizeAny(u8, tail[question + 1 ..], "&");
-			while (parameters.next()) |parameter| {
-				if (std.ascii.startsWithIgnoreCase(parameter, "password=")) {
-					password = parameter["password=".len..];
-				}
-			}
-			tail = tail[0..question];
-		}
-		index = std.fmt.parseInt(u8, tail, 10) catch 0;
+		index = std.fmt.parseInt(u8, rest[slash + 1 ..], 10) catch 0;
 		rest = rest[0..slash];
 	}
 	var host: []const u8 = if (rest.len != 0) rest else "127.0.0.1";
@@ -1186,8 +1190,46 @@ test "a redis target is taken apart" {
 		try std.testing.expectEqualStrings("pa ss", parts.password);
 		try std.testing.expectEqual(@as(u8, 1), parts.index);
 	}
+	{
+		// And a query on a target with no database on it, which is what `redis://host`
+		// becomes once the app has added the password somebody typed. The query used
+		// to be looked for only inside the part after the `/`, so with no `/` there
+		// it stayed in the host: the app then said it could not reach
+		// `host?password=hunter2:6379`, with the password on the screen.
+		const parts = try parse(a, "redis://cache.example?password=hunter2");
+		defer parts.deinit(a);
+		try std.testing.expectEqualStrings("cache.example", parts.host);
+		try std.testing.expectEqualStrings("hunter2", parts.password);
+		try std.testing.expectEqual(@as(u16, 6379), parts.port);
+	}
+	{
+		// The same with a port and no database.
+		const parts = try parse(a, "redis://cache.example:6380?password=hunter2");
+		defer parts.deinit(a);
+		try std.testing.expectEqualStrings("cache.example", parts.host);
+		try std.testing.expectEqualStrings("hunter2", parts.password);
+		try std.testing.expectEqual(@as(u16, 6380), parts.port);
+	}
 	try std.testing.expect(owns("redis://localhost"));
 	try std.testing.expect(!owns("mysql://localhost/demo"));
+}
+
+test "what a failed connection says never carries the password" {
+	// The host is what goes into `cannot reach redis at …`, so a query left
+	// stuck to it puts the password on the screen - which is how this was
+	// noticed. The rule is the host is a host: no query, no credentials.
+	const a = std.testing.allocator;
+	for ([_][]const u8{
+		"redis://cache.example?password=hunter2",
+		"redis://cache.example:6380?password=hunter2",
+		"redis://cache.example:6380/2?password=hunter2",
+		"redis://:hunter2@cache.example:6380/2",
+	}) |target| {
+		const parts = try parse(a, target);
+		defer parts.deinit(a);
+		try std.testing.expectEqualStrings("cache.example", parts.host);
+		try std.testing.expectEqualStrings("hunter2", parts.password);
+	}
 }
 
 test "a filter on the key becomes a MATCH pattern" {
