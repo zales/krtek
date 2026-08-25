@@ -1119,6 +1119,14 @@ with `psql` doing the same.
 * **Users and privileges, and the process list** are not there on either engine.
 * **A dump does not include triggers**, because it is written from the interface,
   which reports tables, views and indexes.
+* **Redis reads a page of keys in two exchanges, not four hundred.** A key's
+  type, its age and what it holds are four commands, and asked one key at a
+  time a screen of a hundred took four hundred round trips - fine on a socket
+  in the same machine, half a minute on a link with twenty-five milliseconds of
+  latency. They go out together and the answers come back in order, which is
+  what Redis promises about a pipeline. Giving up waits for the end of an
+  exchange rather than the end of a command, because a pipeline abandoned
+  halfway leaves answers nobody is going to read.
 * **Redis is mapped, not modelled.** The interface asks for rows in SQL, so the
   driver recognises the four shapes this app itself writes - SELECT, UPDATE,
   INSERT, DELETE over `data` - and passes everything else to Redis as a command.

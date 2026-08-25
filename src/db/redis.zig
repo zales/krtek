@@ -66,6 +66,12 @@ pub const Db = struct {
 	progress: ?db.Progress = null,
 	/// Replies live here until the next statement.
 	replies: std.heap.ArenaAllocator,
+	/// How many replies are still owed. Giving up in the middle of a pipeline
+	/// would leave the connection holding answers nobody is going to read, so
+	/// while this is not zero the spinner is drawn but the answer is not acted
+	/// on - the giving up waits for the end of the exchange, which is at most one
+	/// round trip away.
+	owed: usize = 0,
 
 	pub fn open(allocator: std.mem.Allocator, target: []const u8, report: *List) !*Db {
 		const parts = try parse(allocator, target);
@@ -182,14 +188,48 @@ pub const Db = struct {
 	fn command(self: *Db, args: []const []const u8) db.Error!Value {
 		var out: List = .empty;
 		defer out.deinit(self.allocator);
-		try out.print(self.allocator, "*{d}\r\n", .{args.len});
-		for (args) |arg| {
-			try out.print(self.allocator, "${d}\r\n", .{arg.len});
-			try out.appendSlice(self.allocator, arg);
-			try out.appendSlice(self.allocator, "\r\n");
-		}
+		append(&out, self.allocator, args) catch return error.OutOfMemory;
 		try self.writeAll(out.items);
 		return self.read(self.replies.allocator());
+	}
+
+	/// One command, in the shape the wire wants it.
+	fn append(out: *List, allocator: std.mem.Allocator, args: []const []const u8) !void {
+		try out.print(allocator, "*{d}\r\n", .{args.len});
+		for (args) |arg| {
+			try out.print(allocator, "${d}\r\n", .{arg.len});
+			try out.appendSlice(allocator, arg);
+			try out.appendSlice(allocator, "\r\n");
+		}
+	}
+
+	/// Several commands in one go, and their answers in the order they were
+	/// asked. This is the whole of what makes a remote server usable: a screen of
+	/// a hundred keys is four hundred commands, and asked one at a time on a link
+	/// with twenty-five milliseconds of latency that is half a minute of waiting.
+	/// Sent together it is one wait.
+	///
+	/// Redis answers a pipeline in order and keeps no state between the commands,
+	/// so this is nothing more than writing them all and reading that many
+	/// replies back.
+	fn pipeline(self: *Db, arena: std.mem.Allocator, commands: []const []const []const u8) db.Error![]Value {
+		if (commands.len == 0) {
+			return &[_]Value{};
+		}
+		var out: List = .empty;
+		defer out.deinit(self.allocator);
+		for (commands) |args| {
+			append(&out, self.allocator, args) catch return error.OutOfMemory;
+		}
+		try self.writeAll(out.items);
+		const replies = try arena.alloc(Value, commands.len);
+		self.owed = commands.len;
+		defer self.owed = 0;
+		for (replies, 0..) |*into, i| {
+			self.owed = commands.len - i;
+			into.* = try self.read(arena);
+		}
+		return replies;
 	}
 
 	fn writeAll(self: *Db, bytes: []const u8) db.Error!void {
@@ -206,6 +246,17 @@ pub const Db = struct {
 
 	/// One reply, reading more from the socket whenever the buffer runs out.
 	fn read(self: *Db, arena: std.mem.Allocator) db.Error!Value {
+		// Asked here rather than only where a read stalls. A hundred replies that
+		// each arrive in twenty milliseconds never stall once, so nothing was ever
+		// asked and nothing was ever drawn - the screen sat still for half a minute
+		// with no spinner and no way to stop it. What makes an operation long is
+		// how many replies it waits for, not how long any one of them took.
+		if (self.progress) |progress| {
+			if (!progress.call() and self.owed == 0) {
+				self.remember("given up on");
+				return error.Driver;
+			}
+		}
 		while (true) {
 			// Where this reply begins. A parse that runs out of bytes has already
 			// walked the cursor past everything it did manage to read, so the next
@@ -600,24 +651,53 @@ pub const Db = struct {
 			}
 			cursor = pair[0].text orelse "0";
 			const keys = pair[1].list orelse &[_]Value{};
+
+			// Which of this page's keys are going to be shown. Only those are
+			// asked about: the rest of the page is skipped without a word to the
+			// server.
+			var wanted: std.ArrayListUnmanaged([]const u8) = .empty;
 			for (keys) |item| {
 				const key = item.text orelse continue;
 				if (passed < skip) {
 					passed += 1;
 					continue;
 				}
-				if (found >= ceiling) {
+				if (found + wanted.items.len >= ceiling) {
 					break;
 				}
-				// The type, the ttl and the value are three more commands per key, so
-				// they are only asked for once a key is going to be shown.
-				try rows.add(&[_]Value{
-					.{ .text = try arena.dupe(u8, key) },
-					.{ .text = try arena.dupe(u8, try self.keyType(key)) },
-					.{ .number = try self.keyTtl(key) },
-					.{ .text = try arena.dupe(u8, try self.keyValue(key)) },
-				});
-				found += 1;
+				try wanted.append(arena, key);
+			}
+			if (wanted.items.len != 0) {
+				// The type and the age of every one of them, in one exchange. Asked
+				// key by key this was two round trips each, and a screen of a hundred
+				// keys on a link with any latency at all took half a minute.
+				var asking: std.ArrayListUnmanaged([]const []const u8) = .empty;
+				for (wanted.items) |key| {
+					try asking.append(arena, try arena.dupe([]const u8, &[_][]const u8{ "TYPE", key }));
+					try asking.append(arena, try arena.dupe([]const u8, &[_][]const u8{ "TTL", key }));
+				}
+				const said = try self.pipeline(arena, asking.items);
+				const kinds = try arena.alloc([]const u8, wanted.items.len);
+				const ages = try arena.alloc(i64, wanted.items.len);
+                for (wanted.items, 0..) |_, i| {
+					kinds[i] = said[i * 2].text orelse "?";
+					ages[i] = switch (said[i * 2 + 1]) {
+						.number => |value| value,
+						else => -1,
+					};
+				}
+				// And then what each one holds, which needs the types to know what to
+				// ask - so it is a second exchange rather than part of the first.
+				const values = try self.previews(arena, wanted.items, kinds);
+				for (wanted.items, 0..) |key, i| {
+					try rows.add(&[_]Value{
+						.{ .text = try arena.dupe(u8, key) },
+						.{ .text = try arena.dupe(u8, kinds[i]) },
+						.{ .number = ages[i] },
+						.{ .text = values[i] },
+					});
+					found += 1;
+				}
 			}
 			// Asked between pages, because a big keyspace takes many of them.
 			if (self.progress) |progress| {
@@ -632,40 +712,37 @@ pub const Db = struct {
 		return rows;
 	}
 
-	fn keyType(self: *Db, key: []const u8) db.Error![]const u8 {
-		const reply = try self.command(&[_][]const u8{ "TYPE", key });
-		return reply.text orelse "?";
-	}
-
-	fn keyTtl(self: *Db, key: []const u8) db.Error!i64 {
-		const reply = try self.command(&[_][]const u8{ "TTL", key });
-		return switch (reply) {
-			.number => |value| value,
-			else => -1,
-		};
+	/// What to ask for a key of this type. A preview is one grid cell, so a long
+	/// collection is cut off at the server rather than fetched and thrown away.
+	fn valueCommand(arena: std.mem.Allocator, key: []const u8, kind: []const u8) ![]const []const u8 {
+		var buf: [16]u8 = undefined;
+		const stop = try arena.dupe(u8, std.fmt.bufPrint(&buf, "{d}", .{PREVIEW - 1}) catch "49");
+		if (std.mem.eql(u8, kind, "string")) {
+			return arena.dupe([]const u8, &[_][]const u8{ "GET", key });
+		}
+		if (std.mem.eql(u8, kind, "list")) {
+			return arena.dupe([]const u8, &[_][]const u8{ "LRANGE", key, "0", stop });
+		}
+		if (std.mem.eql(u8, kind, "set")) {
+			return arena.dupe([]const u8, &[_][]const u8{ "SMEMBERS", key });
+		}
+		if (std.mem.eql(u8, kind, "zset")) {
+			return arena.dupe([]const u8, &[_][]const u8{ "ZRANGE", key, "0", stop });
+		}
+		if (std.mem.eql(u8, kind, "hash")) {
+			return arena.dupe([]const u8, &[_][]const u8{ "HGETALL", key });
+		}
+		// A type nothing here reads - a stream, a module's own - is shown as
+		// nothing rather than asked about in a way that might not answer.
+		return arena.dupe([]const u8, &[_][]const u8{ "TYPE", key });
 	}
 
 	/// What a key holds, in the shape its type allows: a string as it is, a
-	/// collection as its elements, and a hash as `field=value` pairs. Long
-	/// collections are cut off, because this is a preview in one grid cell.
-	fn keyValue(self: *Db, key: []const u8) db.Error![]const u8 {
-		const arena = self.replies.allocator();
-		const kind = try self.keyType(key);
-		var buf: [16]u8 = undefined;
-		const stop = std.fmt.bufPrint(&buf, "{d}", .{PREVIEW - 1}) catch "49";
-		const reply = if (std.mem.eql(u8, kind, "string"))
-			try self.command(&[_][]const u8{ "GET", key })
-		else if (std.mem.eql(u8, kind, "list"))
-			try self.command(&[_][]const u8{ "LRANGE", key, "0", stop })
-		else if (std.mem.eql(u8, kind, "set"))
-			try self.command(&[_][]const u8{ "SMEMBERS", key })
-		else if (std.mem.eql(u8, kind, "zset"))
-			try self.command(&[_][]const u8{ "ZRANGE", key, "0", stop })
-		else if (std.mem.eql(u8, kind, "hash"))
-			try self.command(&[_][]const u8{ "HGETALL", key })
-		else
-			Value{ .text = "" };
-
+	/// collection as its elements, and a hash as `field=value` pairs.
+	fn renderValue(arena: std.mem.Allocator, kind: []const u8, reply: Value) db.Error![]const u8 {
+		if (!known(kind)) {
+			return "";
+		}
 		switch (reply) {
 			.text => |text| return text orelse "",
 			.number => |number| return std.fmt.allocPrint(arena, "{d}", .{number}) catch "",
@@ -687,6 +764,31 @@ pub const Db = struct {
 				return out.items;
 			},
 		}
+	}
+
+	fn known(kind: []const u8) bool {
+		for ([_][]const u8{ "string", "list", "set", "zset", "hash" }) |one| {
+			if (std.mem.eql(u8, kind, one)) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	/// What every key on this page holds, in one exchange. The types have to be
+	/// known first - they decide which command each key takes - which is why this
+	/// is a second pipeline and not part of the first.
+	fn previews(self: *Db, arena: std.mem.Allocator, keys: []const []const u8, kinds: []const []const u8) db.Error![][]const u8 {
+		var asking: std.ArrayListUnmanaged([]const []const u8) = .empty;
+		for (keys, kinds) |key, kind| {
+			try asking.append(arena, valueCommand(arena, key, kind) catch return error.OutOfMemory);
+		}
+		const said = try self.pipeline(arena, asking.items);
+		const out = try arena.alloc([]const u8, keys.len);
+		for (out, 0..) |*into, i| {
+			into.* = try renderValue(arena, kinds[i], said[i]);
+		}
+		return out;
 	}
 
 	fn setValue(self: *Db, pair: Pair) db.Error!?db.Rows {
@@ -1212,6 +1314,54 @@ test "a redis target is taken apart" {
 	}
 	try std.testing.expect(owns("redis://localhost"));
 	try std.testing.expect(!owns("mysql://localhost/demo"));
+}
+
+test "many commands go out together and their answers come back in order" {
+	// The whole point of the pipeline: a screen of a hundred keys used to be four
+	// hundred round trips, which on a link with any latency is half a minute of
+	// nothing. What it relies on is that Redis answers in the order it was asked,
+	// so the replies can be matched to the commands by position alone.
+	var pair: [2]std.c.fd_t = undefined;
+	if (std.c.socketpair(std.c.AF.UNIX, std.c.SOCK.STREAM, 0, &pair) != 0) {
+		return error.SkipZigTest;
+	}
+	defer _ = std.c.close(pair[0]);
+	defer _ = std.c.close(pair[1]);
+	setTimeout(pair[0], 50);
+
+	var self = Db{
+		.allocator = std.testing.allocator,
+		.socket = pair[0],
+		.replies = std.heap.ArenaAllocator.init(std.testing.allocator),
+	};
+	defer self.buffer.deinit(std.testing.allocator);
+	defer self.replies.deinit();
+
+	// Three answers, waiting before the questions are asked - which is what a
+	// pipeline looks like from this end.
+	const answers = "+string\r\n:-1\r\n$4\r\nahoj\r\n";
+	_ = std.c.send(pair[1], answers.ptr, answers.len, 0);
+
+	const arena = self.replies.allocator();
+	const said = try self.pipeline(arena, &[_][]const []const u8{
+		&[_][]const u8{ "TYPE", "k" },
+		&[_][]const u8{ "TTL", "k" },
+		&[_][]const u8{ "GET", "k" },
+	});
+	try std.testing.expectEqual(@as(usize, 3), said.len);
+	try std.testing.expectEqualStrings("string", said[0].text.?);
+	try std.testing.expectEqual(@as(i64, -1), said[1].number);
+	try std.testing.expectEqualStrings("ahoj", said[2].text.?);
+	// And nothing is left owing, so the next exchange starts clean.
+	try std.testing.expectEqual(@as(usize, 0), self.owed);
+
+	// What went out is three commands in one write, in the order given.
+	var sent: [256]u8 = undefined;
+	const got = std.c.recv(pair[1], &sent, sent.len, 0);
+	try std.testing.expect(got > 0);
+	const wire = sent[0..@intCast(got)];
+	try std.testing.expect(std.mem.indexOf(u8, wire, "TYPE").? < std.mem.indexOf(u8, wire, "TTL").?);
+	try std.testing.expect(std.mem.indexOf(u8, wire, "TTL").? < std.mem.indexOf(u8, wire, "GET").?);
 }
 
 test "what a failed connection says never carries the password" {
