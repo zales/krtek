@@ -806,7 +806,14 @@ pub const App = struct {
 			.file => entry.secret,
 			.keychain => keychain.fetch(scratch.allocator(), entry.target) catch null,
 			.touchid => blk: {
-				// The fingerprint first, and the item is not touched without it.
+				// Whether there is anything to unlock, before asking anybody to put
+				// a finger on anything. The first time a connection is set to use
+				// the reader there is nothing kept for it yet, and asking then was
+				// a fingerprint dialog followed by the password prompt it was meant
+				// to replace.
+				if (!keychain.holds(entry.target)) {
+					break :blk null;
+				}
 				// A refusal is not a failure to connect - it falls back to asking
 				// for the password, which is what somebody who cannot use the
 				// reader needs to be able to do.

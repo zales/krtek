@@ -167,6 +167,7 @@ test "a key that points past the row is left out rather than read" {
 comptime {
 	_ = @import("db");
 	_ = @import("biometry.zig");
+	_ = @import("keychain.zig");
 }
 
 test "an engine that refuses a change says so in one place" {

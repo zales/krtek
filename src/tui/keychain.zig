@@ -93,6 +93,32 @@ pub fn fetch(allocator: std.mem.Allocator, account: []const u8) !?[]u8 {
 	return try allocator.dupe(u8, bytes[0..length]);
 }
 
+/// Whether anything is kept for `account`, without asking for it.
+///
+/// Only the attributes are asked for, not the data, so this does not go near
+/// the item's access control - and that is the point: a connection set to use
+/// the reader used to put a fingerprint dialog on the screen before finding out
+/// that nothing had ever been stored for it, and then ask for the password
+/// anyway. Which is what it does the very first time, every time.
+pub fn holds(account: []const u8) bool {
+	if (!available) {
+		return false;
+	}
+	const service_key = string(SERVICE) catch return false;
+	defer release(service_key);
+	const account_key = string(account) catch return false;
+	defer release(account_key);
+	const query = dictionary(&.{
+		.{ kSecClass, kSecClassGenericPassword },
+		.{ kSecAttrService, service_key },
+		.{ kSecAttrAccount, account_key },
+		.{ kSecMatchLimit, kSecMatchLimitOne },
+	}) catch return false;
+	defer release(query);
+	var ignored: ?*const anyopaque = null;
+	return SecItemCopyMatching(query, &ignored) == 0;
+}
+
 /// Forget the password for `account`. A missing item is not an error.
 pub fn remove(account: []const u8) void {
 	if (!available) {
@@ -185,3 +211,14 @@ extern "c" const kSecValueData: CFRef;
 extern "c" const kSecReturnData: CFRef;
 extern "c" const kSecMatchLimit: CFRef;
 extern "c" const kSecMatchLimitOne: CFRef;
+
+test "nothing kept is not the same as something refused" {
+	if (!available) {
+		return error.SkipZigTest;
+	}
+	// The question a connection set to use the reader has to ask before putting a
+	// fingerprint dialog on the screen: is there anything here to unlock? Asking
+	// first was a dialog followed by the password prompt it was meant to replace,
+	// every first time.
+	try std.testing.expect(!holds("krtek-nothing-was-ever-stored-here"));
+}
