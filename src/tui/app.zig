@@ -3682,33 +3682,6 @@ pub const App = struct {
         self.say("schema {s}", .{name});
     }
 
-    /// An INSERT skeleton for the current table, to be edited in the SQL prompt.
-    pub fn insertTemplate(self: *App, allocator: std.mem.Allocator) ![]const u8 {
-        const table = self.currentTable() orelse return "";
-        var arena = std.heap.ArenaAllocator.init(self.allocator);
-        defer arena.deinit();
-        const names = try self.columnsOf(arena.allocator(), table.name);
-        var out: std.ArrayList(u8) = .empty;
-        try out.appendSlice(allocator, "INSERT INTO ");
-        try database.quoteName(&out, allocator, table);
-        try out.appendSlice(allocator, " (");
-        for (names, 0..) |name, i| {
-            if (i != 0) {
-                try out.appendSlice(allocator, ", ");
-            }
-            try database.quoteName(&out, allocator, name);
-        }
-        try out.appendSlice(allocator, ") VALUES (");
-        for (names, 0..) |_, i| {
-            if (i != 0) {
-                try out.appendSlice(allocator, ", ");
-            }
-            try out.appendSlice(allocator, "NULL");
-        }
-        try out.append(allocator, ')');
-        return out.items;
-    }
-
     // ------------------------------------------------------- schema readers
 
     /// Column definitions as the DDL generator wants them, including the

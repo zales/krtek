@@ -900,37 +900,6 @@ fn section(app: *App, left: usize, width: usize, line: usize, rows: usize, title
     return line + 1;
 }
 
-/// Print the rows of a query as plain columns; used by the structure view.
-fn rowsOf(app: *App, left: usize, width: usize, start: usize, rows: usize, sql: []const u8, columns: usize) usize {
-    const screen = app.screen;
-    var line = start;
-    var cursor = (app.conn.prepare(sql, null) catch return line) orelse return line;
-    defer cursor.finish();
-    var arena = std.heap.ArenaAllocator.init(app.allocator);
-    defer arena.deinit();
-    while (cursor.step() catch false) {
-        if (line > rows) {
-            break;
-        }
-        screen.moveTo(line, left);
-        screen.style(.{ .fg = C.text });
-        var used: usize = write(app, "  ", width);
-        for (0..@min(columns, cursor.columns())) |i| {
-            const cell = app_mod.formatCell(arena.allocator(), cursor.value(i)) catch continue;
-            if (i != 0) {
-                screen.style(.{ .fg = C.faint });
-                used += write(app, " · ", width - used);
-            }
-            screen.style(.{ .fg = if (i == 0) C.text else cell.colour(), .italic = cell.kind == .nul });
-            used += write(app, cell.text, if (width > used) width - used else 0);
-        }
-        screen.reset();
-        screen.clearToEol();
-        line += 1;
-    }
-    return line;
-}
-
 /// Two panes side by side, each one a place and a path in it. Which pane the
 /// keys go to is shown the same way the grid shows focus, because it is the
 /// same idea: there is exactly one cursor and it is somewhere.

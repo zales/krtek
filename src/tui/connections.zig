@@ -526,12 +526,6 @@ pub const List = struct {
         self.items.items[index].secret = try self.arena.allocator().dupe(u8, secret);
     }
 
-    pub fn remove(self: *List, index: usize) void {
-        if (index < self.items.len()) {
-            _ = self.items.orderedRemove(index);
-        }
-    }
-
     /// Move a connection to the front, so the list stays in most-recent order.
     pub fn touch(self: *List, index: usize) void {
         if (index == 0 or index >= self.items.items.len) {
