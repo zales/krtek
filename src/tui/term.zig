@@ -833,14 +833,40 @@ pub const Term = struct {
 /// Text that is not UTF-8 is measured the way `Term.put` draws it - see `Pieces`.
 pub fn width(text: []const u8) usize {
     if (std.unicode.utf8ValidateSlice(text)) {
-        return vaxis.gwidth.gwidth(text, .unicode);
+        return measure(text);
     }
     var total: usize = 0;
     var pieces: Pieces = .{ .rest = text };
     while (pieces.next()) |piece| {
-        total += vaxis.gwidth.gwidth(piece.drawn, .unicode);
+        total += measure(piece.drawn);
     }
     return total;
+}
+
+/// What vaxis says `text` is wide, without letting it add up past what it adds
+/// up in. That is a u16, so a value of 65536 columns overflows it - one cell of
+/// 35 kB of hex is enough, and a safe build panicked opening its table. Long text
+/// goes to it a slice at a time instead, each cut where a grapheme ends and none
+/// longer than half of 65535 bytes: no grapheme is more than two columns wide or
+/// less than a byte long, so no slice can come to more than vaxis can count.
+fn measure(text: []const u8) usize {
+    const most = std.math.maxInt(u16) / 2;
+    if (text.len <= most) {
+        return vaxis.gwidth.gwidth(text, .unicode);
+    }
+    var total: usize = 0;
+    var start: usize = 0;
+    var it = vaxis.unicode.GraphemeIterator.init(text);
+    while (it.next()) |cluster| {
+        // The slice so far ends where this grapheme starts, and would be too
+        // long with it. One grapheme on its own is never more than two columns,
+        // however long it is.
+        if (cluster.start + cluster.len - start > most and cluster.start > start) {
+            total += vaxis.gwidth.gwidth(text[start..cluster.start], .unicode);
+            start = cluster.start;
+        }
+    }
+    return total + vaxis.gwidth.gwidth(text[start..], .unicode);
 }
 
 pub fn charWidth(point: u21) u8 {
@@ -1210,6 +1236,32 @@ test "text that is not UTF-8 is as wide as it is drawn, a U+FFFD a byte" {
     try testing.expectEqualStrings("žlu", fit("žluťoučký", 3).text);
     try testing.expectEqualStrings("日", fit("日本", 3).text);
     try testing.expectEqualStrings("e\u{301}", fit("e\u{301}x", 1).text);
+}
+
+test "a value wider than vaxis can count is measured all the same" {
+    // A u16 of columns is 65535; one cell of 35 kB of hex is more, and its table
+    // would not open. Wide characters, which take two columns for three bytes,
+    // and a grapheme of an accent on an accent past every slice boundary.
+    const allocator = testing.allocator;
+    const hex = try allocator.alloc(u8, 70_000);
+    defer allocator.free(hex);
+    @memset(hex, '0');
+    try testing.expectEqual(@as(usize, 70_000), width(hex));
+    const wide = try allocator.alloc(u8, 3 * 40_000);
+    defer allocator.free(wide);
+    for (0..40_000) |i| {
+        @memcpy(wide[3 * i ..][0..3], "日");
+    }
+    try testing.expectEqual(@as(usize, 80_000), width(wide));
+    var accents: std.ArrayList(u8) = .empty;
+    defer accents.deinit(allocator);
+    for (0..20_000) |_| {
+        try accents.appendSlice(allocator, "e\u{301}\u{301}");
+    }
+    try testing.expectEqual(@as(usize, 20_000), width(accents.items));
+    // And not UTF-8 at the same length: each broken byte a column.
+    hex[1000] = 0xff;
+    try testing.expectEqual(@as(usize, 70_000), width(hex));
 }
 
 test "only a whole character decodes, from either end" {
