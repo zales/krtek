@@ -543,19 +543,7 @@ pub const Term = struct {
                 (try self.loop.tryEvent()) orelse break;
             first = false;
             switch (event) {
-                .key_press => |key| {
-                    // The text the key produced comes first. Under the kitty
-                    // keyboard protocol `codepoint` is the *unshifted* key - shift+a
-                    // arrives as 'a' with shift held, and on a layout where `:`, `/`
-                    // or `@` need shift, the same - so anything typed has to be read
-                    // from `text`, which is what the terminal says was produced.
-                    if (try typed(&self.unfinished, self.allocator, out, key)) {
-                        continue;
-                    }
-                    if (self.translate(key)) |mapped| {
-                        try out.append(self.allocator, mapped);
-                    }
-                },
+                .key_press => |key| try self.pressed(out, key),
                 .mouse => |mouse| {
                     // Only presses act; motion and release would fire twice.
                     if (mouse.type != .press) {
@@ -602,6 +590,26 @@ pub const Term = struct {
                 },
                 else => {},
             }
+        }
+    }
+
+    /// What one key press comes to: the text it typed, or the key it is.
+    fn pressed(self: *Term, out: *std.ArrayList(Key), key: vaxis.Key) !void {
+        // The text the key produced comes first. Under the kitty keyboard
+        // protocol `codepoint` is the *unshifted* key - shift+a arrives as 'a'
+        // with shift held, and on a layout where `:`, `/` or `@` need shift, the
+        // same - so anything typed has to be read from `text`, which is what the
+        // terminal says was produced.
+        if (try typed(&self.unfinished, self.allocator, out, key)) {
+            // Text after a pasted CR means the CR was a line break of its own, and
+            // an LF that comes later is another one rather than the rest of a
+            // CRLF. Only keys that go through `translate` cleared this, and text
+            // does not, so `a` CR `b` LF `c` was pasted as two lines.
+            self.paste_after_cr = false;
+            return;
+        }
+        if (self.translate(key)) |mapped| {
+            try out.append(self.allocator, mapped);
         }
     }
 
@@ -1040,6 +1048,45 @@ fn typeReads(allocator: std.mem.Allocator, reads: []const []const u8) ![]u21 {
         }
     }
     return points.toOwnedSlice(allocator);
+}
+
+test "a pasted line ends at a CR, an LF or a CRLF, whatever was typed between" {
+    const cases = [_]struct { paste: []const u8, typed: []const u8 }{
+        // Text between a CR and an LF: the LF is a line of its own, not the
+        // rest of a CRLF. It used to be swallowed, and `a` CR `b` LF `c` was
+        // pasted as `a` and `bc`.
+        .{ .paste = "a\rb\nc", .typed = "a\nb\nc" },
+        .{ .paste = "a\rb\r\nc", .typed = "a\nb\nc" },
+        .{ .paste = "a\r\nb", .typed = "a\nb" },
+        .{ .paste = "a\nb", .typed = "a\nb" },
+        .{ .paste = "a\r\rb", .typed = "a\n\nb" },
+        .{ .paste = "a\r\r\nb", .typed = "a\n\nb" },
+        .{ .paste = "č\r\xc5\xbe\nx", .typed = "č\nž\nx" },
+    };
+    for (cases) |case| {
+        // Only what `pressed` touches; the terminal itself is not needed.
+        var term: Term = undefined;
+        term.allocator = testing.allocator;
+        term.unfinished = .{};
+        term.pasting = true;
+        term.paste_after_cr = false;
+        var keys: std.ArrayList(Key) = .empty;
+        defer keys.deinit(testing.allocator);
+        var parser: vaxis.Parser = .{};
+        var at: usize = 0;
+        while (at < case.paste.len) {
+            const result = try parser.parse(case.paste[at..], null);
+            at += result.n;
+            try term.pressed(&keys, result.event.?.key_press);
+        }
+        var got: std.ArrayList(u8) = .empty;
+        defer got.deinit(testing.allocator);
+        for (keys.items) |key| {
+            var buffer: [4]u8 = undefined;
+            try got.appendSlice(testing.allocator, buffer[0..try std.unicode.utf8Encode(key.char, &buffer)]);
+        }
+        try testing.expectEqualStrings(case.typed, got.items);
+    }
 }
 
 test "only a whole character decodes, from either end" {

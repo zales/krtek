@@ -3,10 +3,10 @@
 Bugs that are known and not fixed yet. Each says how to see it, where it comes
 from and what the fix would be. Delete an entry in the commit that fixes it.
 
-Both below were found on 2026-10-04 while fixing the UTF-8 panics in
+The one below was found on 2026-10-04 while fixing the UTF-8 panics in
 `printableText` and `tail` (commits "Text that is not UTF-8 is read as U+FFFD,
 not read past" and "A character cut in two by a read of the terminal is put
-back together"). Both were there before those commits.
+back together"). It was there before those commits.
 
 ## A value that is not UTF-8 pushes the rest of its line sideways
 
@@ -47,20 +47,3 @@ not where a value is read: the row form edits the value it shows, and a value
 cleaned when it was read would go back into the table with U+FFFD in place of
 the original bytes. About 30-45 minutes with a test and a pty check of the rows
 above.
-
-## A pasted CR, then later an LF, loses the LF
-
-**What it looks like.** Pasting text whose lines end in a mix of CR and LF
-joins two of its lines: pasting `a` CR `b` LF `c` into the SQL editor gives the
-two lines `a` and `bc` instead of three. (Checked in a pty on 2026-10-04;
-`a` LF `b` LF `c` gives three lines, as it should.)
-
-**Why.** Inside a paste a CR is a line break and sets `paste_after_cr`, so that
-the LF of a CRLF right after it is not a second one (`Term.translate`,
-`src/tui/term.zig`). Only keys that go through `translate` clear the flag. The
-text in between - `b` - goes through `typed` and leaves it set, and the LF after
-it is then taken for the second half of a CRLF that was never there.
-
-**The fix.** Clear `paste_after_cr` whenever `typed` has typed text: in `keys`,
-before the `continue` that follows `typed`. About 15 minutes with a test that
-pastes `a\rb\nc`, `a\r\nb` and `a\nb` and wants three, two and two lines.
