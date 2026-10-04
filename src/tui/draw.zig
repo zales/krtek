@@ -2292,7 +2292,8 @@ fn mask(buffer: []u8, text: []const u8, width: usize) []const u8 {
     return buffer[0..at];
 }
 
-/// The last `max` columns of a value.
+/// The last `max` columns of a value - which is whatever a column held, so not
+/// always UTF-8.
 fn tail(text: []const u8, max: usize) []const u8 {
     if (term.width(text) <= max) {
         return text;
@@ -2300,17 +2301,13 @@ fn tail(text: []const u8, max: usize) []const u8 {
     var start = text.len;
     var used: usize = 0;
     while (start > 0) {
-        var at = start - 1;
-        while (at > 0 and text[at] & 0xc0 == 0x80) {
-            at -= 1;
-        }
-        const point = std.unicode.utf8Decode(text[at..start]) catch 0xfffd;
-        const w = term.charWidth(point);
+        const char = term.decodeLast(text[0..start]);
+        const w = term.charWidth(char.point);
         if (used + w > max) {
             break;
         }
         used += w;
-        start = at;
+        start -= char.len;
     }
     return text[start..];
 }
@@ -2470,6 +2467,22 @@ test "the last columns of a value are whole characters" {
     const wide = tail("žluťoučký kůň", 5);
     try testing.expect(std.unicode.utf8ValidateSlice(wide));
     try testing.expect(term.width(wide) <= 5);
+}
+
+test "the last columns of a value that is not UTF-8 are still the end of it" {
+    // A column holds whatever bytes were put in it. A run of more continuation
+    // bytes than any character has, a character cut short, a byte no character
+    // starts with: each is one column of U+FFFD, and what comes back is the end
+    // of the value rather than a read past either end of it.
+    try testing.expectEqualStrings("\x80\x80", tail("\x80\x80\x80\x80\x80\x80", 2));
+    try testing.expectEqualStrings("\xbe\xbe", tail("\xc5\xbe\xbe\xbe", 2));
+    try testing.expectEqualStrings("ž\xbe", tail("ab\xc5\xbe\xbe", 2));
+    for ([_][]const u8{ "\x80\x80\x80\x80\x80\x80", "abc\xbf\xbf\xbf\xbf\xbf", "\xe2\x82", "xyz\xe2\x82", "\xf0\x9f\x98", "\xff\xfe", "\xed\xa0\x80" }) |text| {
+        var max: usize = 0;
+        while (max <= 8) : (max += 1) {
+            try testing.expect(std.mem.endsWith(u8, text, tail(text, max)));
+        }
+    }
 }
 
 test "a password is dots, and as many of them as it has characters" {

@@ -530,9 +530,11 @@ pub const Term = struct {
                     // arrives as 'a' with shift held, and on a layout where `:`, `/`
                     // or `@` need shift, the same - so anything typed has to be read
                     // from `text`, which is what the terminal says was produced.
+                    // Walked with `Chars`, because only the first character of it
+                    // is known to be whole.
                     if (printableText(key)) |text| {
-                        var points = std.unicode.Utf8View.initUnchecked(text).iterator();
-                        while (points.nextCodepoint()) |point| {
+                        var points: Chars = .{ .rest = text };
+                        while (points.next()) |point| {
                             try out.append(self.allocator, .{ .char = point });
                         }
                         continue;
@@ -614,17 +616,18 @@ pub const Term = struct {
     /// A control key carries `text` too in the legacy encoding - a bare `\r` for
     /// enter - so anything below a space is left to `translate`, as is anything
     /// with ctrl or alt held, which is a command and not text.
+    ///
+    /// So is text that does not start with a whole character, as the U+FFFD
+    /// vaxis read it as. Vaxis reads the terminal 1024 bytes at a time and does
+    /// not hold back a character a read ends in the middle of: a long paste of
+    /// anything but ASCII comes in with pieces of characters for keys.
     fn printableText(key: vaxis.Key) ?[]const u8 {
         if (key.mods.ctrl or key.mods.alt or key.mods.super) {
             return null;
         }
         const text = key.text orelse return null;
-        if (text.len == 0) {
-            return null;
-        }
-        const first_len = std.unicode.utf8ByteSequenceLength(text[0]) catch return null;
-        const first = std.unicode.utf8Decode(text[0..first_len]) catch return null;
-        if (first < 0x20 or first == 0x7f) {
+        const first = decode(text) orelse return null;
+        if (first.point < 0x20 or first.point == 0x7f) {
             return null;
         }
         return text;
@@ -726,4 +729,130 @@ pub fn fit(text: []const u8, max: usize) struct { text: []const u8, cols: usize 
         end += slice.len;
     }
     return .{ .text = text[0..end], .cols = total };
+}
+
+// --- characters out of bytes that are not always UTF-8 ---
+//
+// Text comes in from two places that promise nothing: the terminal, cut wherever
+// a read of it ends, and a database column, which holds whatever was put in it.
+// `std.unicode.utf8Decode` wants a slice that is already one whole character and
+// is `unreachable` on anything else, and a `Utf8View` made without checking
+// reads past the end of the text it was made of.
+
+/// One character, and how many bytes of the text it took.
+pub const Char = struct {
+    point: u21,
+    len: u3,
+};
+
+/// What a byte that is not part of a whole character reads as: U+FFFD, one byte
+/// at a time, so text that is not UTF-8 can still be walked to its end.
+const replacement: Char = .{ .point = 0xfffd, .len = 1 };
+
+/// The character `bytes` starts with, or null when they do not start with a
+/// whole one: nothing at all, a byte no character starts with, a sequence cut
+/// short, an overlong one, a surrogate, anything past U+10FFFF.
+fn decode(bytes: []const u8) ?Char {
+    if (bytes.len == 0) {
+        return null;
+    }
+    const len = std.unicode.utf8ByteSequenceLength(bytes[0]) catch return null;
+    if (len > bytes.len) {
+        return null;
+    }
+    const point: u21 = switch (len) {
+        1 => bytes[0],
+        2 => std.unicode.utf8Decode2(bytes[0..2].*) catch return null,
+        3 => std.unicode.utf8Decode3(bytes[0..3].*) catch return null,
+        4 => std.unicode.utf8Decode4(bytes[0..4].*) catch return null,
+        else => unreachable,
+    };
+    return .{ .point = point, .len = len };
+}
+
+/// The character `bytes` ends with; `bytes` must not be empty. No more than
+/// three continuation bytes are walked back over, because no character has
+/// more, and a last byte that is not the end of a whole character is a U+FFFD
+/// of its own.
+pub fn decodeLast(bytes: []const u8) Char {
+    var at = bytes.len - 1;
+    while (at > 0 and bytes.len - at < 4 and bytes[at] & 0xc0 == 0x80) {
+        at -= 1;
+    }
+    const char = decode(bytes[at..]) orelse return replacement;
+    return if (char.len == bytes.len - at) char else replacement;
+}
+
+/// The characters of a piece of text one at a time, with whatever is not UTF-8
+/// read as U+FFFD a byte at a time rather than read past.
+const Chars = struct {
+    rest: []const u8,
+
+    pub fn next(self: *Chars) ?u21 {
+        if (self.rest.len == 0) {
+            return null;
+        }
+        const char = decode(self.rest) orelse replacement;
+        self.rest = self.rest[char.len..];
+        return char.point;
+    }
+};
+
+const testing = std.testing;
+
+test "a read of the terminal that ends inside a character is not read past" {
+    // A paste longer than one read of the terminal is cut wherever the read ends,
+    // and vaxis hands the piece of a character it ends with over as the text of a
+    // key of its own - or, behind an Arabic number sign, which joins whatever
+    // follows it into one grapheme, as the end of the text of a whole one. The
+    // rest of that character starts the next read as bytes no character starts
+    // with. Each of them is typed as U+FFFD, as `keys` would.
+    const reads = [_]struct { bytes: []const u8, typed: []const u21 }{
+        .{ .bytes = "ab\xc4", .typed = &.{ 'a', 'b', 0xfffd } },
+        .{ .bytes = "\xe2\x82", .typed = &.{0xfffd} },
+        .{ .bytes = "\xf0\x9f\x98", .typed = &.{0xfffd} },
+        .{ .bytes = "\x8d\x8d", .typed = &.{ 0xfffd, 0xfffd } },
+        .{ .bytes = "\u{600}\xc4", .typed = &.{ 0x600, 0xfffd } },
+        .{ .bytes = "čaj", .typed = &.{ 'č', 'a', 'j' } },
+    };
+    var parser: vaxis.Parser = .{};
+    // The one that is cut short behind a whole character is one key, so it is
+    // `keys` walking the text that has to stop at its end.
+    try testing.expectEqualStrings("\u{600}\xc4", (try parser.parse("\u{600}\xc4", null)).event.?.key_press.text.?);
+    for (reads) |read| {
+        var typed: [8]u21 = undefined;
+        var count: usize = 0;
+        var at: usize = 0;
+        while (at < read.bytes.len) {
+            const result = try parser.parse(read.bytes[at..], null);
+            at += result.n;
+            const key = result.event.?.key_press;
+            if (Term.printableText(key)) |text| {
+                var points: Chars = .{ .rest = text };
+                while (points.next()) |point| {
+                    typed[count] = point;
+                    count += 1;
+                }
+            } else {
+                typed[count] = key.codepoint;
+                count += 1;
+            }
+        }
+        try testing.expectEqualSlices(u21, read.typed, typed[0..count]);
+    }
+}
+
+test "only a whole character decodes, from either end" {
+    try testing.expectEqual(@as(?Char, .{ .point = 'ž', .len = 2 }), decode("žluť"));
+    try testing.expectEqual(@as(?Char, .{ .point = 0x1f600, .len = 4 }), decode("😀!"));
+    // Nothing, a continuation byte, a character cut short twice, an overlong
+    // slash, a surrogate, one past U+10FFFF, a byte UTF-8 never uses.
+    for ([_][]const u8{ "", "\x80", "\xc5", "\xe2\x82", "\xc0\xaf", "\xed\xa0\x80", "\xf4\x90\x80\x80", "\xff" }) |bytes| {
+        try testing.expectEqual(@as(?Char, null), decode(bytes));
+    }
+    try testing.expectEqual(Char{ .point = 'ť', .len = 2 }, decodeLast("žluť"));
+    try testing.expectEqual(Char{ .point = 0x1f600, .len = 4 }, decodeLast("!😀"));
+    try testing.expectEqual(replacement, decodeLast("\x80\x80\x80\x80\x80"));
+    try testing.expectEqual(replacement, decodeLast("ž\xbe"));
+    try testing.expectEqual(replacement, decodeLast("a\xe2\x82"));
 }
