@@ -134,8 +134,9 @@ pub const Object = struct {
 
 pub const View = enum { grid, structure, messages, help, info, relations, connections, files, object };
 pub const Focus = enum { sidebar, main };
-/// A place on screen, in cells.
-pub const Spot = struct { row: usize, col: usize };
+/// A place on screen, in cells - and whether the cursor there is on a character
+/// rather than between two, which is what the editor's normal mode is.
+pub const Spot = struct { row: usize, col: usize, block: bool = false };
 
 /// Where a connection can keep its password, in the order the form offers them.
 const PLACES = [_][]const u8{ "ask", "file", "keychain", "touchid" };
@@ -223,6 +224,10 @@ const Opened = struct {
     facts: []const database.Setting = &.{},
     actions: []const database.Action = &.{},
     scroll: usize = 0,
+
+    fn deinit(self: *Opened) void {
+        self.arena.deinit();
+    }
 };
 
 /// Reading a table again on a clock.
@@ -247,6 +252,10 @@ const Follow = struct {
     /// the follow key on a clock - and only ever re-run where the engine says
     /// running it twice is the same as running it once.
     statement: std.ArrayListUnmanaged(u8) = .empty,
+
+    fn deinit(self: *Follow, allocator: std.mem.Allocator) void {
+        self.statement.deinit(allocator);
+    }
 };
 
 /// Where the key map is scrolled to, and how many of its lines a screen holds.
@@ -279,7 +288,7 @@ const Running = struct {
 /// asked for more.
 ///
 /// The line along the bottom is one sentence at a time; the reports behind it
-/// are every statement of the last run, which `m` opens. They share an arena
+/// are every statement of the last run, which `gm` opens. They share an arena
 /// because they are made and thrown away together, once per run.
 const Reporting = struct {
     arena: std.heap.ArenaAllocator,
@@ -288,6 +297,12 @@ const Reporting = struct {
     /// between a colour somebody reads past and one they stop at.
     status: std.ArrayListUnmanaged(u8) = .empty,
     status_error: bool = false,
+
+    fn deinit(self: *Reporting, allocator: std.mem.Allocator) void {
+        self.status.deinit(allocator);
+        self.list.deinit(allocator);
+        self.arena.deinit();
+    }
 };
 
 /// Saved connections, where they live, and which of them is being worked on.
@@ -314,11 +329,6 @@ const Saved = struct {
     /// Which saved connection the open form is editing, so changing both its name
     /// and its target replaces that entry instead of adding a second one.
     editing: ?usize = null,
-    /// Whether the connection now open was marked as one nothing may be written
-    /// through. Kept here rather than asked of the list every time, because the
-    /// list can be edited while a connection is open and what is in force is what
-    /// was in force when it was opened.
-    read_only: bool = false,
 
     /// A page, and never zero: a page key that moves by nothing looks broken.
     pub fn page(self: Saved) usize {
@@ -352,6 +362,26 @@ const Typing = struct {
     /// Which engine the open connection form was built for: when the choice at the
     /// top of it changes, the fields under it are somebody else's.
     built_for: conns.Engine = .sqlite,
+    /// What was in the editor when it was last put away without being run. Escape
+    /// closes the editor, and in an editor with modes escape is also the key
+    /// pressed twice to be sure of being in normal mode - so closing it cannot be
+    /// what throws a statement away. The next time it opens, this is in it.
+    draft: std.ArrayListUnmanaged(u8) = .empty,
+
+    fn deinit(self: *Typing, allocator: std.mem.Allocator) void {
+        if (self.prompt) |*prompt| {
+            prompt.buffer.deinit(allocator);
+        }
+        if (self.form) |*form| {
+            form.deinit();
+        }
+        if (self.editor) |*editor| {
+            editor.deinit();
+        }
+        self.pending.deinit(allocator);
+        self.draft.deinit(allocator);
+        self.arena.deinit();
+    }
 };
 
 /// The list down the left: every table and view the connection has, what has
@@ -363,6 +393,26 @@ const Sidebar = struct {
     selected: usize = 0,
     /// The first one visible, which is what scrolling a list means.
     scroll: usize = 0,
+    /// How many of them were on screen last time it was drawn. The drawing is
+    /// what knows - a heading takes a line where a group starts - and the keys
+    /// that go to the middle and the bottom of the screen need to be told.
+    shown: usize = 0,
+
+    /// Forget the objects. Their names are the list's own copies.
+    fn clear(self: *Sidebar, allocator: std.mem.Allocator) void {
+        for (self.objects.items) |object| {
+            allocator.free(object.name);
+            allocator.free(object.group);
+            allocator.free(object.kind);
+        }
+        self.objects.clearRetainingCapacity();
+    }
+
+    fn deinit(self: *Sidebar, allocator: std.mem.Allocator) void {
+        self.clear(allocator);
+        self.objects.deinit(allocator);
+        self.filter.deinit(allocator);
+    }
 };
 
 /// Where the cursor is in the grid, what is scrolled off either edge of it, and
@@ -380,6 +430,14 @@ const Cursor = struct {
     marked: std.ArrayListUnmanaged(usize) = .empty,
     /// Column indexes put away, by index into the grid's own columns.
     hidden: std.ArrayListUnmanaged(usize) = .empty,
+    /// How many rows the grid has room for, as last drawn: what "the middle of
+    /// the screen" and "the bottom of it" are measured in.
+    page: usize = 1,
+
+    fn deinit(self: *Cursor, allocator: std.mem.Allocator) void {
+        self.marked.deinit(allocator);
+        self.hidden.deinit(allocator);
+    }
 };
 
 /// The table on the screen: which one it is, what its columns are, the page
@@ -415,6 +473,131 @@ const Grid = struct {
     /// it must not then report a count as though it had worked.
     failed: bool = false,
     text_limit: usize = 44, // widest column in the grid
+
+    fn clearConditions(self: *Grid, allocator: std.mem.Allocator) void {
+        for (self.conditions.items) |condition| {
+            allocator.free(condition.column);
+            allocator.free(condition.value);
+        }
+        self.conditions.clearRetainingCapacity();
+    }
+
+    /// The rows and the column names are not here: they are in the arena the
+    /// page was read into, and go with it.
+    fn deinit(self: *Grid, allocator: std.mem.Allocator) void {
+        if (self.name) |value| {
+            allocator.free(value);
+        }
+        if (self.order) |value| {
+            allocator.free(value);
+        }
+        self.clearConditions(allocator);
+        self.conditions.deinit(allocator);
+        self.where_text.deinit(allocator);
+        self.schema.deinit(allocator);
+        self.title.deinit(allocator);
+        self.cols.deinit(allocator);
+        self.widths.deinit(allocator);
+        self.rows.deinit(allocator);
+    }
+};
+
+/// A place in a table worth coming back to: `m` and a letter leaves one, `'`
+/// and the letter returns to it.
+pub const Mark = struct {
+    /// The table it was left in, or null where the grid held a statement's rows.
+    /// Owned.
+    table: ?[]const u8 = null,
+    page: usize = 0,
+    row: usize = 0,
+    col: usize = 0,
+};
+
+/// One connection and everything about how it is being looked at: a tab.
+///
+/// The tab in front does not live here. Its state is in the App's own fields of
+/// the same names, which is where every line of this program already reads it
+/// from, and it is copied out to here when another tab comes forward and back
+/// when this one does. That makes this struct the one list of what belongs to a
+/// tab: the copying is written over its fields rather than by hand, and `deinit`
+/// is the one place a tab is taken apart - there used to be three of those, and
+/// they had already stopped agreeing.
+pub const Tab = struct {
+    arena: std.heap.ArenaAllocator, // the loaded page of rows
+    conn: database.Db = undefined,
+    connected: bool = false,
+    path: []const u8 = "",
+    owned_path: []u8 = &.{},
+    /// Whether this connection was marked as one nothing may be written through.
+    /// Read when it is opened and kept, rather than asked of the list every time,
+    /// because the list can be edited while a connection is open and what is in
+    /// force is what was in force when it was opened.
+    read_only: bool = false,
+
+    sidebar: Sidebar = .{},
+    grid: Grid = .{},
+
+    view: View = .connections,
+    focus: Focus = .sidebar,
+    detail: bool = false,
+    detail_at: usize = 0,
+    detail_page: usize = 1,
+    detail_lines: usize = 1,
+
+    object: Opened,
+    follow: Follow = .{},
+    cursor: Cursor = .{},
+    /// Marks are places in this connection's tables, so they are this tab's.
+    marks: [26]?Mark = @splat(null),
+    typing: Typing,
+    help: Help = .{},
+    report: Reporting,
+    files: ?*Files.Manager = null,
+    running: Running = .{},
+
+    /// A tab with nothing open in it.
+    pub fn init(allocator: std.mem.Allocator) Tab {
+        return .{
+            .arena = std.heap.ArenaAllocator.init(allocator),
+            .object = .{ .arena = std.heap.ArenaAllocator.init(allocator) },
+            .typing = .{ .arena = std.heap.ArenaAllocator.init(allocator) },
+            .report = .{ .arena = std.heap.ArenaAllocator.init(allocator) },
+        };
+    }
+
+    /// Close the connection and give back everything the tab holds.
+    pub fn deinit(self: *Tab, allocator: std.mem.Allocator) void {
+        // The panes first: the far one reads through the connection. The manager
+        // frees itself, which is why there is nothing here to destroy after it.
+        if (self.files) |open| {
+            open.deinit();
+        }
+        if (self.connected) {
+            self.conn.close();
+        }
+        for (&self.marks) |*mark| {
+            forget(allocator, mark);
+        }
+        self.sidebar.deinit(allocator);
+        self.grid.deinit(allocator);
+        self.cursor.deinit(allocator);
+        self.follow.deinit(allocator);
+        self.typing.deinit(allocator);
+        self.report.deinit(allocator);
+        self.object.deinit();
+        allocator.free(self.owned_path);
+        self.arena.deinit();
+        self.* = undefined;
+    }
+
+    fn forget(allocator: std.mem.Allocator, mark: *?Mark) void {
+        if (mark.*) |old| {
+            if (old.table) |name| {
+                allocator.free(name);
+            }
+        }
+        mark.* = null;
+    }
 };
 
 pub const App = struct {
@@ -426,6 +609,15 @@ pub const App = struct {
     connected: bool = false,
     path: []const u8,
     owned_path: []u8,
+
+    /// Every tab, and which one is in front. The slot of the one in front is
+    /// stale while it is there - see `Tab` - so anything that reads a slot calls
+    /// `saveActiveTab` first.
+    tabs: std.ArrayListUnmanaged(Tab) = .empty,
+    active_tab: usize = 0,
+
+    read_only: bool = false,
+    marks: [26]?Mark = @splat(null),
 
     sidebar: Sidebar = .{},
     grid: Grid = .{},
@@ -487,6 +679,9 @@ pub const App = struct {
             .saved = .{ .list = conns.List.init(allocator) },
             .env = env,
         };
+        // The first tab. What is in it is what was just set up above.
+        try self.tabs.append(allocator, undefined);
+        self.saveActiveTab();
         var buffer: [std.fs.max_path_bytes]u8 = undefined;
         if (conns.path(&buffer, env)) |file| {
             try self.saved.path.appendSlice(allocator, file);
@@ -554,8 +749,10 @@ pub const App = struct {
         if (self.connected) {
             self.conn.close();
         }
-        // Whatever was being followed belongs to the connection being replaced.
+        // Whatever was being followed belongs to the connection being replaced,
+        // and so do the places that were marked in it.
         self.setFollow(0);
+        self.clearMarks();
         self.conn = opened;
         self.connected = true;
         if (self.watch_armed) {
@@ -575,10 +772,7 @@ pub const App = struct {
         // the list would be worth nothing if a name on the command line went round
         // it. Read once, here, so editing the list under an open connection cannot
         // change what is in force in the middle of it.
-        self.saved.read_only = false;
-        if (self.saved.list.find(self.owned_path)) |at| {
-            self.saved.read_only = self.saved.list.items.items[at].read_only;
-        }
+        self.read_only = self.markedReadOnly();
         try self.setTable(null);
         self.grid.schema.clearRetainingCapacity();
         try self.firstSchema();
@@ -613,6 +807,13 @@ pub const App = struct {
             return;
         }
         self.typing.editor = Editor.init(self.allocator);
+        // Whatever was left in it the last time, which is what makes closing it
+        // by accident a key to press again rather than a statement to write again.
+        if (self.typing.draft.items.len != 0) {
+            try self.typing.editor.?.setText(self.typing.draft.items);
+            self.say("what was left here is back - ctrl+u empties it", .{});
+            return;
+        }
         // Not a list of keys: the footer has one, and saying it twice on one screen
         // teaches nobody anything the second time. What is worth saying here is what
         // this panel *is*, which is not the same thing on every engine.
@@ -624,8 +825,13 @@ pub const App = struct {
         }
     }
 
+    /// Put the editor away, keeping what was in it for the next time it opens.
     pub fn closeEditor(self: *App) void {
         if (self.typing.editor) |*open| {
+            self.typing.draft.clearRetainingCapacity();
+            if (std.mem.trim(u8, open.text.items, " \t\r\n").len != 0) {
+                self.typing.draft.appendSlice(self.allocator, open.text.items) catch {};
+            }
             open.deinit();
         }
         self.typing.editor = null;
@@ -647,21 +853,27 @@ pub const App = struct {
         }
         const owned = try self.allocator.dupe(u8, sql);
         defer self.allocator.free(owned);
+        // From here it is in the history, which is where a statement that was run
+        // - or asked about and refused - is looked for again. It is not also kept
+        // as what the editor reopens with.
+        try self.remember(owned);
         // Something that makes or overwrites is asked about here, where a person
         // just typed it, rather than anywhere further in - and only here, so that
         // saying yes runs it rather than asking again.
         if (self.conn.confirming(sql)) |what| {
             self.closeEditor();
+            self.typing.draft.clearRetainingCapacity();
             try self.confirm(owned, what);
             return;
         }
         const talking = self.conn.sessionIn().len != 0;
         if (talking) {
             editor.clear();
+            editor.settle();
         } else {
             self.closeEditor();
+            self.typing.draft.clearRetainingCapacity();
         }
-        try self.remember(owned);
         try self.runBatch(owned);
         // Opening one, or leaving it, changes which of the two this is.
         if (self.conn.sessionIn().len == 0 and self.typing.editor != null and talking) {
@@ -683,17 +895,67 @@ pub const App = struct {
             false => if (editor.history_at) |value| (if (value >= last) last else value + 1) else last,
         };
         editor.history_at = at;
+        // A statement from the history replaces what was typed, so what was typed
+        // has to be something `u` brings back.
+        editor.changing();
         try editor.setText(self.history.items[at]);
     }
 
     /// What tab offers: the names in this database, the columns of the table on
-    /// screen, and SQL's own words.
+    /// screen, the tables the statement names and what it calls them, and SQL's
+    /// own words. After a dot it is the columns of whatever is in front of the
+    /// dot, and after JOIN the tables a foreign key leads to come first.
     pub fn completeInEditor(self: *App) !void {
         const editor = &(self.typing.editor orelse return);
         var arena = std.heap.ArenaAllocator.init(self.allocator);
         defer arena.deinit();
         const scratch = arena.allocator();
         var names: std.ArrayListUnmanaged([]const u8) = .empty;
+
+        const prefix = editor.word();
+        // Only where what is being written is SQL: on an engine whose editor is a
+        // console for its own commands there are no FROMs to read, no columns to
+        // ask it for, and a dot in a word is part of a key or a file name.
+        const sql = self.caps().speaks_sql;
+        const aliases: []const sql_syntax.Alias = if (sql)
+            sql_syntax.extractAliases(scratch, editor.text.items) catch &.{}
+        else
+            &.{};
+
+        // `u.na`, `orders.` or `sales.orders.to`: the columns of what the dot
+        // follows, written with it in front so the whole word is what is replaced.
+        if (sql) {
+            if (std.mem.lastIndexOfScalar(u8, prefix, '.')) |dot| {
+                const qualifier = prefix[0..dot];
+                if (self.tableCalled(aliases, qualifier)) |table| {
+                    for (self.columnsFor(scratch, table)) |column| {
+                        try names.append(scratch, try std.fmt.allocPrint(scratch, "{s}.{s}", .{ qualifier, column }));
+                    }
+                    if (names.items.len > 0) {
+                        try editor.complete(names.items);
+                        return;
+                    }
+                }
+            }
+        }
+
+        // After JOIN, what the tables already named point at.
+        const before_word = std.mem.trimEnd(u8, editor.text.items[0 .. editor.cursor - prefix.len], " \t\r\n");
+        if (aliases.len != 0 and endsWithWord(before_word, "JOIN")) {
+            for (aliases) |named| {
+                if (named.table.len == 0) {
+                    continue;
+                }
+                const keys = self.conn.foreignKeys(scratch, self.inSchema(named.schema, named.table)) catch continue;
+                for (keys) |key| {
+                    try names.append(scratch, key.target_table);
+                }
+            }
+        }
+
+        for (aliases) |named| {
+            try names.append(scratch, named.alias);
+        }
         for (self.sidebar.objects.items) |object| {
             try names.append(scratch, object.name);
         }
@@ -702,6 +964,51 @@ pub const App = struct {
         }
         try names.appendSlice(scratch, sql_syntax.keywords());
         try editor.complete(names.items);
+    }
+
+    /// The table a qualifier stands for: an alias the statement gave, a table it
+    /// named, a `schema.table`, or one of the tables in the list. Null where it
+    /// is none of them, or is something with no columns to ask for.
+    fn tableCalled(self: *App, aliases: []const sql_syntax.Alias, qualifier: []const u8) ?database.Table {
+        for (aliases) |named| {
+            if (std.ascii.eqlIgnoreCase(named.alias, qualifier)) {
+                return if (named.table.len != 0) self.inSchema(named.schema, named.table) else null;
+            }
+        }
+        if (std.mem.lastIndexOfScalar(u8, qualifier, '.')) |dot| {
+            return .{ .schema = qualifier[0..dot], .name = qualifier[dot + 1 ..] };
+        }
+        for (self.sidebar.objects.items) |object| {
+            if (std.ascii.eqlIgnoreCase(object.name, qualifier)) {
+                return self.inSchema("", object.name);
+            }
+        }
+        return null;
+    }
+
+    /// A table in the schema it was written with, or in the one being browsed
+    /// where it was written with none - which is how every other question here
+    /// is asked, and what this one left out.
+    fn inSchema(self: *App, schema: []const u8, name: []const u8) database.Table {
+        return .{ .schema = if (schema.len != 0) schema else self.grid.schema.items, .name = name };
+    }
+
+    /// The columns of a table: the grid's own where that is the table it is
+    /// showing, and the engine's otherwise. Nothing at all rather than an error -
+    /// this is asked on a tab key, half way through a word.
+    fn columnsFor(self: *App, arena: std.mem.Allocator, table: database.Table) []const []const u8 {
+        const on_screen = if (self.currentTable()) |open|
+            std.ascii.eqlIgnoreCase(open.name, table.name) and std.ascii.eqlIgnoreCase(open.schema, table.schema)
+        else
+            false;
+        if (on_screen and self.grid.cols.items.len != 0) {
+            return self.grid.cols.items;
+        }
+        var out: std.ArrayListUnmanaged([]const u8) = .empty;
+        for (self.conn.columns(arena, table) catch return &.{}) |column| {
+            out.append(arena, column.name) catch return &.{};
+        }
+        return out.items;
     }
 
     /// Watch every statement, so a slow one can be given up on. The hook stays
@@ -1013,7 +1320,7 @@ pub const App = struct {
     /// place it opened, not about the machine krtek runs on: copying a file *down*
     /// from a read-only bucket is a read, and there is no reason to refuse it.
     pub fn mayWriteTo(self: *App, place: database.store.Store) bool {
-        if (!self.saved.read_only or place == .local) {
+        if (!self.read_only or place == .local) {
             return true;
         }
         self.complain("this connection is read-only: {s} is not written to", .{place.label()});
@@ -1056,8 +1363,13 @@ pub const App = struct {
     /// any of them knowing about it. The four texts are the reason and the flag
     /// at once, which is why saying it once is enough.
     pub fn caps(self: *App) database.Caps {
+        // With nothing open there is no driver to ask, and the answer that asks
+        // nothing of it is the plain one.
+        if (!self.connected) {
+            return .{};
+        }
         var out = self.conn.caps();
-        if (!self.saved.read_only) {
+        if (!self.read_only) {
             return out;
         }
         const why = "this connection is marked read-only; edit it with e in the connection list to change that";
@@ -1296,64 +1608,243 @@ pub const App = struct {
         return shape;
     }
 
-    pub fn deinitConnection(self: *App) void {
-        if (self.connected) {
-            self.conn.close();
-            self.connected = false;
-        }
-    }
-
     pub fn deinit(self: *App) void {
         self.screen.deinit();
-        if (self.files) |open| {
-            open.deinit();
-            self.files = null;
+        // Every tab the same way, the one in front included.
+        self.saveActiveTab();
+        for (self.tabs.items) |*tab| {
+            tab.deinit(self.allocator);
         }
-        self.deinitConnection();
-        self.freeObjects();
-        self.sidebar.objects.deinit(self.allocator);
-        self.sidebar.filter.deinit(self.allocator);
+        self.tabs.deinit(self.allocator);
+        // And what belongs to the program rather than to any of them.
         self.saved.filter.deinit(self.allocator);
-        self.grid.cols.deinit(self.allocator);
-        self.grid.widths.deinit(self.allocator);
-        self.grid.rows.deinit(self.allocator);
-        self.grid.title.deinit(self.allocator);
-        self.report.status.deinit(self.allocator);
-        self.follow.statement.deinit(self.allocator);
-        self.report.list.deinit(self.allocator);
-        self.cursor.marked.deinit(self.allocator);
-        self.typing.pending.deinit(self.allocator);
         self.saved.list.deinit();
         self.saved.path.deinit(self.allocator);
         self.saved.pending.deinit(self.allocator);
         if (self.palette) |*open| {
             open.query.deinit(self.allocator);
         }
-        self.closeEditor();
-        self.cursor.hidden.deinit(self.allocator);
-        self.clearConditions();
-        self.grid.conditions.deinit(self.allocator);
-        self.grid.where_text.deinit(self.allocator);
-        self.closeForm();
         for (self.history.items) |entry| {
             self.allocator.free(entry);
         }
         self.history.deinit(self.allocator);
-        if (self.grid.order) |value| {
-            self.allocator.free(value);
+    }
+
+    /// The screen to fall back to: the grid of whatever is open, or the list of
+    /// connections when nothing is. Every "back" goes through this, because a
+    /// grid with no connection behind it is a screen whose every key asks a
+    /// driver that is not there.
+    pub fn home(self: *App) View {
+        return if (self.connected) .grid else .connections;
+    }
+
+    /// Whether the connection now open is one the list marks read-only. Looked
+    /// up by what it points at rather than by how it was reached: a target typed
+    /// on the command line, or after `:open`, is the same database as the saved
+    /// entry with that target, and marking it in the list would be worth nothing
+    /// if a name typed somewhere else went round it.
+    fn markedReadOnly(self: *App) bool {
+        const at = self.saved.list.find(self.owned_path) orelse return false;
+        return self.saved.list.items.items[at].read_only;
+    }
+
+    // --- marks ---
+
+    /// Leave a mark on the row under the cursor.
+    pub fn setMark(self: *App, letter: u8) void {
+        if (letter < 'a' or letter > 'z') {
+            return;
         }
-        if (self.grid.name) |value| {
-            self.allocator.free(value);
+        const table: ?[]const u8 = if (self.grid.name) |name|
+            (self.allocator.dupe(u8, name) catch return)
+        else
+            null;
+        const mark = &self.marks[letter - 'a'];
+        Tab.forget(self.allocator, mark);
+        mark.* = .{
+            .table = table,
+            .page = self.grid.page,
+            .row = self.cursor.row,
+            .col = self.cursor.col,
+        };
+        self.say("mark {c} is row {d}", .{ letter, self.firstRow() + self.cursor.row });
+    }
+
+    /// Go back to a mark: the table it was left in, the page, and the row.
+    pub fn jumpMark(self: *App, letter: u8) !void {
+        if (letter < 'a' or letter > 'z') {
+            return;
         }
-        self.grid.schema.deinit(self.allocator);
-        if (self.typing.prompt) |*prompt| {
-            prompt.buffer.deinit(self.allocator);
+        const mark = self.marks[letter - 'a'] orelse {
+            self.complain("there is no mark {c} - m{c} leaves one", .{ letter, letter });
+            return;
+        };
+        if (mark.table) |name| {
+            const here = if (self.grid.name) |open| std.mem.eql(u8, open, name) else false;
+            if (!here) {
+                // Only a table that is still in the list. A mark outlives a schema
+                // being switched or a table being dropped, and opening a name the
+                // engine no longer has puts an empty grid up under a title that
+                // says it is that table.
+                var known = false;
+                for (self.sidebar.objects.items) |object| {
+                    known = known or std.mem.eql(u8, object.name, name);
+                }
+                if (!known) {
+                    self.complain("mark {c} was left in {s}, which is not here now", .{ letter, name });
+                    return;
+                }
+                try self.openTable(name);
+            }
+            if (self.grid.failed) {
+                return; // and the reload has said why
+            }
+            if (self.grid.page != mark.page and mark.page < self.pages()) {
+                self.grid.page = mark.page;
+                try self.reload();
+            }
         }
-        self.allocator.free(self.owned_path);
-        self.arena.deinit();
-        self.report.arena.deinit();
-        self.object.arena.deinit();
-        self.typing.arena.deinit();
+        self.cursor.row = @min(mark.row, self.grid.rows.items.len -| 1);
+        self.cursor.col = @min(mark.col, self.grid.cols.items.len -| 1);
+        self.focus = .main;
+        self.say("mark {c}", .{letter});
+    }
+
+    fn clearMarks(self: *App) void {
+        for (&self.marks) |*mark| {
+            Tab.forget(self.allocator, mark);
+        }
+    }
+
+    // --- tabs ---
+
+    pub fn tabCount(self: *App) usize {
+        return self.tabs.items.len;
+    }
+
+    /// What a tab is called: the name its connection was saved under, or what
+    /// the driver calls it where it was never saved.
+    ///
+    /// Not the table that happens to be open in it. Two tabs are usually two
+    /// databases, the same table is in both far more often than not, and a strip
+    /// that reads `authors` twice is the one thing a strip of tabs must not do:
+    /// not say which of them is production.
+    pub fn tabTitle(self: *App, index: usize) []const u8 {
+        const front = index == self.active_tab;
+        const tab = &self.tabs.items[index];
+        if (!(if (front) self.connected else tab.connected)) {
+            return "new";
+        }
+        if (self.saved.list.find(if (front) self.owned_path else tab.owned_path)) |at| {
+            const name = self.saved.list.items.items[at].name;
+            if (name.len != 0) {
+                return name;
+            }
+        }
+        const described = (if (front) self.conn else tab.conn).describe();
+        return if (described.len != 0) described else "connection";
+    }
+
+    /// Put what is on screen away in its slot. See `Tab` for why it is not there
+    /// already.
+    pub fn saveActiveTab(self: *App) void {
+        // A key that was waiting for its second one is not waiting any more: it
+        // was pressed for the tab that is about to stop being the one in front,
+        // and coming back to find the next key eaten by it is a puzzle.
+        self.typing.prefix = null;
+        const tab = &self.tabs.items[self.active_tab];
+        inline for (std.meta.fields(Tab)) |field| {
+            @field(tab, field.name) = @field(self, field.name);
+        }
+    }
+
+    /// And bring the tab now in front out of its slot.
+    pub fn loadActiveTab(self: *App) void {
+        const tab = &self.tabs.items[self.active_tab];
+        inline for (std.meta.fields(Tab)) |field| {
+            @field(self, field.name) = @field(tab, field.name);
+        }
+        // The timer is the screen's and there is one of it, so it is set to
+        // whatever this tab was doing: following starts again where it was on,
+        // and stops where it was not. Left alone it kept the last tab's answer,
+        // and a grid that says "following" over rows that are not being read is
+        // worse than one that says nothing.
+        self.screen.follow(self.follow.ms);
+        if (self.follow.ms != 0 and !self.screen.following()) {
+            self.follow.ms = 0;
+        }
+    }
+
+    /// A new tab, in front, with nothing open in it - or with `target` opened.
+    pub fn newTab(self: *App, target: ?[]const u8) !void {
+        self.saveActiveTab();
+        try self.tabs.append(self.allocator, Tab.init(self.allocator));
+        self.active_tab = self.tabs.items.len - 1;
+        self.loadActiveTab();
+        if (target) |name| {
+            if (name.len != 0) {
+                try self.connect(name, true);
+            }
+        }
+    }
+
+    pub fn selectTab(self: *App, index: usize) void {
+        if (index >= self.tabs.items.len or index == self.active_tab) {
+            return;
+        }
+        self.saveActiveTab();
+        self.active_tab = index;
+        self.loadActiveTab();
+    }
+
+    pub fn nextTab(self: *App) void {
+        self.selectTab((self.active_tab + 1) % self.tabs.items.len);
+    }
+
+    pub fn prevTab(self: *App) void {
+        self.selectTab(if (self.active_tab == 0) self.tabs.items.len - 1 else self.active_tab - 1);
+    }
+
+    /// Open the connection under the cursor in a tab of its own - or in this
+    /// one, where this one has nothing in it yet and a second empty tab would be
+    /// one to close again.
+    pub fn connectSavedInNewTab(self: *App) !void {
+        if (self.chosenSaved() == null) {
+            return;
+        }
+        if (self.connected) {
+            try self.newTab(null);
+        }
+        try self.connectSaved();
+    }
+
+    /// Close a tab and what is open in it. The last one is emptied rather than
+    /// removed: there is always a tab, and with nothing in it it is the list of
+    /// connections.
+    pub fn closeTab(self: *App, index: usize) void {
+        if (index >= self.tabs.items.len) {
+            return;
+        }
+        self.saveActiveTab();
+        self.tabs.items[index].deinit(self.allocator);
+        if (self.tabs.items.len == 1) {
+            self.tabs.items[0] = Tab.init(self.allocator);
+        } else {
+            _ = self.tabs.orderedRemove(index);
+            // The one in front stays in front. Where it was the one that closed,
+            // the next takes its place - or the one before, at the end of the row.
+            if (index < self.active_tab or self.active_tab == self.tabs.items.len) {
+                self.active_tab -= 1;
+            }
+        }
+        self.loadActiveTab();
+    }
+
+    /// Close every tab but the one in front.
+    pub fn closeOtherTabs(self: *App) void {
+        while (self.tabs.items.len > 1) {
+            self.closeTab(if (self.active_tab == 0) 1 else 0);
+        }
     }
 
     /// The table on screen, with the schema it lives in.
@@ -1396,12 +1887,7 @@ pub const App = struct {
     // -------------------------------------------------------------- schema
 
     fn freeObjects(self: *App) void {
-        for (self.sidebar.objects.items) |object| {
-            self.allocator.free(object.name);
-            self.allocator.free(object.group);
-            self.allocator.free(object.kind);
-        }
-        self.sidebar.objects.clearRetainingCapacity();
+        self.sidebar.clear(self.allocator);
     }
 
     pub fn loadObjects(self: *App) !void {
@@ -1876,11 +2362,7 @@ pub const App = struct {
     }
 
     fn clearConditions(self: *App) void {
-        for (self.grid.conditions.items) |condition| {
-            self.allocator.free(condition.column);
-            self.allocator.free(condition.value);
-        }
-        self.grid.conditions.clearRetainingCapacity();
+        self.grid.clearConditions(self.allocator);
     }
 
     pub fn isHidden(self: *App, column: usize) bool {
@@ -1924,6 +2406,16 @@ pub const App = struct {
     }
 
     pub fn deleteRows(self: *App) !void {
+        // Asked first, and asked here rather than of the key: the mark on a
+        // connection is laid over what the engine can do, and inserting and
+        // editing both ask before they start. Deleting did not, so the footer
+        // stopped offering `x` on a read-only connection and `x` went on
+        // deleting.
+        const refused = self.caps().no_delete;
+        if (refused.len != 0) {
+            self.complain("{s}", .{refused});
+            return;
+        }
         if (self.grid.rows.items.len != 0 and !self.grid.editable) {
             self.complain("these rows cannot be addressed, so they are read-only", .{});
             return;
@@ -1951,6 +2443,12 @@ pub const App = struct {
 
     pub fn deleteRowsNow(self: *App) !void {
         const table = self.currentTable() orelse return;
+        // Again here, because this is also where the answer to "delete it?" ends
+        // up, and nothing may reach the engine by having been asked about nicely.
+        if (self.caps().no_delete.len != 0) {
+            self.complain("{s}", .{self.caps().no_delete});
+            return;
+        }
         var targets: std.ArrayListUnmanaged(usize) = .empty;
         defer targets.deinit(self.allocator);
         if (self.cursor.marked.items.len != 0) {
@@ -2166,7 +2664,7 @@ pub const App = struct {
         // test is the conservative one: a first word not on the reading list is
         // taken to write, so a statement this cannot recognise is refused rather
         // than run.
-        if (self.saved.read_only) {
+        if (self.read_only) {
             if (self.refuseWrites(sql)) {
                 return;
             }
@@ -2285,7 +2783,7 @@ pub const App = struct {
             affected += report.changes;
         }
         if (failures > 0) {
-            self.complain("{d} of {d} statement(s) failed, press m for details{s}", .{
+            self.complain("{d} of {d} statement(s) failed, press gm for details{s}", .{
                 failures, self.report.list.items.len, if (rolled_back) ", rolled back" else "",
             });
         } else {
@@ -2651,16 +3149,106 @@ pub const App = struct {
         const verb = parts.next() orelse return;
         const argument = std.mem.trim(u8, parts.rest(), " \t");
 
-        if (std.mem.eql(u8, verb, "q") or std.mem.eql(u8, verb, "quit")) {
-            self.quit = true;
-        } else if (std.mem.eql(u8, verb, "limit")) {
-            const value = std.fmt.parseInt(usize, argument, 10) catch {
-                self.complain(":limit needs a number", .{});
+        // The ones about the program itself, which need nothing to be open: the
+        // prompt is on the list of connections and in an empty tab too.
+        if (is(verb, &.{ "q", "quit", "q!", "quit!" })) {
+            self.leave();
+            return;
+        } else if (is(verb, &.{ "tabnew", "tabe", "tabedit" })) {
+            try self.newTab(if (argument.len != 0) argument else null);
+            return;
+        } else if (is(verb, &.{ "tabn", "tabnext" })) {
+            self.nextTab();
+            return;
+        } else if (is(verb, &.{ "tabp", "tabprev", "tabprevious" })) {
+            self.prevTab();
+            return;
+        } else if (is(verb, &.{ "tabc", "tabclose", "close" })) {
+            self.closeTab(self.active_tab);
+            return;
+        } else if (is(verb, &.{ "tabo", "tabonly" })) {
+            self.closeOtherTabs();
+            self.say("the other tabs are closed", .{});
+            return;
+        } else if (is(verb, &.{"open"})) {
+            try self.reopen(argument);
+            return;
+        }
+        // Everything else is about what is open, and asks the driver. With
+        // nothing open there is no driver - the field holds whatever was last in
+        // it - so this is where that stops, once, instead of in each of them.
+        if (!self.connected) {
+            self.complain("nothing is open - enter connects, :open <target> opens something by name", .{});
+            return;
+        }
+
+        // A number is a row of this page, and `$` is the last of them.
+        if (std.fmt.parseInt(usize, verb, 10)) |number| {
+            self.goToRow(number -| 1);
+            return;
+        } else |_| {}
+        if (is(verb, &.{"$"})) {
+            self.goToRow(self.grid.rows.items.len -| 1);
+            return;
+        }
+
+        if (is(verb, &.{ "w", "write" })) {
+            // In the editor, writing is running: that is what a statement is for.
+            if (self.typing.editor != null) {
+                try self.runEditor();
+            } else if (argument.len != 0) {
+                try dump_mod.dump(self, argument);
+            } else {
+                self.say("usage: :w <file.csv|file.sql>", .{});
+            }
+        } else if (is(verb, &.{ "wq", "x" })) {
+            // The same, and then what `:q` would do - which in the editor is
+            // nothing more, because running a statement already puts the editor
+            // away. Quitting the program there took the result with it.
+            if (self.typing.editor != null) {
+                try self.runEditor();
+            } else {
+                if (argument.len != 0) {
+                    try dump_mod.dump(self, argument);
+                }
+                self.leave();
+            }
+        } else if (is(verb, &.{ "e", "edit" })) {
+            if (argument.len == 0) {
+                try self.openEditor();
                 return;
-            };
-            self.grid.limit = @max(1, @min(100000, value));
-            self.reload() catch {};
-            self.say("{d} rows per page", .{self.grid.limit});
+            }
+            for (self.sidebar.objects.items) |object| {
+                if (std.ascii.eqlIgnoreCase(object.name, argument)) {
+                    try self.openTable(object.name);
+                    return;
+                }
+            }
+            self.complain("there is no table called {s} - :e on its own opens the editor", .{argument});
+        } else if (is(verb, &.{ "noh", "nohlsearch" })) {
+            // What `/` narrowed, and only that. The filter on the rows is a
+            // different thing, made in a form and shown above the grid, and it is
+            // taken off where it was put on.
+            self.sidebar.filter.clearRetainingCapacity();
+            self.sidebar.selected = 0;
+            self.sidebar.scroll = 0;
+            self.say("the list is whole again", .{});
+        } else if (is(verb, &.{"set"})) {
+            if (is(argument, &.{ "ro", "readonly" })) {
+                self.read_only = true;
+                self.say("nothing is written through this connection until it is opened again", .{});
+            } else if (is(argument, &.{ "noro", "noreadonly" })) {
+                // One way only. The mark is what stands between a slip of the
+                // hand and a production database, and it is lifted where it was
+                // put - in the list, for the next time the connection is opened.
+                self.complain("read-only is lifted in the connection list: r there, and open it again", .{});
+            } else if (std.mem.startsWith(u8, argument, "limit=")) {
+                try self.setLimit(argument["limit=".len..]);
+            } else {
+                self.say("options: :set ro, :set limit=50", .{});
+            }
+        } else if (std.mem.eql(u8, verb, "limit")) {
+            try self.setLimit(argument);
         } else if (std.mem.eql(u8, verb, "follow")) {
             try self.followCommand(argument);
         } else if (std.mem.eql(u8, verb, "export")) {
@@ -2698,8 +3286,6 @@ pub const App = struct {
             if (!found) {
                 self.complain("this engine reports no health check", .{});
             }
-        } else if (std.mem.eql(u8, verb, "open")) {
-            try self.reopen(argument);
         } else if (std.mem.eql(u8, verb, "vacuum")) {
             self.conn.exec("VACUUM") catch {
                 self.complain("{s}", .{self.conn.message()});
@@ -2707,8 +3293,52 @@ pub const App = struct {
             };
             self.say("database vacuumed", .{});
         } else {
-            self.complain("unknown :{s} - try :export, :dump, :limit, :text, :follow, :open, :check, :analyze, :vacuum, :q", .{verb});
+            self.complain("unknown :{s} - try :export, :dump, :limit, :text, :follow, :open, :check, :w, :e, :set, :tabnew, :q", .{verb});
         }
+    }
+
+    /// Whether `word` is one of `names`.
+    fn is(word: []const u8, names: []const []const u8) bool {
+        for (names) |name| {
+            if (std.mem.eql(u8, word, name)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /// `:q`, from the inside out: the editor if it is open, then this tab if
+    /// there are others, then whatever screen is over the grid, and the program
+    /// only when there is nothing left to leave.
+    fn leave(self: *App) void {
+        if (self.typing.editor != null) {
+            self.closeEditor();
+        } else if (self.tabs.items.len > 1) {
+            self.closeTab(self.active_tab);
+        } else if (self.connected and self.view != .grid) {
+            self.view = .grid;
+        } else {
+            self.quit = true;
+        }
+    }
+
+    fn goToRow(self: *App, row: usize) void {
+        if (self.grid.rows.items.len == 0) {
+            return;
+        }
+        self.cursor.row = @min(row, self.grid.rows.items.len - 1);
+        self.focus = .main;
+        self.say("row {d} of {d}", .{ self.cursor.row + 1, self.grid.rows.items.len });
+    }
+
+    fn setLimit(self: *App, text: []const u8) !void {
+        const value = std.fmt.parseInt(usize, text, 10) catch {
+            self.complain(":limit needs a number", .{});
+            return;
+        };
+        self.grid.limit = @max(1, @min(100000, value));
+        self.reload() catch {};
+        self.say("{d} rows per page", .{self.grid.limit});
     }
 
     /// `:follow 0.5`, `:follow 5`, `:follow off`. The number is seconds, because
@@ -2965,6 +3595,10 @@ pub const App = struct {
         if (self.noRowHere()) {
             return;
         }
+        if (self.caps().no_delete.len != 0) {
+            self.complain("{s}", .{self.caps().no_delete});
+            return;
+        }
         const key = self.grid.rows.items[self.cursor.row].key orelse return;
         try self.change(.{ .kind = .delete, .table = table, .where = key }) orelse return;
         try self.loadObjects();
@@ -2983,8 +3617,18 @@ pub const App = struct {
             self.complain("{s}", .{if (report.items.len != 0) report.items else "cannot open it"});
             return;
         };
-        self.conn.close();
+        // What was open, if anything was: this is also how something is opened
+        // by name from the list of connections, where nothing is.
+        if (self.connected) {
+            self.conn.close();
+        }
+        self.setFollow(0);
+        self.clearMarks();
         self.conn = opened;
+        self.connected = true;
+        if (self.watch_armed) {
+            self.watchStatements();
+        }
         self.allocator.free(self.owned_path);
         // Without the password: this is what gets shown, and what the open form
         // starts from.
@@ -2992,6 +3636,10 @@ pub const App = struct {
         defer scratch.deinit();
         self.owned_path = try self.allocator.dupe(u8, try conns.withoutPassword(scratch.allocator(), target));
         self.path = self.owned_path;
+        // The same question `connect` asks, for the same reason: a connection
+        // marked read-only in the list is read-only however it was reached.
+        self.read_only = self.markedReadOnly();
+        self.view = .grid;
         try self.setTable(null);
         self.grid.schema.clearRetainingCapacity();
         try self.firstSchema();
@@ -3972,6 +4620,19 @@ pub const App = struct {
 // --------------------------------------------------------------- helpers
 
 /// A value as owned text; an empty string for NULL.
+/// Whether `text` ends in `word`, in either case and as a word of its own -
+/// `adjoin` does not end in JOIN.
+fn endsWithWord(text: []const u8, word: []const u8) bool {
+    if (!std.ascii.endsWithIgnoreCase(text, word)) {
+        return false;
+    }
+    if (text.len == word.len) {
+        return true;
+    }
+    const before = text[text.len - word.len - 1];
+    return !(std.ascii.isAlphanumeric(before) or before == '_');
+}
+
 fn textOf(arena: std.mem.Allocator, value: database.Value) ![]const u8 {
     return switch (value) {
         .null => "",

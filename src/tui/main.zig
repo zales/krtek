@@ -103,8 +103,9 @@ pub fn main(init: std.process.Init) !void {
         for (keys.items) |key| {
             input.handle(&app, key, size) catch |err| {
                 // What the engine said, if it said anything: "Driver" on the status
-                // line tells nobody anything.
-                const said = app.conn.message();
+                // line tells nobody anything. Only where there is an engine to have
+                // said it: with nothing open there is no driver to ask.
+                const said = if (app.connected) app.conn.message() else "";
                 if (said.len != 0) {
                     app.complain("{s}", .{said});
                 } else {

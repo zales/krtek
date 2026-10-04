@@ -215,13 +215,20 @@ Open what is under the cursor; in the object list, the table.
 .B s
 Write SQL.
 .BR ctrl+s " runs it, " ctrl+p " walks the history."
+The editor has vi's two modes: it opens in insert mode,
+.B esc
+is normal mode, where
+.BR dd ", " cw ", " yy ", " p ", " u " and " ctrl+r
+are what they are in vi and
+.B enter
+runs the statement.
 .TP
 .B S
 The structure of the table: columns, indexes, foreign keys.
 .TP
 .B i
 Insert a row.
-.BR e " edits the one under the cursor, " d " deletes it."
+.BR e " edits the one under the cursor, " x " deletes it."
 .TP
 .B W
 Filter the rows.
@@ -236,11 +243,26 @@ reads it once,
 .B :follow
 sets how often, and turning a page stops it.
 .TP
-.B C
+.B y
 Copy: then
-.BR c " for the cell, " r " for the row, " p " for the page as CSV, " s
+.BR c " for the cell, " y " for the row, " p " for the page as CSV, " s
 for the last statement. It goes through OSC 52, so it reaches the clipboard over
 ssh and inside tmux.
+.TP
+.B g
+The key in front of several others:
+.BR gg " is the first row, " gt " and " gT " the next and the previous tab,"
+and what a letter did before it was given to vi is on
+.B g
+and that letter -
+.BR gv " the whole value, " gm " the messages, " gb " the database information."
+The footer lists the rest.
+.TP
+.B ctrl+t
+A new tab.
+.BR t
+on a saved connection opens it in one,
+.BR ] " and " [ " move between them and " alt+w " closes the one in front."
 .TP
 .B ctrl+c
 Give up on a statement that is taking too long. The connection stays usable.

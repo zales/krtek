@@ -39,6 +39,7 @@ pub const Mouse = struct {
 pub const Key = union(enum) {
     char: u21,
     ctrl: u8, // the letter, lower case
+    alt: u8, // alt/option + key
     enter,
     tab,
     back_tab,
@@ -365,8 +366,11 @@ pub const Term = struct {
 
     /// Where the terminal's own cursor sits, or nowhere while nothing is typed.
     /// A blinking bar, because it only ever appears where text is being typed.
-    pub fn cursorAt(self: *Term, row: usize, col: usize) void {
-        self.window.setCursorShape(.beam_blink);
+    /// Show the cursor at a cell: a beam where something is being typed, which is
+    /// between two characters, and a block where it is on one - the editor's
+    /// normal mode, whose commands are about the character under it.
+    pub fn cursorAt(self: *Term, row: usize, col: usize, on_a_character: bool) void {
+        self.window.setCursorShape(if (on_a_character) .block else .beam_blink);
         self.window.showCursor(
             @intCast(@min(col, @as(usize, self.window.width -| 1))),
             @intCast(@min(row, @as(usize, self.window.height -| 1))),
@@ -654,6 +658,20 @@ pub const Term = struct {
         }
         if (key.mods.ctrl and key.codepoint >= 'a' and key.codepoint <= 'z') {
             return .{ .ctrl = @intCast(key.codepoint) };
+        }
+        if (key.mods.alt) {
+            // A digit by where the key is rather than by what the layout puts on
+            // it. A Czech keyboard has `+` and `ě` where 1 and 2 are and the
+            // digits themselves only with shift, so alt and the key marked 1 is
+            // alt and `+` there - unless the terminal says which key it was, and
+            // one that speaks the kitty protocol does.
+            const placed = key.base_layout_codepoint orelse key.codepoint;
+            if (placed >= '0' and placed <= '9') {
+                return .{ .alt = @intCast(placed) };
+            }
+            if (key.codepoint >= 'a' and key.codepoint <= 'z') {
+                return .{ .alt = @intCast(key.codepoint) };
+            }
         }
         return switch (key.codepoint) {
             K.enter, K.kp_enter => .enter,

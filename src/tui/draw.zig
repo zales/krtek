@@ -92,14 +92,11 @@ fn cursorAndFlush(app: *App, size: Size) !void {
             std.unicode.utf8CountCodepoints(prompt.buffer.items) catch prompt.buffer.items.len
         else
             term.width(prompt.buffer.items);
-        screen.cursorAt(size.rows - 1, term.width(prompt.label) + typed);
-    } else if (app.typing.editor) |*editor| {
-        // In the editor the cursor is where the typing happens, inside the panel.
-        const at = editor.position();
-        const side: usize = app_mod.sidebarWidth(size.cols);
-        screen.cursorAt(2 + (at.line - editor.scroll), side + 2 + 5 + at.column);
+        screen.cursorAt(size.rows - 1, term.width(prompt.label) + typed, false);
     } else if (app.typing.cursor) |spot| {
-        screen.cursorAt(spot.row, spot.col);
+        // A form's field, the palette's query, or the editor's text: whichever of
+        // them drew itself said where the typing is.
+        screen.cursorAt(spot.row, spot.col, spot.block);
     } else {
         screen.cursorOff();
     }
@@ -297,12 +294,27 @@ fn header(app: *App, size: Size) void {
     screen.style(.{ .bg = C.bar, .fg = C.text, .bold = true });
     var used: usize = 0;
     used += write(app, " krtek ", size.cols);
-    screen.style(.{ .bg = C.bar, .fg = C.accent });
-    used += write(app, if (app.connected) app.conn.describe() else "", size.cols - used);
+
+    if (app.tabCount() > 1) {
+        var strip = TabStrip.init(app, size.cols);
+        while (strip.next()) |piece| {
+            const front = if (piece.tab) |index| index == app.active_tab else false;
+            screen.style(.{
+                .bg = if (front) C.selected else C.bar,
+                .fg = if (front) C.accent else if (piece.tab == null) C.faint else C.dim,
+                .bold = front,
+            });
+            used += write(app, piece.text, size.cols -| used);
+        }
+    } else {
+        screen.style(.{ .bg = C.bar, .fg = C.accent });
+        used += write(app, if (app.connected) app.conn.describe() else "", size.cols - used);
+    }
+
     // Beside the name of the connection, because that is what it is about - and
     // in the colour that means "mind this", since the rest of the screen says so
     // only by the keys it stops offering.
-    if (app.connected and app.saved.read_only) {
+    if (app.connected and app.read_only) {
         screen.style(.{ .bg = C.bar, .fg = C.warn, .bold = true });
         used += write(app, "  read-only", size.cols -| used);
     }
@@ -321,6 +333,74 @@ fn header(app: *App, size: Size) void {
     }
     screen.reset();
 }
+
+/// The tabs along the top line: which of them there is room for, what each one
+/// says and where it is.
+///
+/// Here rather than written out twice, because the drawing and the mouse have
+/// to agree about it - the same reason the connection list's first row is a
+/// constant. Both walk this, so a click lands on the tab that was drawn there
+/// however many there are and however narrow the window is.
+pub const TabStrip = struct {
+    app: *App,
+    /// How much of its title a tab shows. They all get the same, and less each
+    /// as there are more of them.
+    room: usize,
+    index: usize,
+    /// One past the last tab there is room for.
+    last: usize,
+    x: usize = NAME.len,
+    added: bool = false,
+    text: [128]u8 = undefined,
+
+    const NAME = " krtek ";
+    const PLUS = " [+] ";
+    /// The widest a title gets, and the narrowest before tabs are left out.
+    const WIDEST = 20;
+    const NARROWEST = 4;
+
+    pub const Piece = struct {
+        /// Which tab this is, or null for the `[+]` that opens another.
+        tab: ?usize,
+        text: []const u8,
+        from: usize,
+        width: usize,
+    };
+
+    pub fn init(app: *App, cols: usize) TabStrip {
+        const count = app.tabCount();
+        // What is to the right of the tabs - the version and the count of
+        // objects - keeps its place, as it did when there was only a name here.
+        const span = cols -| 24 -| NAME.len -| PLUS.len;
+        // A space, the number, a colon and a space in front of the title and a
+        // space after it.
+        const around: usize = if (count > 9) 6 else 5;
+        var room: usize = WIDEST;
+        while (room > NARROWEST and count * (around + room) > span) {
+            room -= 1;
+        }
+        // Still too many: as many as fit, and the one in front is one of them.
+        const fit = @max(1, span / (around + room));
+        const first = if (app.active_tab >= fit) app.active_tab + 1 - fit else 0;
+        return .{ .app = app, .room = room, .index = first, .last = @min(count, first + fit) };
+    }
+
+    pub fn next(self: *TabStrip) ?Piece {
+        if (self.index < self.last) {
+            const title = term.fit(self.app.tabTitle(self.index), self.room).text;
+            const text = std.fmt.bufPrint(&self.text, " {d}: {s} ", .{ self.index + 1, title }) catch " ? ";
+            const piece = Piece{ .tab = self.index, .text = text, .from = self.x, .width = term.width(text) };
+            self.index += 1;
+            self.x += piece.width;
+            return piece;
+        }
+        if (self.added) {
+            return null;
+        }
+        self.added = true;
+        return .{ .tab = null, .text = PLUS, .from = self.x, .width = PLUS.len };
+    }
+};
 
 /// Whether the object at `n` is the first of its group among what is visible.
 /// The filter can hide the one that used to start a group, so this is asked of
@@ -457,6 +537,9 @@ fn sidebar(app: *App, width: usize, rows: usize) void {
         screen.reset();
         screen.clearToEol();
     }
+    // How many there was room for, which the keys that go to the middle and the
+    // bottom of the screen cannot work out without the headings.
+    app.sidebar.shown = n - app.sidebar.scroll;
     // Blank the rest of the sidebar.
     while (line < rows + 1) : (line += 1) {
         screen.moveTo(line, 0);
@@ -614,6 +697,7 @@ fn grid(app: *App, size: Size, side: usize, rows: usize) void {
 
     // Rows.
     const list_rows = if (rows > 2) rows - 2 else 1;
+    app.cursor.page = list_rows;
     if (app.cursor.row < app.cursor.row_scroll) {
         app.cursor.row_scroll = app.cursor.row;
     }
@@ -1017,39 +1101,50 @@ pub const HELP = [_][2][]const u8{
     .{ "ctrl+k ctrl+p", "command palette: search every action" },
     .{ "", "MOVING" },
     .{ "arrows hjkl", "list and grid" },
+    .{ "w b 0 $", "next, previous, first, last column" },
     .{ "tab", "sidebar / grid" },
-    .{ "g G", "first, last row" },
+    .{ "gg G", "first, last row" },
+    .{ "H M L", "top, middle, bottom of the screen" },
+    .{ "zt zz zb", "this row to the top, middle, bottom" },
     .{ "n p", "next, previous page" },
+    .{ ":12 :$", "row 12 of the page, the last one" },
+    .{ "ma 'a", "leave a mark here, go back to it" },
     .{ "/", "filter the object list" },
     .{ "d t", "data of the selected table" },
     .{ "S", "structure" },
-    .{ "b L", "database info, relations" },
-    .{ "m", "report of the last batch" },
+    .{ "gb gL", "database info, relations" },
+    .{ "gm", "report of the last batch" },
     .{ "r", "reload" },
     .{ "R", "follow: read it again, staying at the end" },
     .{ "q ctrl+c", "quit" },
+    .{ "", "TABS" },
+    .{ "ctrl+t", "a new tab; t on a saved connection opens it in one" },
+    .{ "] [ gt gT", "next, previous tab" },
+    .{ "alt+1..9 g1..9", "a tab by its number" },
+    .{ "alt+w ctrl+w q", "close this tab" },
+    .{ "ctrl+w o", "close the others" },
     .{ "", "ROWS" },
     .{ "enter", "open the row: a form, or a screen about it" },
-    .{ "v", "show the whole value; arrows scroll a long one" },
+    .{ "gv", "show the whole value; arrows scroll a long one" },
     .{ "e", "edit the cell, NULL clears it" },
-    .{ "i y", "insert, clone a row" },
-    .{ "space", "mark a row" },
+    .{ "i gy", "insert, clone a row" },
+    .{ "space v", "mark a row" },
     .{ "x", "delete the marked rows" },
     .{ "o", "order by this column" },
-    .{ "w W", "visible columns, filter" },
+    .{ "gw W", "visible columns, filter" },
     .{ "", "SCHEMA" },
     .{ "c a", "create, alter a table" },
     .{ "I K", "index, foreign key" },
-    .{ "V T", "view, trigger" },
+    .{ "gV T", "view, trigger" },
     .{ "N Y", "rename, copy a table" },
     .{ "D X", "drop, empty" },
     .{ "", "DATA" },
     .{ "s", "the editor: SQL where there is SQL, the engine's own commands where there is not" },
     .{ "F", "search every table" },
-    .{ "E M", "export, import" },
-    .{ "C c r p s", "copy value, row, page, last SQL" },
+    .{ "E gM", "export, import" },
+    .{ "y  y c p s", "copy the row, value, page, last SQL" },
     .{ "O #", "connections, schema or namespace" },
-    .{ ":", "export dump limit text follow open check" },
+    .{ ":", "export dump limit text follow open check w e set tabnew q" },
     .{ "", "FILES: SFTP, S3, AZURE" },
     .{ "f", "the two panes: here and the connection" },
     .{ "tab", "the other pane: where a copy goes" },
@@ -1058,9 +1153,17 @@ pub const HELP = [_][2][]const u8{
     .{ "space", "mark, and unmark" },
     .{ "c", "copy over, directories and all" },
     .{ "n r x", "new directory, rename, remove" },
-    .{ "", "IN THE SQL EDITOR" },
-    .{ "ctrl+s", "run it" },
-    .{ "tab", "complete a name" },
+    .{ "", "IN THE EDITOR" },
+    .{ "esc", "normal mode; once more puts the editor away, keeping what is in it" },
+    .{ "i a o O", "type again: here, after, on a new line below, above" },
+    .{ "hjkl w b e", "by a character, a line, a word" },
+    .{ "0 ^ $ gg G", "the ends of the line, and of the text" },
+    .{ "x dd dw D", "cut a character, the line, a word, the rest of the line" },
+    .{ "s cc cw C", "the same, and type in its place" },
+    .{ "yy p P", "yank the line, put it below, above" },
+    .{ "u ctrl+r", "take a change back, put it back" },
+    .{ "ctrl+s :w", "run it - and enter does, in normal mode" },
+    .{ "tab", "complete a name; after `o.` the columns of what o is" },
     .{ "ctrl+p ctrl+n", "earlier, later statement" },
     .{ "ctrl+w ctrl+u", "take back a word, everything" },
     .{ "", "IN A FORM" },
@@ -1446,8 +1549,7 @@ fn palettePanel(app: *App, size: Size, rows: usize) void {
         });
         screen.style(.{ .bg = if (here) C.selected else C.bar, .fg = C.faint });
         // The key, right where the eye ends up, so it is learned in passing.
-        var shortcut: [16]u8 = undefined;
-        const name = keyName(&shortcut, action.key);
+        const name = action.keys;
         const gap = width -| span -| term.width(name) -| 4;
         fill(app, ' ', gap);
         span += gap;
@@ -1503,16 +1605,6 @@ fn writeMatched(app: *App, text: []const u8, hit: fuzzy.Hit, max: usize, base: t
     return used;
 }
 
-/// How a key is written in the palette.
-fn keyName(buffer: []u8, key: u21) []const u8 {
-    if (key == ' ') {
-        return "space";
-    }
-    var encoded: [4]u8 = undefined;
-    const len = std.unicode.utf8Encode(key, &encoded) catch return "";
-    return std.fmt.bufPrint(buffer, "{s}", .{encoded[0..len]}) catch "";
-}
-
 fn status(app: *App, size: Size) void {
     const screen = app.screen;
     screen.moveTo(size.rows - 2, 0);
@@ -1556,8 +1648,20 @@ fn promptLine(app: *App, size: Size) void {
 fn footerHints(app: *App) []const u8 {
     if (app.typing.prefix) |pending| {
         return switch (pending) {
-            'C' => " c the value   r the row   p the page as CSV   s the last SQL   esc nothing",
-            else => " esc cancels",
+            'y' => " y the row   c the value   p the page as CSV   s the last SQL   esc nothing",
+            // What `g` goes to, and what the letters after it did on their own
+            // before they were given to vi. Ten things do not fit in eighty
+            // columns, and the two that go are the two vi already taught.
+            'g' => fitted(
+                app,
+                " g top   t T tabs   v value   w columns   y clone   m messages   b info   L relations   M import   V view",
+                " v value  w columns  y clone  m messages  b info  L relations  M import  V view",
+            ),
+            'z' => " t this row to the top   z the middle   b the bottom   esc nothing",
+            'm' => " a-z leaves that mark on this row   esc nothing",
+            '\'' => " a-z goes back to that mark   esc nothing",
+            0x17 => " h list   l grid   w the other   q close tab   o close others   t new tab",
+            else => " esc nothing",
         };
     }
     if (app.detail) {
@@ -1566,8 +1670,11 @@ fn footerHints(app: *App) []const u8 {
         else
             " esc closes the value   ctrl+k commands";
     }
-    if (app.typing.editor != null) {
-        return " ctrl+s runs   tab completes   ctrl+p earlier   ctrl+w word back   esc closes";
+    if (app.typing.editor) |ed| {
+        return switch (ed.mode) {
+            .normal => " -- NORMAL --  i insert  o line  dd cut line  u undo  enter runs  esc closes",
+            .insert => " -- INSERT --  esc normal mode  tab completes  ctrl+s runs  ctrl+p earlier",
+        };
     }
     if (app.typing.form != null) {
         // Not the palette here: in a form ctrl+k removes a row.
@@ -1611,21 +1718,32 @@ fn footerHints(app: *App) []const u8 {
         return out.items;
     }
     return switch (app.view) {
-        .connections => " enter connect   / filter   a add   e edit   d remove   r read-only   q quit",
+        .connections => fitted(
+            app,
+            " enter connect   t in a new tab   / filter   a add   e edit   d remove   r read-only   q quit",
+            " enter connect   t new tab   / filter   a add   e edit   d remove   r read-only",
+        ),
         .structure => if (app.caps().no_ddl.len == 0)
             " a alter   I index   K key   N rename   S data   ctrl+k commands"
         else
             " S data   ctrl+k commands",
 
-        .messages => " m back   s sql   r reload   ctrl+k commands",
+        .messages => " gm back   s sql   r reload   ctrl+k commands",
         // Handled above, from what the engine said can be done.
         .object => " esc back",
         .help => " ? back   ctrl+k commands",
-        .info => " b back   ctrl+k commands",
-        .relations => " L back   d browse   ctrl+k commands",
+        .info => " gb back   ctrl+k commands",
+        .relations => " gL back   d browse   ctrl+k commands",
         .files => " tab other pane   enter opens   c copy   space mark   n mkdir   r rename   x remove   q back",
         .grid => rowHints(app),
     };
+}
+
+/// The longer way of saying it where the terminal has room for it. A hint that
+/// is cut off is worse than one that says less: what goes missing is whatever
+/// was at the end, and that is where quitting and the palette are.
+fn fitted(app: *App, long: []const u8, short: []const u8) []const u8 {
+    return if (term.width(long) <= app.screen.size().cols) long else short;
 }
 
 /// What to press on a row, less whatever this engine will not do. A hint for
@@ -1636,11 +1754,11 @@ fn footerHints(app: *App) []const u8 {
 fn rowHints(app: *App) []const u8 {
     const caps = app.caps();
     if (caps.no_insert.len == 0 and caps.no_update.len == 0 and caps.no_delete.len == 0 and app.files == null) {
-        return " i insert   e edit   x delete   o sort   v whole value   space mark   ctrl+k commands";
+        return " i insert   e edit   x delete   o sort   gv value   space mark   ctrl+k commands";
     }
     var out: std.ArrayListUnmanaged(u8) = .empty;
     const arena = app.screen.frame.allocator();
-    const fallback = " o sort   v whole value   space mark   ctrl+k commands";
+    const fallback = " o sort   gv value   space mark   ctrl+k commands";
     // One space in front, three between, however many of them there turn out to be.
     if (app.files != null) {
         addHint(arena, &out, "f the two panes");
@@ -1655,7 +1773,7 @@ fn rowHints(app: *App) []const u8 {
         addHint(arena, &out, "x delete");
     }
     addHint(arena, &out, "o sort");
-    addHint(arena, &out, "v whole value");
+    addHint(arena, &out, "gv value");
     addHint(arena, &out, "space mark");
     addHint(arena, &out, "ctrl+k commands");
     return if (out.items.len == 0) fallback else out.items;
@@ -1750,10 +1868,30 @@ fn editorPanel(app: *App, size: Size, side: usize, rows: usize) void {
     const caps = app.caps();
     var named: [64]u8 = undefined;
     const container = app.conn.sessionIn();
+    const mode_label = switch (editor.mode) {
+        .normal => " [NORMAL]",
+        .insert => " [INSERT]",
+    };
     const title = if (container.len != 0)
         (std.fmt.bufPrint(&named, "sh in {s} - EXIT closes it", .{container}) catch "sh")
-    else if (caps.speaks_sql) "SQL" else if (caps.label.len != 0) caps.label else "command";
+    else if (caps.speaks_sql)
+        (std.fmt.bufPrint(&named, "SQL{s}", .{mode_label}) catch "SQL")
+    else if (caps.label.len != 0)
+        (std.fmt.bufPrint(&named, "{s}{s}", .{ caps.label, mode_label }) catch caps.label)
+    else
+        (std.fmt.bufPrint(&named, "command{s}", .{mode_label}) catch "command");
     box(app, top, outer_left, outer_width, height, title, "", C.accent);
+
+    // The cursor is where the typing happens, inside the panel - wherever the
+    // panel is, which under a shell is the bottom of the screen and not the top.
+    // In columns as drawn: the editor counts bytes, and a letter with an accent is
+    // two of those and one column.
+    const cursor_column = term.width(editor.lineAt(at.line)[0..at.column]);
+    app.typing.cursor = .{
+        .row = top + 1 + (at.line - editor.scroll),
+        .col = left + gutter + cursor_column,
+        .block = editor.mode == .normal,
+    };
 
     // The completion list, hanging under the word being completed.
     if (editor.completing()) {
@@ -1763,7 +1901,7 @@ fn editorPanel(app: *App, size: Size, side: usize, rows: usize) void {
         for (editor.candidates.items[0..count]) |name| {
             widest = @max(widest, term.width(name) + 4);
         }
-        const list_left: usize = @min(left + gutter + at.column, size.cols -| widest -| 2);
+        const list_left: usize = @min(left + gutter + cursor_column, size.cols -| widest -| 2);
         var n: usize = 0;
         while (n < count) : (n += 1) {
             const name = editor.candidates.items[n];
@@ -2377,11 +2515,4 @@ test "a password is dots, and as many of them as it has characters" {
     try testing.expect(mask(&tiny, "velmi dlouhe heslo", 40).len <= tiny.len);
     // And nothing of the password itself comes back.
     try testing.expect(std.mem.indexOf(u8, mask(&buffer, "hunter2", 20), "hunter2") == null);
-}
-
-test "a key is written the way the palette shows it" {
-    var buffer: [8]u8 = undefined;
-    try testing.expectEqualStrings("space", keyName(&buffer, ' '));
-    try testing.expectEqualStrings("a", keyName(&buffer, 'a'));
-    try testing.expectEqualStrings("č", keyName(&buffer, 'č'));
 }

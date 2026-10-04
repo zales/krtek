@@ -193,7 +193,7 @@ says how to put something in it.
 **It fits the terminal it is in.** It asks whether the background is light or
 dark and colours itself accordingly, and follows a theme switch while
 running; `KRTEK_THEME=light` or `=dark` settles it by hand. Copying goes through
-OSC 52, so `C` then `c`, `r`, `p` or `s` puts the value, the row, the page as CSV
+OSC 52, so `y` then `c`, `y`, `p` or `s` puts the value, the row, the page as CSV
 or the last statement in the system clipboard - over ssh and inside tmux too,
 because there is no local clipboard involved. Where the terminal can draw images
 (Kitty, Ghostty, WezTerm), an image BLOB is shown as the image; everywhere else,
@@ -291,7 +291,7 @@ its type allows - a string as it is, a list or set as its elements, a hash as
 or `PERSIST`, deleting a row writes `DEL`. Filtering the key with `W` becomes the
 `MATCH` pattern of the scan, `%` and `_` translated to `*` and `?`.
 
-There is no DDL: `c`, `a`, `I`, `K`, `V` and `T` answer with the reason instead of
+There is no DDL: `c`, `a`, `I`, `K`, `gV` and `T` answer with the reason instead of
 writing SQL that could not work, and `D` is `FLUSHDB`. Searching every table is
 refused, because there is only one. **The SQL editor is a Redis console** - `KEYS
 user:*`, `HGETALL cart:7`, `INFO memory`, `TTL greeting` - and that is where
@@ -863,6 +863,25 @@ copyright file says.
 
 Everything is reachable from the key map, which `?` prints in full.
 
+**The keys are vi's, wherever vi has one for the thing.** `hjkl` and `w` `b` move,
+`gg` and `G` are the ends, `H` `M` `L` the top, middle and bottom of the screen
+and `zt` `zz` `zb` put the row under the cursor there; `y` yanks, `m` and a
+letter leaves a mark and `'` and the letter goes back to it, `:12` is a row and
+`:$` the last one. Eight letters meant something else here before they meant
+that, and each of those things is on `g` and the letter it used to be: `gv` the
+whole value, `gm` the messages, `gb` the database information, `gL` the
+relations, `gw` the visible columns, `gy` cloning a row, `gM` importing, `gV`
+creating a view. Press `g` and the footer lists them.
+
+**Tabs.** A connection is a tab, and there can be several: `ctrl+t` opens an empty
+one, `t` on a saved connection opens it in one, `:tabnew <target>` opens anything
+by name. `]` `[` or `gt` `gT` move between them, `alt+1` to `alt+9` go to one by
+number, a click does the same, and `alt+w` or `:tabclose` closes the one in front.
+Each keeps its own table, cursor, filter, marks, editor and what it was
+following. A tab is called what its connection is called rather than what table
+is open in it, because two tabs are usually two databases and the same table is
+in both.
+
 **Getting in.** A list of saved connections with the engine and target of each,
 added and edited in a form; a password prompt that echoes nothing when the server
 wants one.
@@ -881,14 +900,14 @@ PostgreSQL - and a list of every relation.
 box - plus quick in-place editing of a single cell, row marking, and deletion of
 everything marked.
 
-`v` opens the value on its own, and scrolls where there is more of it than
+`gv` opens the value on its own, and scrolls where there is more of it than
 fits - arrows, `pgup`/`pgdn`, `home`/`end`. It counts lines as drawn rather than
 as stored, because a line longer than the box wraps, and a scroll that counted
 the stored ones would jump over the wrapped half of one.
 
 **A cell is one line in the grid and the whole value everywhere else.** A value
 with newlines in it would tear the grid apart, so the grid gets a flattened copy
-- but `v`, the clipboard and a CSV export get what the engine actually returned.
+- but `gv`, the clipboard and a CSV export get what the engine actually returned.
 A Redis `INFO` is one cell of eighty lines, and it used to arrive as one
 unbroken paragraph in the value view and as eighty lines' worth of spaces in an
 export, in a format whose quotes exist to carry newlines. The second copy is
@@ -918,7 +937,20 @@ colour, `tab` completing table and column names from a list under the cursor,
 one on its own, search across every text column of every table, export as an SQL
 dump (whole database or one table, structure and/or data) or CSV/TSV, and import
 of an SQL script or a CSV file. Commands: `:export`, `:dump`, `:limit`, `:text`,
-`:open`, `:check`, `:analyze`, `:vacuum`, `:follow`, `:q`.
+`:open`, `:check`, `:analyze`, `:vacuum`, `:follow`, `:w`, `:e`, `:set`, the
+`:tab` ones and `:q` - which leaves the editor, then the tab, and the program
+only when there is nothing else left to leave.
+
+The editor has vi's two modes. It opens in insert mode, where a key is the
+character on it; `esc` is normal mode, where `dd`, `cw`, `yy`, `p`, `o` and the
+rest are what they are in vi, `u` takes a change back and `ctrl+r` puts it back,
+and `enter` runs the statement. `esc` once more puts the editor away - and what
+was in it is there again the next time it opens, because `esc` twice is how
+anybody makes sure of being in normal mode and that cannot be what loses a
+statement. Completion knows what a statement calls its tables: after
+`from orders o`, `o.` and `tab` lists the columns of `orders`, with a schema in
+front of the table or without, and after `join` the tables a foreign key leads
+to come first.
 
 A batch reports each statement separately, and one that leaves a transaction
 open is rolled back. A generated schema change
@@ -1182,11 +1214,13 @@ with `psql` doing the same.
   key or unique index over NOT NULL columns. A view, a PostgreSQL table without a
   key, and anything joined are read-only. PostgreSQL's `ctid` is deliberately not
   used as a key, because it moves on UPDATE.
-* **The editor has no undo and no selection.** It is meant for writing a
-  statement, not for editing prose: `ctrl+w` takes back a word, `ctrl+u` the lot.
-* **Completion offers names, not structure.** Table names, the columns of the
-  table on screen, and SQL's own words - it does not know which table a column
-  belongs to, so it cannot narrow `t.` down to that table's columns.
+* **The editor has no selection.** It is meant for writing a statement, not for
+  editing prose: there is no visual mode, a count in front of a command is not
+  read, and `.` does not repeat one. In the grid `v` marks a row, as `space` does.
+* **Completion reads a statement without parsing it.** It finds the tables named
+  after `FROM`, `JOIN`, `UPDATE` and `INTO` and what each is called, which is
+  enough to turn `o.` into the columns of `orders`. It does not follow a CTE or
+  a subquery to the columns that come out of it.
 * **A long statement blocks the interface** while it runs, apart from the spinner
   and `ctrl+c`: the engine is called synchronously, and keys that arrive while it
   is running are dropped rather than queued.

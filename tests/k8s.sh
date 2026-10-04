@@ -342,7 +342,7 @@ if command -v helm >/dev/null 2>&1; then
 	}
 	echo "ok: helm releases are read out of the secrets helm keeps them in"
 else
-	out=$(python3 tests/screen.py "$ROOT" 's' 'GET releases' '{ctrl-s}' '{sleep}' 'm' '{sleep}' '{keep}' 2>&1)
+	out=$(python3 tests/screen.py "$ROOT" 's' 'GET releases' '{ctrl-s}' '{sleep}' 'gm' '{sleep}' '{keep}' 2>&1)
 	printf '%s' "$out" | grep -qi "statement(s) failed" && fail "GET releases should answer even where there is nothing to list"
 	echo "ok: helm releases answer on a cluster with none (no helm to install one)"
 fi
@@ -430,7 +430,7 @@ echo "ok: CLUSTER says what the cluster is and what is spoken for"
 # not - k3s is started without metrics-server above - so what is checked is that
 # it says so rather than answering zero, which is the difference between "idle"
 # and "nobody is measuring".
-out=$(python3 tests/screen.py "$ROOT" 's' 'TOP nodes' '{ctrl-s}' '{sleep}' 'm' '{sleep}' '{keep}' 2>&1)
+out=$(python3 tests/screen.py "$ROOT" 's' 'TOP nodes' '{ctrl-s}' '{sleep}' 'gm' '{sleep}' '{keep}' 2>&1)
 printf '%s' "$out" | grep -q "no metrics-server" || {
 	printf '%s\n' "$out" >&2
 	fail "TOP on a cluster without metrics-server should say so"
@@ -501,7 +501,7 @@ echo "ok: EXEC -t hands the terminal over for something full screen"
 # along the bottom says how many failed and offers the details, and the details
 # are where the name is. This check used to read the bottom line and had not
 # been run since it stopped being there.
-missing=$(python3 tests/screen.py "$ROOT" 's' 'EXEC nosuchpod' '{ctrl-s}' '{sleep}' 'm' '{sleep}' '{keep}' 2>&1)
+missing=$(python3 tests/screen.py "$ROOT" 's' 'EXEC nosuchpod' '{ctrl-s}' '{sleep}' 'gm' '{sleep}' '{keep}' 2>&1)
 printf '%s' "$missing" | grep -qi "nosuchpod" || {
 	printf '%s\n' "$missing" >&2
 	fail "EXEC on a missing pod should name it"

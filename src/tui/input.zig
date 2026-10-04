@@ -37,11 +37,16 @@ pub fn handle(app: *App, key: Key, size: term.Size) !void {
         return;
     }
     if (app.palette != null) {
-        try onPalette(app, key, size);
+        try onPalette(app, key);
         return;
     }
     if (app.typing.editor != null) {
         try onEditor(app, key);
+        return;
+    }
+    // The tabs are above every screen, so the keys and the clicks that change
+    // them are taken before any one screen gets to mean something else by them.
+    if (try aboutTabs(app, key, size)) {
         return;
     }
     if (app.typing.prefix) |pending| {
@@ -51,6 +56,28 @@ pub fn handle(app: *App, key: Key, size: term.Size) !void {
     }
     if (app.view == .connections) {
         try onConnections(app, key);
+        return;
+    }
+    // Nothing is open, and this is not the list of what could be: it is the key
+    // map, which is the one other screen there is to be on. Everything further
+    // down asks the connection something, so none of it is reached from here.
+    if (!app.connected) {
+        if (app.view == .help and scrollHelp(app, key)) {
+            return;
+        }
+        switch (key) {
+            .ctrl => |code| if (code == 'c') {
+                app.quit = true;
+            },
+            .escape => app.view = .connections,
+            .char => |point| switch (point) {
+                'q' => app.quit = true,
+                '?' => app.view = .connections,
+                ':' => try ask(app, .command, " :"),
+                else => {},
+            },
+            else => {},
+        }
         return;
     }
     if (app.view == .files) {
@@ -97,9 +124,12 @@ pub fn handle(app: *App, key: Key, size: term.Size) !void {
     switch (key) {
         .ctrl => |code| switch (code) {
             'c' => app.quit = true,
-            'd' => try movePage(app, 1),
-            'u' => try movePage(app, -1),
+            't' => try app.newTab(null),
+            'w' => app.typing.prefix = WINDOW,
+            'd', 'f' => try movePage(app, 1),
+            'u', 'b' => try movePage(app, -1),
             'k', 'p' => try openPalette(app),
+            'r' => try app.reload(),
             else => {},
         },
         .mouse => |mouse| try click(app, mouse, size),
@@ -134,22 +164,110 @@ pub fn handle(app: *App, key: Key, size: term.Size) !void {
             }
         },
         .enter => try open(app),
-        .char => |point| try letter(app, point, size),
+        .char => |point| try letter(app, point),
         else => {},
     }
 }
 
-/// The mouse: the wheel scrolls whichever pane it is over, a click puts the
-/// cursor where it landed. The layout has to be recomputed here, because the
-/// drawing code is the only other place that knows it.
-/// The welcome screen: a short list of keys, and the mouse works too.
+/// `ctrl+w`, waiting for the key after it: the prefix vi uses for windows.
+const WINDOW: u21 = 0x17;
+
+/// The keys and the clicks that are about the tabs themselves, whatever screen
+/// is under them. True when the key was one of them.
+fn aboutTabs(app: *App, key: Key, size: term.Size) !bool {
+    switch (key) {
+        .alt => |code| switch (code) {
+            '1'...'9' => app.selectTab(code - '1'),
+            't' => try app.newTab(null),
+            'w' => if (app.tabCount() > 1) {
+                app.closeTab(app.active_tab);
+            },
+            else => return false,
+        },
+        .mouse => |mouse| {
+            if (mouse.row != 0 or mouse.button != .left or app.tabCount() < 2) {
+                return false;
+            }
+            // Where each tab is, is the drawing's to say: this walks the same
+            // strip it drew, so a click lands on what was under it.
+            var strip = draw.TabStrip.init(app, size.cols);
+            while (strip.next()) |piece| {
+                if (mouse.col < piece.from or mouse.col >= piece.from + piece.width) {
+                    continue;
+                }
+                if (piece.tab) |index| {
+                    app.selectTab(index);
+                } else {
+                    try app.newTab(null);
+                }
+                break;
+            }
+        },
+        else => return false,
+    }
+    return true;
+}
+
+/// What can be done, apart from moving about. A key does one of these and so
+/// does a line of the palette, and both of them say which by naming it here -
+/// the palette used to press the action's key instead, so giving a key a new
+/// meaning quietly gave every action on that key the new meaning too.
+pub const Does = enum {
+    browse,
+    structure,
+    editor,
+    search,
+    filter_objects,
+    filter_rows,
+    columns,
+    sort,
+    reload,
+    follow,
+    insert,
+    edit,
+    clone,
+    delete,
+    mark,
+    whole_value,
+    create_table,
+    alter_table,
+    index,
+    foreign_key,
+    view,
+    trigger,
+    rename,
+    copy_table,
+    truncate,
+    drop,
+    export_rows,
+    yank,
+    import,
+    info,
+    relations,
+    schema,
+    connections,
+    new_tab,
+    next_tab,
+    prev_tab,
+    files,
+    messages,
+    help,
+    command,
+    quit,
+};
+
 /// Everything the app can do, with the key that does it. A key map has to be
 /// remembered; this can be searched, so nothing is only discoverable by reading
 /// the help. `needs` is the pane an action belongs to, and the palette moves
 /// there before running it, so choosing "insert a row" from the object list does
 /// what it says.
 pub const Action = struct {
-    key: u21,
+    /// How it is typed, written the way the palette shows it: one key, `g` and a
+    /// second one, or a name like `space` and `ctrl+t` for the keys that have no
+    /// letter. A key pressed in the grid is looked up here, so what the palette
+    /// says and what the key does are the same line.
+    keys: []const u8,
+    does: Does,
     label: []const u8,
     /// Words to match on besides the label.
     also: []const u8 = "",
@@ -209,46 +327,74 @@ pub fn offered(action: Action, caps: database.Caps, has_files: bool) bool {
     };
 }
 
+/// The single letters are vi's wherever vi has one for the thing: `y` yanks,
+/// `m` marks, `w` and `b` move by a column, `H` `M` `L` go to the top, middle
+/// and bottom of the screen. What those letters did here before is on `g` and
+/// the letter it used to be - `gm` for the messages `m` opened, `gv` for the
+/// value `v` showed - which is one rule to remember rather than eight new keys.
 pub const actions = [_]Action{
-    .{ .key = 'd', .label = "browse the selected table", .also = "data rows open select", .needs = .sidebar },
-    .{ .key = 'S', .label = "structure of the table", .also = "columns indexes keys schema create" },
-    .{ .key = 's', .label = "write and run SQL", .plain = "write and run a command", .also = "query editor statement console" },
-    .{ .key = 'F', .label = "search every table", .also = "find text grep", .wants = .sql },
-    .{ .key = '/', .label = "filter the object list", .also = "search find tables" },
-    .{ .key = 'W', .label = "filter the rows", .also = "where condition" },
-    .{ .key = 'w', .label = "choose visible columns", .also = "hide show" },
-    .{ .key = 'o', .label = "sort by this column", .also = "order asc desc" },
-    .{ .key = 'r', .label = "reload", .also = "refresh again" },
-    .{ .key = 'R', .label = "follow the table", .also = "auto reload refresh tail watch live new rows messages kafka" },
-    .{ .key = 'i', .label = "insert a row", .also = "new add", .needs = .main, .wants = .inserting },
-    .{ .key = 'e', .label = "edit the row", .also = "change update", .needs = .main, .wants = .editing },
-    .{ .key = 'y', .label = "clone the row", .also = "copy duplicate", .needs = .main, .wants = .inserting },
-    .{ .key = 'x', .label = "delete the marked rows", .also = "remove", .needs = .main, .wants = .deleting },
-    .{ .key = ' ', .label = "mark the row", .also = "select tick", .needs = .main },
-    .{ .key = 'v', .label = "show the whole value", .also = "detail full text", .needs = .main },
-    .{ .key = 'c', .label = "create a table", .also = "new", .wants = .ddl },
-    .{ .key = 'a', .label = "alter the table", .also = "change columns modify", .wants = .ddl },
-    .{ .key = 'I', .label = "add an index", .also = "unique primary key", .wants = .relations },
-    .{ .key = 'K', .label = "add a foreign key", .also = "reference relation", .wants = .relations },
-    .{ .key = 'V', .label = "create a view", .also = "new", .wants = .relations },
-    .{ .key = 'T', .label = "create a trigger", .also = "new", .wants = .relations },
-    .{ .key = 'N', .label = "rename the table", .also = "move", .wants = .ddl },
-    .{ .key = 'Y', .label = "copy the table", .also = "duplicate", .wants = .ddl },
-    .{ .key = 'X', .label = "empty the table", .also = "truncate delete all", .wants = .ddl },
-    .{ .key = 'D', .label = "drop the table", .also = "delete remove", .wants = .ddl },
-    .{ .key = 'E', .label = "export", .also = "dump sql csv save" },
-    .{ .key = 'C', .label = "copy to the clipboard", .also = "yank value row page csv sql" },
-    .{ .key = 'M', .label = "import", .also = "load sql csv file", .wants = .inserting },
-    .{ .key = 'b', .label = "database information", .also = "settings pragmas size version" },
-    .{ .key = 'L', .label = "list every relation", .also = "objects tables views indexes" },
-    .{ .key = '#', .label = "switch schema", .also = "namespace search path", .wants = .schemas },
-    .{ .key = 'O', .label = "connections", .also = "open connect database server saved" },
-    .{ .key = 'f', .label = "browse the files", .also = "copy upload download transfer sftp s3 azure manager", .wants = .files },
-    .{ .key = 'm', .label = "messages", .also = "log reports errors" },
-    .{ .key = '?', .label = "help: the whole key map", .also = "keys shortcuts" },
-    .{ .key = ':', .label = "a command", .also = "limit text vacuum analyze check" },
-    .{ .key = 'q', .label = "quit", .also = "exit close" },
+    .{ .keys = "d", .does = .browse, .label = "browse the selected table", .also = "data rows open select", .needs = .sidebar },
+    .{ .keys = "S", .does = .structure, .label = "structure of the table", .also = "columns indexes keys schema create" },
+    .{ .keys = "s", .does = .editor, .label = "write and run SQL", .plain = "write and run a command", .also = "query editor statement console" },
+    .{ .keys = "F", .does = .search, .label = "search every table", .also = "find text grep", .wants = .sql },
+    .{ .keys = "/", .does = .filter_objects, .label = "filter the object list", .also = "search find tables" },
+    .{ .keys = "W", .does = .filter_rows, .label = "filter the rows", .also = "where condition" },
+    .{ .keys = "gw", .does = .columns, .label = "choose visible columns", .also = "hide show" },
+    .{ .keys = "o", .does = .sort, .label = "sort by this column", .also = "order asc desc" },
+    .{ .keys = "r", .does = .reload, .label = "reload", .also = "refresh again" },
+    .{ .keys = "R", .does = .follow, .label = "follow the table", .also = "auto reload refresh tail watch live new rows messages kafka" },
+    .{ .keys = "i", .does = .insert, .label = "insert a row", .also = "new add", .needs = .main, .wants = .inserting },
+    .{ .keys = "e", .does = .edit, .label = "edit the row", .also = "change update", .needs = .main, .wants = .editing },
+    .{ .keys = "gy", .does = .clone, .label = "clone the row", .also = "copy duplicate", .needs = .main, .wants = .inserting },
+    .{ .keys = "x", .does = .delete, .label = "delete the marked rows", .also = "remove", .needs = .main, .wants = .deleting },
+    .{ .keys = "space", .does = .mark, .label = "mark the row", .also = "select tick visual v", .needs = .main },
+    .{ .keys = "gv", .does = .whole_value, .label = "show the whole value", .also = "detail full text", .needs = .main },
+    .{ .keys = "c", .does = .create_table, .label = "create a table", .also = "new", .wants = .ddl },
+    .{ .keys = "a", .does = .alter_table, .label = "alter the table", .also = "change columns modify", .wants = .ddl },
+    .{ .keys = "I", .does = .index, .label = "add an index", .also = "unique primary key", .wants = .relations },
+    .{ .keys = "K", .does = .foreign_key, .label = "add a foreign key", .also = "reference relation", .wants = .relations },
+    .{ .keys = "gV", .does = .view, .label = "create a view", .also = "new", .wants = .relations },
+    .{ .keys = "T", .does = .trigger, .label = "create a trigger", .also = "new", .wants = .relations },
+    .{ .keys = "N", .does = .rename, .label = "rename the table", .also = "move", .wants = .ddl },
+    .{ .keys = "Y", .does = .copy_table, .label = "copy the table", .also = "duplicate", .wants = .ddl },
+    .{ .keys = "X", .does = .truncate, .label = "empty the table", .also = "truncate delete all", .wants = .ddl },
+    .{ .keys = "D", .does = .drop, .label = "drop the table", .also = "delete remove", .wants = .ddl },
+    .{ .keys = "E", .does = .export_rows, .label = "export", .also = "dump sql csv save" },
+    .{ .keys = "y", .does = .yank, .label = "copy to the clipboard", .also = "yank value row page csv sql" },
+    .{ .keys = "gM", .does = .import, .label = "import", .also = "load sql csv file", .wants = .inserting },
+    .{ .keys = "gb", .does = .info, .label = "database information", .also = "settings pragmas size version" },
+    .{ .keys = "gL", .does = .relations, .label = "list every relation", .also = "objects tables views indexes" },
+    .{ .keys = "#", .does = .schema, .label = "switch schema", .also = "namespace search path", .wants = .schemas },
+    .{ .keys = "O", .does = .connections, .label = "connections", .also = "open connect database server saved" },
+    .{ .keys = "ctrl+t", .does = .new_tab, .label = "new tab", .also = "create open workspace tabnew" },
+    .{ .keys = "]", .does = .next_tab, .label = "next tab", .also = "switch forward gt tabnext" },
+    .{ .keys = "[", .does = .prev_tab, .label = "previous tab", .also = "switch back gT tabprev" },
+    .{ .keys = "f", .does = .files, .label = "browse the files", .also = "copy upload download transfer sftp s3 azure manager", .wants = .files },
+    .{ .keys = "gm", .does = .messages, .label = "messages", .also = "log reports errors" },
+    .{ .keys = "?", .does = .help, .label = "help: the whole key map", .also = "keys shortcuts" },
+    .{ .keys = ":", .does = .command, .label = "a command", .also = "limit text vacuum analyze check" },
+    .{ .keys = "q", .does = .quit, .label = "quit", .also = "exit close" },
 };
+
+/// The action a key, or two, belongs to.
+fn actionTyped(keys: []const u8) ?Action {
+    for (actions) |action| {
+        if (std.mem.eql(u8, action.keys, keys)) {
+            return action;
+        }
+    }
+    return null;
+}
+
+/// The action that does this. There is exactly one, which a test holds it to.
+pub fn actionThat(does: Does) Action {
+    for (actions) |action| {
+        if (action.does == does) {
+            return action;
+        }
+    }
+    unreachable;
+}
 
 /// How well `action` answers what has been typed, or null if it does not. Every
 /// word has to be found somewhere - in the label or in the extra words - and a
@@ -324,6 +470,11 @@ test "the palette finds an action by a few letters of it" {
     var found: [actions.len]usize = undefined;
     try std.testing.expect(paletteMatches("", &found) == actions.len);
 
+    // What a key used to do is still found by saying what it is.
+    for ([_][]const u8{ "whole value", "visible columns", "clone", "import", "messages", "database info", "create a view", "every relation" }) |wanted| {
+        try std.testing.expect(paletteMatches(wanted, &found) >= 1);
+    }
+
     // Words, in any order, matched as text rather than scattered letters.
     var count = paletteMatches("dro tab", &found);
     try std.testing.expect(count >= 1);
@@ -347,89 +498,283 @@ test "the palette finds an action by a few letters of it" {
     try std.testing.expect(paletteMatches("zzz", &found) == 0);
 }
 
-/// Keys while the SQL editor is open. Everything that is not a command inserts
-/// itself, which is what makes it an editor rather than a prompt.
+/// Keys while the editor is open. It has vi's two modes: in insert mode a key
+/// is the character on it, which is what makes this an editor rather than a
+/// prompt, and in normal mode it is a command.
 fn onEditor(app: *App, key: Key) !void {
+    switch (key) {
+        // Escape and a key, arriving together. A terminal that does not speak
+        // the kitty protocol - and tmux in front of any terminal - sends alt+j as
+        // escape followed by j, so escape followed quickly by j is read as alt+j.
+        // In an editor with modes that pair is typed all day, so it is taken
+        // apart again: dropping it loses both keys, and the mode with them.
+        .alt => |code| switch (code) {
+            // Except with a digit. A digit means nothing after escape here - no
+            // command takes a count - so the two together can only have been alt,
+            // and alt and a digit is the tab with that number: the editor stays
+            // as it is, in the tab it is in, and the other one comes forward.
+            '1'...'9' => app.selectTab(code - '1'),
+            else => {
+                try editorKey(app, .escape);
+                if (app.typing.editor != null) {
+                    try editorKey(app, .{ .char = code });
+                }
+            },
+        },
+        else => try editorKey(app, key),
+    }
+}
+
+fn editorKey(app: *App, key: Key) !void {
     const editor = &app.typing.editor.?;
+
+    // The completion list, while it is open, takes the keys that move in it. Any
+    // other key closes it and then means what it always means.
+    if (editor.completing()) {
+        switch (key) {
+            .tab, .down => return editor.nextCandidate(1),
+            .back_tab, .up => return editor.nextCandidate(-1),
+            .enter => return editor.take(editor.candidate_at),
+            .escape => return editor.closeCompletion(),
+            else => editor.closeCompletion(),
+        }
+    }
+
+    if (editor.mode == .insert) {
+        switch (key) {
+            .escape => editor.leaveInsert(),
+            .ctrl => |code| switch (code) {
+                's' => try app.runEditor(),
+                'c' => editor.leaveInsert(),
+                'u' => editor.clear(),
+                'w' => editor.deleteWord(),
+                'p' => try app.editorHistory(-1),
+                'n' => try app.editorHistory(1),
+                'a' => editor.home(),
+                'e' => editor.end(),
+                else => {},
+            },
+            .tab => try app.completeInEditor(),
+            .enter => try editor.insert("\n"),
+            .backspace => editor.backspace(),
+            .delete => editor.delete(),
+            .left => editor.left(),
+            .right => editor.right(),
+            .up => editor.up(),
+            .down => editor.down(),
+            .home => editor.home(),
+            .end => editor.end(),
+            .char => |point| {
+                var buf: [4]u8 = undefined;
+                const len = std.unicode.utf8Encode(point, &buf) catch return;
+                try editor.insert(buf[0..len]);
+            },
+            else => {},
+        }
+        return;
+    }
+
+    // Normal mode. A command half typed - a `d` waiting to hear what to delete -
+    // is abandoned by anything that is not its second key, rather than left to
+    // take the next letter typed after an arrow key or a page of scrolling.
+    if (key != .char and key != .escape) {
+        editor.pending_op = null;
+    }
     switch (key) {
         .ctrl => |code| switch (code) {
             's' => try app.runEditor(),
             'c' => app.closeEditor(),
-            'u' => editor.clear(),
-            'w' => editor.deleteWord(),
-            'p' => try app.editorHistory(-1),
-            'n' => try app.editorHistory(1),
-            'a' => editor.home(),
-            'e' => editor.end(),
+            'd' => {
+                var steps: usize = 0;
+                while (steps < 10) : (steps += 1) editor.down();
+            },
+            'u' => {
+                var steps: usize = 0;
+                while (steps < 10) : (steps += 1) editor.up();
+            },
+            'r' => editor.redo(),
             else => {},
         },
         .escape => {
-            // The completion list is what escape closes first, if it is open.
-            if (editor.completing()) {
-                editor.closeCompletion();
+            // A command half typed is what escape abandons first. With none, it
+            // puts the editor away - and what was in it is kept for the next time
+            // it opens, because escape twice is how anybody makes sure of being in
+            // normal mode and that cannot be what loses a statement.
+            if (editor.pending_op != null) {
+                editor.pending_op = null;
             } else {
                 app.closeEditor();
             }
         },
-        .tab => {
-            if (editor.completing()) {
-                editor.nextCandidate(1);
-            } else {
-                try app.completeInEditor();
+        .enter => try app.runEditor(),
+        .char => |point| {
+            if (editor.pending_op) |op| {
+                editor.pending_op = null;
+                switch (op) {
+                    'd' => switch (point) {
+                        'd' => editor.deleteLine(),
+                        'w' => editor.deleteWordForward(),
+                        '$' => editor.deleteToEndOfLine(),
+                        else => {},
+                    },
+                    'y' => switch (point) {
+                        'y' => editor.yankLine(),
+                        else => {},
+                    },
+                    'c' => switch (point) {
+                        'c' => editor.changeLine(),
+                        'w' => editor.changeWord(),
+                        '$' => editor.changeToEndOfLine(),
+                        else => {},
+                    },
+                    'g' => switch (point) {
+                        'g' => editor.top(),
+                        else => {},
+                    },
+                    else => {},
+                }
+                return;
+            }
+
+            switch (point) {
+                'i' => editor.enterInsert(),
+                'a' => editor.append(),
+                'I' => {
+                    editor.firstNonBlank();
+                    editor.enterInsert();
+                },
+                'A' => {
+                    editor.end();
+                    editor.enterInsert();
+                },
+                'o' => editor.openBelow(),
+                'O' => editor.openAbove(),
+                'x' => editor.deleteChar(),
+                'D' => editor.deleteToEndOfLine(),
+                'C' => editor.changeToEndOfLine(),
+                's' => editor.substitute(),
+                'h' => editor.leftOnLine(),
+                'l' => editor.rightOnLine(),
+                'j' => editor.down(),
+                'k' => editor.up(),
+                'w' => editor.wordForward(),
+                'b' => editor.wordBackward(),
+                'e' => editor.wordEnd(),
+                '0' => editor.home(),
+                '^' => editor.firstNonBlank(),
+                '$' => editor.end(),
+                'G' => editor.bottom(),
+                'u' => editor.undo(),
+                'p' => editor.pasteBelow(),
+                'P' => editor.pasteAbove(),
+                'd', 'y', 'c', 'g' => editor.pending_op = @intCast(point),
+                ':' => try ask(app, .command, " :"),
+                else => {},
             }
         },
-        .back_tab => editor.nextCandidate(-1),
-        .enter => {
-            if (editor.completing()) {
-                try editor.take(editor.candidate_at);
-            } else {
-                try editor.insert("\n");
-            }
-        },
-        .backspace => editor.backspace(),
-        .delete => editor.delete(),
         .left => editor.left(),
         .right => editor.right(),
-        .up => if (editor.completing()) editor.nextCandidate(-1) else editor.up(),
-        .down => if (editor.completing()) editor.nextCandidate(1) else editor.down(),
+        .up => editor.up(),
+        .down => editor.down(),
         .home => editor.home(),
         .end => editor.end(),
-        .page_up, .page_down => {},
-        .char => |point| {
-            var buf: [4]u8 = undefined;
-            const len = std.unicode.utf8Encode(point, &buf) catch return;
-            try editor.insert(buf[0..len]);
+        else => {},
+    }
+}
+
+/// The second key of a two-key sequence. The footer lists what it can be, and
+/// anything that is not on the list abandons the sequence - which is what
+/// escape is for.
+fn afterPrefix(app: *App, pending: u21, key: Key) !void {
+    const point: u21 = switch (key) {
+        .char => |typed| typed,
+        // `z` and enter is vi's own spelling of `zt`.
+        .enter => if (pending == 'z') 't' else return,
+        .left => if (pending == WINDOW) 'h' else return,
+        .right => if (pending == WINDOW) 'l' else return,
+        .ctrl => |code| if (pending == WINDOW and code == 'w') 'w' else return,
+        else => {
+            if (pending == 'y') {
+                app.say("nothing copied", .{});
+            }
+            return;
+        },
+    };
+    switch (pending) {
+        'y' => switch (point) {
+            'c' => try dump_mod.copyCell(app),
+            'r', 'y' => try dump_mod.copyRow(app),
+            'p' => try dump_mod.copyPage(app),
+            's' => try app.copyLastSql(),
+            else => app.say("nothing copied", .{}),
+        },
+        'g' => switch (point) {
+            'g' => {
+                if (app.focus == .sidebar) {
+                    app.sidebar.selected = 0;
+                } else {
+                    app.cursor.row = 0;
+                }
+            },
+            't' => app.nextTab(),
+            'T' => app.prevTab(),
+            '1'...'9' => app.selectTab(point - '1'),
+            // And what the letters did before vi's meanings took them: `gm` is
+            // the messages `m` used to open. They are in the table of actions
+            // like everything else that can be done.
+            else => {
+                var typed: [5]u8 = undefined;
+                typed[0] = 'g';
+                const len = std.unicode.utf8Encode(point, typed[1..]) catch return;
+                if (actionTyped(typed[0 .. 1 + len])) |action| {
+                    try perform(app, action.does);
+                }
+            },
+        },
+        'z' => {
+            // Where on the screen the row under the cursor should be. The page
+            // is the grid's own count of its rows, not the terminal's: those
+            // differ by the lines above and below it.
+            const page = @max(1, app.cursor.page);
+            switch (point) {
+                't' => app.cursor.row_scroll = app.cursor.row,
+                'z', '.' => app.cursor.row_scroll = app.cursor.row -| (page / 2),
+                'b', '-' => app.cursor.row_scroll = app.cursor.row -| (page - 1),
+                else => {},
+            }
+        },
+        'm' => if (point >= 'a' and point <= 'z') {
+            app.setMark(@intCast(point));
+        },
+        '\'' => if (point >= 'a' and point <= 'z') {
+            try app.jumpMark(@intCast(point));
+        },
+        WINDOW => switch (point) {
+            'h' => app.focus = .sidebar,
+            'l' => app.focus = .main,
+            'w' => app.focus = if (app.focus == .sidebar) .main else .sidebar,
+            'q', 'c' => {
+                if (app.tabCount() > 1) {
+                    app.closeTab(app.active_tab);
+                } else if (app.view != .grid and app.connected) {
+                    app.view = .grid;
+                }
+            },
+            'o' => {
+                app.closeOtherTabs();
+                app.say("the other tabs are closed", .{});
+            },
+            't' => try app.newTab(null),
+            ']', 'n' => app.nextTab(),
+            '[', 'p' => app.prevTab(),
+            else => {},
         },
         else => {},
     }
 }
 
-/// The second key of a two-key sequence. Only `C` has one so far.
-fn afterPrefix(app: *App, pending: u21, key: Key) !void {
-    if (pending != 'C') {
-        return;
-    }
-    switch (key) {
-        .char => |point| switch (point) {
-            'c' => try dump_mod.copyCell(
-                app,
-            ),
-            'r' => try dump_mod.copyRow(
-                app,
-            ),
-            'p' => try dump_mod.copyPage(
-                app,
-            ),
-            's' => try app.copyLastSql(),
-            else => app.say("nothing copied", .{}),
-        },
-        // Anything else abandons the sequence, which is what escape is for.
-        else => app.say("nothing copied", .{}),
-    }
-}
-
 /// Keys while the palette is open.
-fn onPalette(app: *App, key: Key, size: term.Size) !void {
+fn onPalette(app: *App, key: Key) !void {
     const palette = &app.palette.?;
     var found: [actions.len]usize = undefined;
     const count = paletteFor(palette.query.items, if (app.connected) app.caps() else null, app.connected and app.conn.files() != null, &found);
@@ -479,7 +824,7 @@ fn onPalette(app: *App, key: Key, size: term.Size) !void {
                 }
                 app.focus = pane;
             }
-            try letter(app, action.key, size);
+            try perform(app, action.does);
         },
         .char => |point| {
             var buf: [4]u8 = undefined;
@@ -509,15 +854,24 @@ fn onConnections(app: *App, key: Key) !void {
     // What is on screen, which is not what is saved once a filter is on.
     const count = app.savedCount();
     switch (key) {
-        .ctrl => |code| if (code == 'c') {
-            app.quit = true;
+        .ctrl => |code| switch (code) {
+            'c' => app.quit = true,
+            't' => try app.newTab(null),
+            'w' => app.typing.prefix = WINDOW,
+            'd', 'f' => app.saved.at = @min(app.saved.at + app.saved.page(), count -| 1),
+            'u', 'b' => app.saved.at -|= app.saved.page(),
+            else => {},
         },
         .char => |point| switch (point) {
             'q' => app.quit = true,
+            't' => try app.connectSavedInNewTab(),
             'a' => try app.openConnectionForm(false),
             'e' => try app.openConnectionForm(true),
             'r' => try app.toggleReadOnly(),
             '/' => try ask(app, .filter, " /"),
+            ':' => try ask(app, .command, " :"),
+            ']' => app.nextTab(),
+            '[' => app.prevTab(),
             'd' => try app.forgetSaved(),
             'j' => if (count != 0 and app.saved.at + 1 < count) {
                 app.saved.at += 1;
@@ -527,6 +881,9 @@ fn onConnections(app: *App, key: Key) !void {
             },
             'g' => app.saved.at = 0,
             'G' => app.saved.at = count -| 1,
+            'H', '0', '^' => app.saved.at = 0,
+            'M' => app.saved.at = count / 2,
+            'L', '$' => app.saved.at = count -| 1,
             '?' => openHelp(app),
             else => {},
         },
@@ -570,6 +927,9 @@ fn onConnections(app: *App, key: Key) !void {
     }
 }
 
+/// The mouse: the wheel scrolls whichever pane it is over, a click puts the
+/// cursor where it landed. The layout has to be recomputed here, because the
+/// drawing code is the only other place that knows it.
 fn click(app: *App, mouse: term.Mouse, size: term.Size) !void {
     const side: usize = app_mod.sidebarWidth(size.cols);
     const in_sidebar = side != 0 and mouse.col < side;
@@ -689,51 +1049,129 @@ fn scrollHelp(app: *App, key: Key) bool {
     return true;
 }
 
-/// The keys that write a schema statement. They are refused together, because an
-/// engine that has no schema anybody writes has none of them - and each of these
-/// otherwise opens a form to be filled in before the engine says no.
-/// The keys that write the object itself.
-const SCHEMA_KEYS = [_]u21{ 'c', 'a', 'N', 'Y', 'X', 'D' };
-/// And the ones that write what hangs off it. Apart, because an engine can have
-/// the first without the second: a Kafka topic is created and dropped and has
-/// no indexes.
-const RELATION_KEYS = [_]u21{ 'I', 'K', 'V', 'T' };
-
-fn letter(app: *App, point: u21, size: term.Size) !void {
-    _ = size;
-    {
-        const allowed = app.caps();
-        const refused = if (std.mem.indexOfScalar(u21, &SCHEMA_KEYS, point) != null)
-            allowed.no_ddl
-        else if (std.mem.indexOfScalar(u21, &RELATION_KEYS, point) != null)
-            (if (allowed.no_ddl.len != 0) allowed.no_ddl else allowed.no_relations)
-        else
-            "";
-        if (refused.len != 0) {
-            app.complain("{s}", .{refused});
-            return;
-        }
+/// Do one of the things in the table of actions, whichever way it was asked
+/// for: by its key, or by its line in the palette.
+fn perform(app: *App, does: Does) !void {
+    // The ones that write a schema statement are refused together, because an
+    // engine that has no schema anybody writes has none of them - and each of
+    // these otherwise opens a form to be filled in before the engine says no.
+    // The ones that write what hangs off an object are apart, because an engine
+    // can have the first without the second: a Kafka topic is created and
+    // dropped and has no indexes.
+    const allowed = app.caps();
+    const refused = switch (actionThat(does).wants) {
+        .ddl => allowed.no_ddl,
+        .relations => if (allowed.no_ddl.len != 0) allowed.no_ddl else allowed.no_relations,
+        else => "",
+    };
+    if (refused.len != 0) {
+        app.complain("{s}", .{refused});
+        return;
     }
-    switch (point) {
-        'q' => app.quit = true,
-        '?' => if (app.view == .help) {
+    switch (does) {
+        .quit => app.quit = true,
+        .help => if (app.view == .help) {
             // Back to wherever the question was asked from, which is the file
             // manager when that is what is open.
-            app.view = if (app.files != null) .files else .grid;
+            app.view = if (app.files != null) .files else app.home();
         } else {
             openHelp(app);
         },
-        'j' => try move(app, 1),
-        'k' => try move(app, -1),
-        'h' => moveColumn(app, -1),
-        'l' => moveColumn(app, 1),
-        'g' => {
-            if (app.focus == .sidebar) {
-                app.sidebar.selected = 0;
-            } else {
-                app.cursor.row = 0;
+        .browse => {
+            app.view = .grid;
+            if (app.current()) |object| {
+                try app.openTable(object.name);
+                app.focus = .main;
             }
         },
+        .structure => {
+            if (!app.hasTable()) {
+                if (app.current()) |object| {
+                    try app.openTable(object.name);
+                }
+            }
+            app.view = .structure;
+        },
+        .messages => app.view = if (app.view == .messages) .grid else .messages,
+        .info => app.view = if (app.view == .info) .grid else .info,
+        .relations => app.view = if (app.view == .relations) .grid else .relations,
+        .connections => app.view = .connections,
+        .reload => {
+            try app.loadObjects();
+            try app.reload();
+            app.say("reloaded", .{});
+        },
+        .follow => try toggleFollow(app),
+        .sort => try sort(app),
+        .edit => try edit(app),
+        .whole_value => {
+            if (app.focus == .main and app.grid.rows.items.len > 0) {
+                app.detail = true;
+                // At the top of the value, not wherever the last one was left.
+                app.detail_at = 0;
+            }
+        },
+        .delete => try app.deleteRows(),
+        .mark => try app.toggleMark(),
+        .insert => try app.openRowForm(.insert),
+        .clone => try app.openRowForm(.clone),
+        .columns => try app.openColumnForm(),
+        .filter_rows => try app.openFilterForm(),
+        .filter_objects => try ask(app, .filter, " /"),
+        .editor => try app.openEditor(),
+        .command => try ask(app, .command, " :"),
+        .create_table => try app.openTableForm(false),
+        .alter_table => try app.openTableForm(true),
+        .index => try app.openIndexForm(),
+        .foreign_key => try app.openForeignKeyForm(),
+        .view => try app.openViewForm(),
+        .trigger => try app.openTriggerForm(),
+        .rename => try app.openRenameForm(),
+        .copy_table => try app.openCopyForm(),
+        .search => try app.openSearchForm(),
+        .export_rows => try dump_mod.openExportForm(
+            app,
+        ),
+        .import => try dump_mod.openImportForm(
+            app,
+        ),
+        .files => try app.openFiles(),
+        .schema => try app.openSchemaForm(),
+        .drop => try drop(app),
+        .truncate => try truncate(app),
+        .yank => {
+            app.typing.prefix = 'y';
+            app.say("copy: y the row   c the value   p the page as CSV   s the last SQL", .{});
+        },
+        .new_tab => try app.newTab(null),
+        .next_tab => app.nextTab(),
+        .prev_tab => app.prevTab(),
+    }
+}
+
+/// The keys that move about rather than do something, which is why they are
+/// not in the table of actions. A test holds the table to not taking one.
+pub const MOVING = "jkhlwbgGHML0^$npz'`mtvVC";
+
+/// A key in the grid or the object list. What it does is in the table of
+/// actions if it does anything; what is left moves the cursor, or waits for a
+/// second key.
+fn letter(app: *App, point: u21) !void {
+    var typed: [4]u8 = undefined;
+    const len = std.unicode.utf8Encode(point, &typed) catch return;
+    if (actionTyped(typed[0..len])) |action| {
+        return perform(app, action.does);
+    }
+    switch (point) {
+        // The same thing under a second key.
+        't' => try perform(app, .browse),
+        ' ', 'v', 'V' => try perform(app, .mark),
+        'C' => try perform(app, .yank),
+
+        'j' => try move(app, 1),
+        'k' => try move(app, -1),
+        'h', 'b' => moveColumn(app, -1),
+        'l', 'w' => moveColumn(app, 1),
         'G' => {
             if (app.focus == .sidebar) {
                 const count = app.visibleCount();
@@ -742,76 +1180,50 @@ fn letter(app: *App, point: u21, size: term.Size) !void {
                 app.cursor.row = if (app.grid.rows.items.len == 0) 0 else app.grid.rows.items.len - 1;
             }
         },
+        // The top, the middle and the bottom of what is on screen. How much that
+        // is, is what the drawing left behind: the grid's own rows, and however
+        // many objects the list had room for between its headings.
+        'H', 'M', 'L' => {
+            if (app.focus == .sidebar) {
+                const shown = @min(app.sidebar.shown, app.visibleCount() -| app.sidebar.scroll);
+                app.sidebar.selected = app.sidebar.scroll + onScreen(point, shown);
+            } else {
+                const shown = @min(app.cursor.page, app.grid.rows.items.len -| app.cursor.row_scroll);
+                app.cursor.row = app.cursor.row_scroll + onScreen(point, shown);
+            }
+        },
+        // The first and the last column, of the ones that are shown.
+        '0', '^' => if (app.focus == .main) {
+            var at: usize = 0;
+            while (at < app.grid.cols.items.len and app.isHidden(at)) : (at += 1) {}
+            if (at < app.grid.cols.items.len) {
+                app.cursor.col = at;
+                app.cursor.col_scroll = 0;
+            }
+        },
+        '$' => if (app.focus == .main) {
+            var at = app.grid.cols.items.len;
+            while (at > 0 and app.isHidden(at - 1)) : (at -= 1) {}
+            if (at > 0) {
+                app.cursor.col = at - 1;
+            }
+        },
         'n' => try movePage(app, 1),
         'p' => try movePage(app, -1),
-        '/' => try ask(app, .filter, " /"),
-        's' => try app.openEditor(),
-        ':' => try ask(app, .command, " :"),
-        'd', 't' => {
-            app.view = .grid;
-            if (app.current()) |object| {
-                try app.openTable(object.name);
-                app.focus = .main;
-            }
-        },
-        'S' => {
-            if (!app.hasTable()) {
-                if (app.current()) |object| {
-                    try app.openTable(object.name);
-                }
-            }
-            app.view = .structure;
-        },
-        'm' => app.view = if (app.view == .messages) .grid else .messages,
-        'r' => {
-            try app.loadObjects();
-            try app.reload();
-            app.say("reloaded", .{});
-        },
-        'R' => try toggleFollow(app),
-        'o' => try sort(app),
-        'e' => try edit(app),
-        'v' => {
-            if (app.focus == .main and app.grid.rows.items.len > 0) {
-                app.detail = true;
-                // At the top of the value, not wherever the last one was left.
-                app.detail_at = 0;
-            }
-        },
-        'x' => try app.deleteRows(),
-        ' ' => try app.toggleMark(),
-        'i' => try app.openRowForm(.insert),
-        'y' => try app.openRowForm(.clone),
-        'w' => try app.openColumnForm(),
-        'W' => try app.openFilterForm(),
-        'c' => try app.openTableForm(false),
-        'a' => try app.openTableForm(true),
-        'I' => try app.openIndexForm(),
-        'K' => try app.openForeignKeyForm(),
-        'V' => try app.openViewForm(),
-        'T' => try app.openTriggerForm(),
-        'N' => try app.openRenameForm(),
-        'Y' => try app.openCopyForm(),
-        'F' => try app.openSearchForm(),
-        'E' => try dump_mod.openExportForm(
-            app,
-        ),
-        'M' => try dump_mod.openImportForm(
-            app,
-        ),
-        'O' => app.view = .connections,
-        'f' => try app.openFiles(),
-        '#' => try app.openSchemaForm(),
-        'b' => app.view = if (app.view == .info) .grid else .info,
-        'L' => app.view = if (app.view == .relations) .grid else .relations,
-        'D' => try drop(app),
-        'X' => try truncate(app),
-        'C' => {
-            app.typing.prefix = 'C';
-            app.say("copy: c value   r row   p page as CSV   s last SQL", .{});
-        },
+        // And the keys that wait for another. The footer lists what it can be.
+        'g', 'z', 'm' => app.typing.prefix = point,
+        '\'', '`' => app.typing.prefix = '\'',
         else => {},
     }
+}
+
+/// How far down the screen `H`, `M` and `L` go, of `shown` lines.
+fn onScreen(key: u21, shown: usize) usize {
+    return switch (key) {
+        'M' => shown / 2,
+        'L' => shown -| 1,
+        else => 0,
+    };
 }
 
 fn move(app: *App, delta: i32) !void {

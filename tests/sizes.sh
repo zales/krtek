@@ -65,7 +65,7 @@ palette:db:{ctrl-k}|exp
 editor:db:s|select
 filter:db:{down}{enter}|W
 insert:db:{down}{enter}|i
-value:db:{down}{enter}|{right}|v
+value:db:{down}{enter}|{right}|gv
 connections:-:{sleep}
 filtered:-:/|krtek-07
 add:-:a

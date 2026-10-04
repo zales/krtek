@@ -253,9 +253,7 @@ test "an engine is not offered what it cannot do" {
 
 test "the editor is called what the engine would call it" {
     const input = @import("input.zig");
-    const editor = for (input.actions) |action| {
-        if (action.key == 's') break action;
-    } else unreachable;
+    const editor = input.actionThat(.editor);
     // The same key and the same panel everywhere - what it takes is that engine's
     // own commands - so it is offered everywhere, under the right name.
     try std.testing.expect(input.offered(editor, db.redis.Db.caps(undefined), false));
@@ -263,4 +261,123 @@ test "the editor is called what the engine would call it" {
     try std.testing.expectEqualStrings("write and run a command", input.labelFor(editor, db.redis.Db.caps(undefined)));
     // And with nothing open, the plain name is not guessed at.
     try std.testing.expectEqualStrings("write and run SQL", input.labelFor(editor, null));
+}
+
+test "alias extraction handles multiple syntax forms" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const ed = @import("editor.zig");
+
+    const sql1 = "SELECT a.name, b.title FROM authors a JOIN books b ON a.id = b.author_id";
+    const res1 = try ed.extractAliases(a, sql1);
+    try std.testing.expectEqual(@as(usize, 2), res1.len);
+    try std.testing.expectEqualStrings("a", res1[0].alias);
+    try std.testing.expectEqualStrings("authors", res1[0].table);
+    try std.testing.expectEqualStrings("b", res1[1].alias);
+    try std.testing.expectEqualStrings("books", res1[1].table);
+
+    const sql2 = "SELECT 1 FROM `orders` AS o, \"customers\" c WHERE o.cust_id = c.id";
+    const res2 = try ed.extractAliases(a, sql2);
+    try std.testing.expectEqual(@as(usize, 2), res2.len);
+    try std.testing.expectEqualStrings("o", res2[0].alias);
+    try std.testing.expectEqualStrings("orders", res2[0].table);
+    try std.testing.expectEqualStrings("c", res2[1].alias);
+    try std.testing.expectEqualStrings("customers", res2[1].table);
+}
+
+test "a tab gives back everything it holds" {
+    // Closing a tab used to be written out twice, and once more for quitting,
+    // and the three had stopped agreeing: one freed the file panes twice, one
+    // left the names in the object list behind, and none of them freed what a
+    // row filter was made of. There is one of it now, and the allocator this
+    // test runs on fails it for anything left behind or given back twice.
+    const a = std.testing.allocator;
+    var tab = app.Tab.init(a);
+
+    try tab.sidebar.objects.append(a, .{
+        .name = try a.dupe(u8, "authors"),
+        .group = try a.dupe(u8, "tables"),
+        .kind = try a.dupe(u8, "table"),
+        .rows = 5,
+    });
+    try tab.sidebar.filter.appendSlice(a, "auth");
+    tab.grid.name = try a.dupe(u8, "authors");
+    tab.grid.order = try a.dupe(u8, "name");
+    try tab.grid.schema.appendSlice(a, "public");
+    try tab.grid.title.appendSlice(a, "authors");
+    try tab.grid.where_text.appendSlice(a, "born > 1900");
+    try tab.grid.conditions.append(a, .{
+        .column = try a.dupe(u8, "born"),
+        .value = try a.dupe(u8, "1900"),
+    });
+    try tab.cursor.marked.append(a, 3);
+    try tab.cursor.hidden.append(a, 1);
+    tab.marks[0] = .{ .table = try a.dupe(u8, "authors"), .row = 2 };
+    tab.marks[25] = .{ .table = null, .row = 7 };
+    try tab.follow.statement.appendSlice(a, "select 1");
+    try tab.typing.pending.appendSlice(a, "drop table authors");
+    try tab.typing.draft.appendSlice(a, "select * from authors");
+    tab.typing.prompt = .{ .kind = .command, .label = " :" };
+    try tab.typing.prompt.?.buffer.appendSlice(a, "limit 10");
+    tab.typing.editor = @import("editor.zig").Editor.init(a);
+    try tab.typing.editor.?.insert("select 1");
+    try tab.report.status.appendSlice(a, "5 rows");
+    _ = try tab.arena.allocator().dupe(u8, "a page of rows");
+    _ = try tab.object.arena.allocator().dupe(u8, "what an opened row said");
+    tab.owned_path = try a.dupe(u8, "tests/sample.db");
+    tab.path = tab.owned_path;
+    // The two panes free themselves, which is what was done to them twice.
+    tab.files = try @import("files.zig").Manager.init(a, null);
+
+    tab.deinit(a);
+}
+
+test "every action has one line, one key and one way of being asked for" {
+    const input = @import("input.zig");
+    for (std.enums.values(input.Does)) |does| {
+        var lines: usize = 0;
+        for (input.actions) |action| {
+            lines += @intFromBool(action.does == does);
+        }
+        try std.testing.expectEqual(@as(usize, 1), lines);
+    }
+    for (input.actions, 0..) |action, i| {
+        try std.testing.expect(action.keys.len != 0);
+        for (input.actions[i + 1 ..]) |other| {
+            try std.testing.expect(!std.mem.eql(u8, action.keys, other.keys));
+        }
+        // A key that moves the cursor is not also one that does something: the
+        // table is asked first, so the action would win and the movement would
+        // quietly stop working.
+        if (action.keys.len == 1) {
+            try std.testing.expect(std.mem.indexOfScalar(u8, input.MOVING, action.keys[0]) == null);
+        }
+    }
+}
+
+test "what a key did before vi took it is behind g and that key" {
+    // `m` opened the messages, `v` the whole value, and so on for eight of
+    // them. Each of those letters means what it means in vi now, and each of
+    // those things is still one rule away.
+    const input = @import("input.zig");
+    const moved = [_]struct { does: input.Does, keys: []const u8 }{
+        .{ .does = .whole_value, .keys = "gv" },
+        .{ .does = .view, .keys = "gV" },
+        .{ .does = .columns, .keys = "gw" },
+        .{ .does = .info, .keys = "gb" },
+        .{ .does = .messages, .keys = "gm" },
+        .{ .does = .clone, .keys = "gy" },
+        .{ .does = .import, .keys = "gM" },
+        .{ .does = .relations, .keys = "gL" },
+    };
+    for (moved) |one| {
+        try std.testing.expectEqualStrings(one.keys, input.actionThat(one.does).keys);
+    }
+    // And the second key of `g` is not one `g` already has a use for.
+    for (input.actions) |action| {
+        if (action.keys.len == 2 and action.keys[0] == 'g') {
+            try std.testing.expect(std.mem.indexOfScalar(u8, "gtT123456789", action.keys[1]) == null);
+        }
+    }
 }
