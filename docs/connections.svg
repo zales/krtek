@@ -68,5 +68,5 @@
 <text x="778.4" y="261.3" fill="#8aa7f0" xml:space="preserve" textLength="8.4" lengthAdjust="spacing">│</text>
 <text x="81.2" y="279.3" fill="#8aa7f0" xml:space="preserve" textLength="705.6" lengthAdjust="spacing">╰──────────────────────────────────────────────────────────────────────────────────╯</text>
 <text x="14.0" y="297.3" fill="#71c68f" xml:space="preserve" textLength="487.2" lengthAdjust="spacing"> 9 saved connection(s) - enter connects, a adds, d removes</text>
-<text x="14.0" y="315.3" fill="#7c7c88" xml:space="preserve" textLength="840.0" lengthAdjust="spacing"> enter connect   / filter   a add   e edit   d remove   r read-only   q quit                        </text>
+<text x="14.0" y="315.3" fill="#7c7c88" xml:space="preserve" textLength="840.0" lengthAdjust="spacing"> enter connect   t in a new tab   / filter   a add   e edit   d remove   r read-only   q quit       </text>
 </svg>

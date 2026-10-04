@@ -44,8 +44,8 @@
 <text x="14.0" y="45.3" fill="#9a9aa6" xml:space="preserve" textLength="210.0" lengthAdjust="spacing"> TABLES &amp; VIEWS          </text>
 <text x="224.0" y="45.3" fill="#8aa7f0" xml:space="preserve" textLength="8.4" lengthAdjust="spacing">┃</text>
 <text x="240.8" y="45.3" fill="#8aa7f0" xml:space="preserve" textLength="16.8" lengthAdjust="spacing">╭─</text>
-<text x="257.6" y="45.3" fill="#8aa7f0" font-weight="600" xml:space="preserve" textLength="42.0" lengthAdjust="spacing"> SQL </text>
-<text x="299.6" y="45.3" fill="#8aa7f0" xml:space="preserve" textLength="546.0" lengthAdjust="spacing">────────────────────────────────────────────────────────────────╮</text>
+<text x="257.6" y="45.3" fill="#8aa7f0" font-weight="600" xml:space="preserve" textLength="117.6" lengthAdjust="spacing"> SQL [INSERT] </text>
+<text x="375.2" y="45.3" fill="#8aa7f0" xml:space="preserve" textLength="470.4" lengthAdjust="spacing">───────────────────────────────────────────────────────╮</text>
 <text x="14.0" y="63.3" fill="#8aa7f0" font-weight="600" xml:space="preserve" textLength="201.6" lengthAdjust="spacing"> ▪ authors              </text>
 <text x="215.6" y="63.3" fill="#9a9aa6" xml:space="preserve" textLength="8.4" lengthAdjust="spacing">4</text>
 <text x="224.0" y="63.3" fill="#8aa7f0" xml:space="preserve" textLength="8.4" lengthAdjust="spacing">┃</text>
@@ -100,5 +100,5 @@
 <text x="224.0" y="243.3" fill="#8aa7f0" xml:space="preserve" textLength="8.4" lengthAdjust="spacing">┃</text>
 <text x="224.0" y="261.3" fill="#8aa7f0" xml:space="preserve" textLength="8.4" lengthAdjust="spacing">┃</text>
 <text x="14.0" y="279.3" fill="#71c68f" xml:space="preserve" textLength="512.4" lengthAdjust="spacing"> several statements at once - each one is reported on its own</text>
-<text x="14.0" y="297.3" fill="#7c7c88" xml:space="preserve" textLength="840.0" lengthAdjust="spacing"> ctrl+s runs   tab completes   ctrl+p earlier   ctrl+w word back   esc closes                       </text>
+<text x="14.0" y="297.3" fill="#7c7c88" xml:space="preserve" textLength="840.0" lengthAdjust="spacing"> -- INSERT --  esc normal mode  tab completes  ctrl+s runs  ctrl+p earlier                          </text>
 </svg>

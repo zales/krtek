@@ -555,14 +555,28 @@ if [ -n "${SHOTS:-}" ]; then
 	kubectl -n payments create deployment billing --image=busybox:1.36 -- \
 		sh -c 'echo starting; echo cannot reach the ledger; exit 1' >/dev/null 2>&1 || true
 	printf 'waiting for something to be wrong with'
-	until kubectl -n payments get pods --no-headers 2>/dev/null | grep -q CrashLoopBackOff; do
+	# With this pod, not with any pod. `broken` has been failing since the top of
+	# this script, so waiting for a failure was over before it began - and the
+	# shot was of a list in which billing was still being created.
+	until kubectl -n payments get pods --no-headers 2>/dev/null |
+		grep '^billing' | grep -q 'CrashLoopBackOff\|Error'; do
 		printf .
 		sleep 3
 	done
 	echo " it"
+	# How far down the list it is comes from the list, for the reason the
+	# namespaces above do: the pods in front of it are however many the checks
+	# before this one left running, and three presses of `down` stopped being
+	# billing the day one of them scaled a deployment.
+	at=$(kubectl -n payments get pods --no-headers | awk '{print $1}' | LC_ALL=C sort |
+		grep -n '^billing' | cut -d: -f1 | head -1)
+	test -n "$at" || fail "billing should be in the list of pods"
+	down=""
+	i=1
+	while [ $i -lt "$at" ]; do down="$down{down}"; i=$((i + 1)); done
 	SHOT_COLS=104 SHOT_ROWS=14 python3 tests/shot.py docs/kubernetes.svg "$ROOT" '{tab}'
 	SHOT_COLS=104 SHOT_ROWS=26 python3 tests/shot.py docs/pod.svg "$ROOT" \
-		'{tab}' '{down}{down}{down}' '{enter}' '{wait}'
+		'{tab}' "$down" '{enter}' '{wait}'
 	echo "ok: docs/kubernetes.svg and docs/pod.svg regenerated"
 fi
 

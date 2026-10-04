@@ -13,7 +13,7 @@
 <rect x="14.0" y="248.0" width="487.7" height="18.0" fill="#26262c"/>
 <rect x="501.2" y="248.0" width="353.3" height="18.0" fill="#26262c"/>
 <text x="14.0" y="27.3" fill="#e0e0e6" font-weight="600" xml:space="preserve" textLength="58.8" lengthAdjust="spacing"> krtek </text>
-<text x="72.8" y="27.3" fill="#8aa7f0" xml:space="preserve" textLength="184.8" lengthAdjust="spacing">sa@127.0.0.1:1434/demo</text>
+<text x="72.8" y="27.3" fill="#8aa7f0" xml:space="preserve" textLength="184.8" lengthAdjust="spacing">sa@127.0.0.1:1433/demo</text>
 <text x="257.6" y="27.3" fill="#9a9aa6" xml:space="preserve" textLength="596.4" lengthAdjust="spacing">                           SQL Server 16.0.4265.3 Developer  3 objects </text>
 <text x="14.0" y="45.3" fill="#9a9aa6" xml:space="preserve" textLength="67.2" lengthAdjust="spacing"> SCHEMA </text>
 <text x="81.2" y="45.3" fill="#8aa7f0" xml:space="preserve" textLength="25.2" lengthAdjust="spacing">dbo</text>
@@ -66,6 +66,6 @@
 <text x="232.4" y="243.3" fill="#63a8d8" xml:space="preserve" textLength="33.6" lengthAdjust="spacing">  10</text>
 <text x="266.0" y="243.3" fill="#e0e0e6" xml:space="preserve" textLength="159.6" lengthAdjust="spacing"> ochranné brýle    </text>
 <text x="425.6" y="243.3" fill="#63a8d8" xml:space="preserve" textLength="201.6" lengthAdjust="spacing">  149.0000 12.00     130</text>
-<text x="14.0" y="261.3" fill="#71c68f" xml:space="preserve" textLength="487.2" lengthAdjust="spacing"> sa@127.0.0.1:1434/demo - SQL Server 16.0.4265.3 Developer</text>
-<text x="14.0" y="279.3" fill="#7c7c88" xml:space="preserve" textLength="840.0" lengthAdjust="spacing"> i insert   e edit   x delete   o sort   v whole value   space mark   ctrl+k commands               </text>
+<text x="14.0" y="261.3" fill="#71c68f" xml:space="preserve" textLength="487.2" lengthAdjust="spacing"> sa@127.0.0.1:1433/demo - SQL Server 16.0.4265.3 Developer</text>
+<text x="14.0" y="279.3" fill="#7c7c88" xml:space="preserve" textLength="840.0" lengthAdjust="spacing"> i insert   e edit   x delete   o sort   gv value   space mark   ctrl+k commands                    </text>
 </svg>
