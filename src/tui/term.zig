@@ -284,7 +284,25 @@ pub const Term = struct {
 
     /// Print at the cursor and advance it. Vaxis measures the text, so a wide or
     /// combining character moves the cursor by what it really occupies.
+    ///
+    /// Bytes that are not UTF-8 are drawn as U+FFFD, one a byte. Handed over as
+    /// they are, vaxis counted a broken sequence one way, the terminal drew it
+    /// another and `width` and `tail` counted a third, and whatever came after
+    /// them on the line moved by the difference. It is the drawing that changes,
+    /// not the value: the row form edits what it shows, and a value cleaned when
+    /// it was read would go back into the table with U+FFFD in it.
     pub fn put(self: *Term, bytes: []const u8) void {
+        if (std.unicode.utf8ValidateSlice(bytes)) {
+            return self.putWhole(bytes);
+        }
+        var pieces: Pieces = .{ .rest = bytes };
+        while (pieces.next()) |piece| {
+            self.putWhole(piece.drawn);
+        }
+    }
+
+    /// `put`, for text that is UTF-8.
+    fn putWhole(self: *Term, bytes: []const u8) void {
         if (bytes.len == 0 or self.row >= self.window.height) {
             return;
         }
@@ -812,8 +830,17 @@ pub const Term = struct {
 
 /// Columns a piece of text occupies, as vaxis measures it: grapheme clusters
 /// rather than codepoints, so an emoji built out of several of them counts once.
+/// Text that is not UTF-8 is measured the way `Term.put` draws it - see `Pieces`.
 pub fn width(text: []const u8) usize {
-    return vaxis.gwidth.gwidth(text, .unicode);
+    if (std.unicode.utf8ValidateSlice(text)) {
+        return vaxis.gwidth.gwidth(text, .unicode);
+    }
+    var total: usize = 0;
+    var pieces: Pieces = .{ .rest = text };
+    while (pieces.next()) |piece| {
+        total += vaxis.gwidth.gwidth(piece.drawn, .unicode);
+    }
+    return total;
 }
 
 pub fn charWidth(point: u21) u8 {
@@ -826,16 +853,30 @@ pub fn charWidth(point: u21) u8 {
 pub fn fit(text: []const u8, max: usize) struct { text: []const u8, cols: usize } {
     var total: usize = 0;
     var end: usize = 0;
-    // Grapheme clusters, so a cell is never cut in the middle of one.
-    var it = vaxis.unicode.GraphemeIterator.init(text);
-    while (it.next()) |cluster| {
-        const slice = cluster.bytes(text);
-        const w = width(slice);
+    // A grapheme cluster at a time, so a cell is never cut in the middle of one -
+    // and only as far as it fits, so a long value is not read to its end. A byte
+    // that is not UTF-8 is a column of its own, the U+FFFD `put` draws for it,
+    // rather than whatever vaxis would read it as. See `Pieces`.
+    while (end < text.len) {
+        const rest = text[end..];
+        var taken: usize = 1;
+        var w = width("\u{fffd}");
+        if (decode(rest) != null) {
+            var it = vaxis.unicode.GraphemeIterator.init(rest);
+            const cluster = it.next().?.bytes(rest);
+            // Vaxis reads a broken byte into the cluster in front of it; the
+            // cluster ends where the text stops being whole characters.
+            taken = 0;
+            while (taken < cluster.len) {
+                taken += (decode(rest[taken..]) orelse break).len;
+            }
+            w = width(rest[0..taken]);
+        }
         if (total + w > max) {
             break;
         }
         total += w;
-        end += slice.len;
+        end += taken;
     }
     return .{ .text = text[0..end], .cols = total };
 }
@@ -904,6 +945,39 @@ const Chars = struct {
         const char = decode(self.rest) orelse replacement;
         self.rest = self.rest[char.len..];
         return char.point;
+    }
+};
+
+/// Text cut where it stops being UTF-8, as it is drawn and measured: each run of
+/// whole characters as it is, and a U+FFFD for every byte that is not part of
+/// one, a byte at a time as `Chars` reads them. `Term.put`, `width` and `fit` all
+/// go through this, so the width a column is laid out with is the width drawn.
+const Pieces = struct {
+    rest: []const u8,
+
+    const Piece = struct {
+        /// What is drawn.
+        drawn: []const u8,
+        /// How many bytes of the text it stands for.
+        len: usize,
+    };
+
+    pub fn next(self: *Pieces) ?Piece {
+        if (self.rest.len == 0) {
+            return null;
+        }
+        var end: usize = 0;
+        while (end < self.rest.len) {
+            const char = decode(self.rest[end..]) orelse break;
+            end += char.len;
+        }
+        if (end == 0) {
+            self.rest = self.rest[1..];
+            return .{ .drawn = "\u{fffd}", .len = 1 };
+        }
+        const run = self.rest[0..end];
+        self.rest = self.rest[end..];
+        return .{ .drawn = run, .len = run.len };
     }
 };
 
@@ -1087,6 +1161,55 @@ test "a pasted line ends at a CR, an LF or a CRLF, whatever was typed between" {
         }
         try testing.expectEqualStrings(case.typed, got.items);
     }
+}
+
+test "text that is not UTF-8 is as wide as it is drawn, a U+FFFD a byte" {
+    // The two values KNOWN_ISSUES.md showed the line moving with, a broken start
+    // in front of a combining accent, which vaxis reads into one, and a
+    // character cut short at the end.
+    const values = [_][]const u8{
+        "\xc5\xbe\xc5\xbe\xc5\xbe\xbe\xbe\xbe\xbe\xbe\xff\xfe\xc0\xaf\xed\xa0\x80\xf4\x90\x80\x80",
+        "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\xc5\xbe\xc5\xbe\xbe\xbe\xbe\xbe\xff\xfe\xc0\xaf\xed\xa0\x80\xf4\x90\x80\x80\xf0\x9f\x98\xe2\x82",
+        "a\xe2e\xcc\x81b",
+        "日本\xe2\x82",
+    };
+    // Three ž, then sixteen bytes that are no character's: nineteen columns.
+    try testing.expectEqual(@as(usize, 19), width(values[0]));
+    for (values) |text| {
+        // What is drawn: the pieces, which together stand for every byte.
+        var drawn: std.ArrayList(u8) = .empty;
+        defer drawn.deinit(testing.allocator);
+        var pieces: Pieces = .{ .rest = text };
+        var stood_for: usize = 0;
+        while (pieces.next()) |piece| {
+            try drawn.appendSlice(testing.allocator, piece.drawn);
+            stood_for += piece.len;
+        }
+        try testing.expectEqual(text.len, stood_for);
+        try testing.expect(std.unicode.utf8ValidateSlice(drawn.items));
+        // As many U+FFFD as `Chars` reads the text with.
+        var wanted: usize = 0;
+        var points: Chars = .{ .rest = text };
+        while (points.next()) |point| {
+            wanted += @intFromBool(point == 0xfffd);
+        }
+        try testing.expectEqual(wanted, std.mem.count(u8, drawn.items, "\u{fffd}"));
+        // The width the layout counts is the width of what is drawn.
+        try testing.expectEqual(width(drawn.items), width(text));
+        // And cut to any width, the part that fits is as wide as it says, and
+        // ends where a character does.
+        for (0..width(text) + 2) |max| {
+            const part = fit(text, max);
+            try testing.expect(part.cols <= max);
+            try testing.expectEqual(width(part.text), part.cols);
+            try testing.expect(std.mem.startsWith(u8, text, part.text));
+        }
+        try testing.expectEqualStrings(text, fit(text, width(text)).text);
+    }
+    // Text that is UTF-8 is cut the way it always was.
+    try testing.expectEqualStrings("žlu", fit("žluťoučký", 3).text);
+    try testing.expectEqualStrings("日", fit("日本", 3).text);
+    try testing.expectEqualStrings("e\u{301}", fit("e\u{301}x", 1).text);
 }
 
 test "only a whole character decodes, from either end" {

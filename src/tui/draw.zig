@@ -2541,6 +2541,9 @@ test "the last columns of a value that is not UTF-8 are still the end of it" {
         var max: usize = 0;
         while (max <= 8) : (max += 1) {
             try testing.expect(std.mem.endsWith(u8, text, tail(text, max)));
+            // And no wider than asked, measured the way it is drawn: `tail`
+            // counted a column a broken byte while the drawing did not.
+            try testing.expect(term.width(tail(text, max)) <= max);
         }
     }
 }
