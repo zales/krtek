@@ -25,7 +25,7 @@ jobs:
           - arch: x86_64
             runner: macos-15-intel
     env:
-      PKG_CONFIG_PATH: /opt/homebrew/opt/libpq/lib/pkgconfig:/opt/homebrew/opt/mariadb-connector-c/lib/pkgconfig:/usr/local/opt/libpq/lib/pkgconfig:/usr/local/opt/mariadb-connector-c/lib/pkgconfig
+      PKG_CONFIG_PATH: /tmp/mariadb-static/lib/pkgconfig:/opt/homebrew/opt/libpq/lib/pkgconfig:/usr/local/opt/libpq/lib/pkgconfig
     steps:
       - uses: actions/checkout@v4
         with:
@@ -34,8 +34,16 @@ jobs:
         with:
           version: 0.17.0
 
-      - run: brew install pkgconf libpq mariadb-connector-c openssl@3 libssh2
+      - run: brew install pkgconf cmake libpq openssl@3 libssh2
       - run: ./fetch-sqlite.sh
+
+      # Not Homebrew's connector. Its archive can log in only the oldest way: every
+      # other is a plugin it loads at run time from Homebrew's own directory, which
+      # is on this runner and not on the machine of whoever downloads the release.
+      # MySQL 8 asks for one of those by default. So the connector is built here,
+      # with them inside it - see tests/connector.sh.
+      - name: the connector, with the ways of logging in inside it
+        run: ./tests/connector.sh
 
       # -Dcpu=baseline, or Zig builds for the CPU of the runner: GitHub's arm64
       # machines are Neoverse and emit SVE, which is an illegal instruction on
@@ -60,7 +68,7 @@ jobs:
         run: |
           zig build -Doptimize=safe -Dstatic -Dstrip -Dcpu=baseline \
             -Dversion="${{ inputs.tag || github.ref_name }}" \
-            -Dlibpq="$(brew --prefix libpq)" -Dmariadb="$(brew --prefix mariadb-connector-c)"
+            -Dlibpq="$(brew --prefix libpq)" -Dmariadb=/tmp/mariadb-static
 
       - name: nothing but the system is linked
         run: |
@@ -68,6 +76,17 @@ jobs:
           if grep -qE "libpq|mariadb|libssl|libcrypto|homebrew|/usr/local" links.txt; then
             echo "::error::a client library is still a runtime dependency"; exit 1
           fi
+
+      # A plugin left outside is a runtime dependency as well, and one that otool
+      # does not list. There is no server on a macOS runner to log in to, so the
+      # binary is asked for their names - which it only has when they are in it.
+      - name: and the ways of logging in are inside it
+        run: |
+          for plugin in caching_sha2_password sha256_password client_ed25519; do
+            strings -a zig-out/bin/krtek | grep -cx "$plugin" || {
+              echo "::error::$plugin would be loaded from a directory nobody else has"; exit 1
+            }
+          done
 
       - name: it says which version it is
         run: |

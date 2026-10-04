@@ -822,6 +822,17 @@ and Alpine, which has those, ships no archive for the MariaDB connector. So
 and is meant to run in an Alpine container - `docker run --rm -v "$PWD:/src" -w
 /src alpine:3.22 …`, which is what CI does.
 
+The connector is built from source for a Mac as well, though Homebrew has an
+archive of it. The connector keeps every way of logging in but the oldest as a
+plugin it loads at run time from a directory - Homebrew's own, on the machine
+that built the binary - so a release with that archive inside could not log in to
+a MySQL 8, which asks for `caching_sha2_password` unless it is told otherwise.
+[tests/connector.sh](tests/connector.sh) builds an archive with
+`caching_sha2_password`, `sha256_password` and MariaDB's `ed25519` inside it, and
+is what both platforms link: `./tests/connector.sh`, then `zig build -Dstatic
+-Dmariadb=/tmp/mariadb-static` with `/tmp/mariadb-static/lib/pkgconfig` in
+`PKG_CONFIG_PATH`.
+
 What a static link takes is not one `-l` per library, and not the same list twice,
 so `pkg-config --static` is asked and its answer translated: both libraries in one
 call, because they share zlib and OpenSSL and asking separately puts zlib in
