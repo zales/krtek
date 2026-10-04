@@ -318,11 +318,12 @@ pub const Db = struct {
                 return error.Driver;
             };
 
-            // A bucket in another region answers with the region it is in, once.
-            // Following it is the difference between working and a 301 nobody can
-            // read.
+            // A bucket in another region answers with the region it is in, once,
+            // and so does a server that has one region and was signed to in
+            // another. Following it is the difference between working and a 301
+            // nobody can read.
             if (!redirected and (response.status == 301 or response.status == 307 or response.status == 400)) {
-                if (response.get("x-amz-bucket-region")) |region| {
+                if (regionNamed(response)) |region| {
                     if (region.len != 0 and !std.mem.eql(u8, region, self.parts.region)) {
                         try self.moveTo(region);
                         redirected = true;
@@ -1668,6 +1669,21 @@ fn serverName(header: ?[]const u8) []const u8 {
     return "S3";
 }
 
+/// The region a refusal names. Amazon puts it in a header when a bucket lives
+/// somewhere else; a request signed for the wrong region gets it in the body,
+/// next to the complaint about the signature - and that is the only place Garage
+/// says it at all, having one region of its own and no header for it.
+fn regionNamed(response: http.Response) ?[]const u8 {
+    if (response.get("x-amz-bucket-region")) |region| {
+        return region;
+    }
+    const code = xml.find(response.body, "Code") orelse return null;
+    if (!std.mem.eql(u8, code, "AuthorizationHeaderMalformed")) {
+        return null;
+    }
+    return xml.find(response.body, "Region");
+}
+
 /// All but the last four characters of a key id: enough to tell two keys apart,
 /// not enough to be worth reading over a shoulder.
 fn masked(arena: std.mem.Allocator, key: []const u8) ![]const u8 {
@@ -1929,4 +1945,34 @@ test "an access key is not shown in full" {
     defer scratch.deinit();
     try testing.expectEqualStrings("****MPLE", try masked(scratch.allocator(), "AKIAIOSFODNN7EXAMPLE"));
     try testing.expectEqualStrings("****", try masked(scratch.allocator(), "AKI"));
+}
+
+test "the region a refusal names is found in the header or in the body" {
+    // Amazon, for a bucket that lives somewhere else.
+    try testing.expectEqualStrings("eu-central-1", regionNamed(.{
+        .status = 301,
+        .headers = &.{.{ .name = "x-amz-bucket-region", .value = "eu-central-1" }},
+    }).?);
+    // Amazon again, for a request signed for the wrong region.
+    try testing.expectEqualStrings("eu-central-1", regionNamed(.{ .status = 400, .body =
+        \\<Error><Code>AuthorizationHeaderMalformed</Code><Message>The authorization header is malformed; the region 'us-east-1' is wrong; expecting 'eu-central-1'</Message><Region>eu-central-1</Region><RequestId>X</RequestId></Error>
+    }).?);
+    // Garage, word for word: no header, and a region nobody would have guessed.
+    try testing.expectEqualStrings("garage", regionNamed(.{ .status = 400, .body =
+        \\<?xml version="1.0" encoding="UTF-8"?><Error><Code>AuthorizationHeaderMalformed</Code><Message>Authorization header malformed, unexpected scope: &apos;20261004/us-east-1/s3/aws4_request&apos;, expected: &apos;20261004/garage/s3/aws4_request&apos;</Message><Resource>/photos</Resource><Region>garage</Region></Error>
+    }).?);
+    // Garage puts its region in every error. Only the one about the signature's
+    // scope is a reason to sign again.
+    try testing.expect(regionNamed(.{ .status = 400, .body =
+        \\<Error><Code>InvalidRequest</Code><Message>Bad request</Message><Region>garage</Region></Error>
+    }) == null);
+    try testing.expect(regionNamed(.{ .status = 400 }) == null);
+}
+
+test "a server is named by what it says about itself, and not guessed at" {
+    try testing.expectEqualStrings("MinIO", serverName("MinIO"));
+    try testing.expectEqualStrings("Amazon S3", serverName("AmazonS3"));
+    // Garage sends no Server header at all.
+    try testing.expectEqualStrings("S3", serverName(null));
+    try testing.expectEqualStrings("S3", serverName("nginx"));
 }

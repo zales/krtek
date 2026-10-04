@@ -411,7 +411,10 @@ URL key 3600                    a signed link anybody can open, for an hour
 differ in how a bucket is addressed; a target that names a host gets path-style
 addressing, Amazon gets the bucket in the hostname, and `?path=1` settles it by
 hand. A bucket in another region answers with the region it is in, and that is
-followed once rather than shown as a 301 nobody can read.
+followed once rather than shown as a 301 nobody can read. Garage has one region,
+named in its own configuration, and refuses a request signed for any other by
+saying which it wanted: that is followed the same way, so nobody has to know to
+write `?region=garage`.
 
 ```sh
 krtek s3://photos                                            # AWS, keys from the environment or ~/.aws
@@ -1108,14 +1111,14 @@ included. The records it reads are ones the Java client wrote, which is the poin
 zig build && ./tests/kafka.sh
 ```
 
-[tests/s3.sh](tests/s3.sh) does the same for S3, against MinIO rather than
-Amazon on purpose: MinIO wants path-style addressing and a region it was never
-told about, which is where a driver written only against AWS falls over. The
-signature is the same either way - if MinIO accepts it Amazon does, and the unit
-tests already check it against Amazon's own worked examples. Thirteen objects
-over four-object pages, so the continuation tokens have to cover everything
-exactly once, and every failure - wrong secret, missing bucket, no credentials at
-all - has to say what is wrong rather than a number.
+[tests/s3.sh](tests/s3.sh) does the same for S3, against Garage rather than
+Amazon on purpose: Garage wants path-style addressing and has a region of its
+own that nobody told the driver about, which is where a driver written only
+against AWS falls over. The signature is the same either way - if Garage accepts
+it Amazon does, and the unit tests already check it against Amazon's own worked
+examples. Thirteen objects over four-object pages, so the continuation tokens
+have to cover everything exactly once, and every failure - wrong secret, missing
+bucket, no credentials at all - has to say what is wrong rather than a number.
 
 ```sh
 zig build && ./tests/s3.sh
