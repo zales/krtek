@@ -10,7 +10,6 @@ cd "$(dirname "$0")/.."
 # asked to touch - which is exactly what this did until somebody noticed.
 CONFIG=$(mktemp -d)
 trap 'rm -rf "$CONFIG"' EXIT
-export XDG_CONFIG_HOME="$CONFIG"
 
 python3 - <<'PY'
 import sqlite3, os
@@ -22,6 +21,24 @@ c.execute("insert into notes (body) values ('it drew this')")
 c.commit()
 PY
 
-python3 tests/screen.py smoke.db '{keep}' | tee smoke.txt
-grep -q "it drew this" smoke.txt
-echo "the binary runs and draws"
+# The screen is read after a fixed wait, and the wait is a guess: six tenths of
+# a second, which the first run of a binary that has only just been built can
+# overrun on a slow machine. The Intel Mac in CI once had nothing on screen by
+# then, with a build that was fine, and failed the job that every release waits
+# for. So it is asked up to three times, each wait twice the last - and each in
+# a configuration nobody has started in, because a second try in the first
+# one's directory would not be a first start any more.
+base=${SCREEN_SLOW:-1}
+for times in 1 2 4; do
+	export XDG_CONFIG_HOME="$CONFIG/$times"
+	mkdir -p "$XDG_CONFIG_HOME"
+	slow=$(awk "BEGIN { print $base * $times }")
+	SCREEN_SLOW=$slow python3 tests/screen.py smoke.db '{keep}' | tee smoke.txt
+	if grep -q "it drew this" smoke.txt; then
+		echo "the binary runs and draws"
+		exit 0
+	fi
+	echo "--- the table was not on screen after $(awk "BEGIN { print 0.6 * $slow }") s" >&2
+done
+echo "FAIL: the binary starts and draws nothing" >&2
+exit 1
