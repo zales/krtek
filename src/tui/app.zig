@@ -147,7 +147,7 @@ const MECHANISMS = [_][]const u8{ "", "PLAIN", "SCRAM-SHA-256", "SCRAM-SHA-512" 
 /// The command palette: what is typed, and which match is under the cursor.
 /// Its entries live in `input.zig`, next to the keys they stand for.
 pub const Palette = struct {
-    query: std.ArrayListUnmanaged(u8) = .empty,
+    query: std.ArrayList(u8) = .empty,
     at: usize = 0,
 };
 
@@ -156,7 +156,7 @@ pub const PromptKind = enum { command, filter, edit, confirm, password, new_dir,
 pub const Prompt = struct {
     kind: PromptKind,
     label: []const u8,
-    buffer: std.ArrayListUnmanaged(u8) = .empty,
+    buffer: std.ArrayList(u8) = .empty,
     history_at: ?usize = null,
 };
 
@@ -182,7 +182,7 @@ const Waiter = struct {
     /// A thousand and twenty-four bits, which is what `fd_set` is on both
     /// systems. Little-endian words of any width put bit n in the same place, so
     /// counting in 32s is right on a 64-bit `fd_set` too.
-    bits: [32]u32 = [_]u32{0} ** 32,
+    bits: [32]u32 = @splat(0),
     highest: c_int = 0,
 
     extern "c" fn select(nfds: c_int, r: ?*anyopaque, w: ?*anyopaque, e: ?*anyopaque, timeout: ?*std.c.timeval) c_int;
@@ -251,7 +251,7 @@ const Follow = struct {
     /// rather than a table. Kept so the grid can be filled again - by `r`, and by
     /// the follow key on a clock - and only ever re-run where the engine says
     /// running it twice is the same as running it once.
-    statement: std.ArrayListUnmanaged(u8) = .empty,
+    statement: std.ArrayList(u8) = .empty,
 
     fn deinit(self: *Follow, allocator: std.mem.Allocator) void {
         self.statement.deinit(allocator);
@@ -292,10 +292,10 @@ const Running = struct {
 /// because they are made and thrown away together, once per run.
 const Reporting = struct {
     arena: std.heap.ArenaAllocator,
-    list: std.ArrayListUnmanaged(Report) = .empty,
+    list: std.ArrayList(Report) = .empty,
     /// The line itself, and whether it is a complaint - which is the difference
     /// between a colour somebody reads past and one they stop at.
-    status: std.ArrayListUnmanaged(u8) = .empty,
+    status: std.ArrayList(u8) = .empty,
     status_error: bool = false,
 
     fn deinit(self: *Reporting, allocator: std.mem.Allocator) void {
@@ -308,7 +308,7 @@ const Reporting = struct {
 /// Saved connections, where they live, and which of them is being worked on.
 const Saved = struct {
     list: conns.List,
-    path: std.ArrayListUnmanaged(u8) = .empty,
+    path: std.ArrayList(u8) = .empty,
     /// The cursor in the connection list, and the first row drawn. A list of
     /// thirty is longer than most windows are tall, and before this it simply
     /// stopped drawing where the room ran out - so the cursor walked off the
@@ -319,13 +319,13 @@ const Saved = struct {
     /// the command palette use, on the name and on the target both - thirty-odd
     /// connections is more than anybody scrolls through, and half of them are
     /// told apart by their host rather than by the name somebody gave them.
-    filter: std.ArrayListUnmanaged(u8) = .empty,
+    filter: std.ArrayList(u8) = .empty,
     /// How many entries were on screen last time it was drawn, so a page key can
     /// move by a page. The drawing is what knows this - it is the one that has the
     /// window and the hints to fit around.
     shown: usize = 0,
     /// The connection a password is being asked for.
-    pending: std.ArrayListUnmanaged(u8) = .empty,
+    pending: std.ArrayList(u8) = .empty,
     /// Which saved connection the open form is editing, so changing both its name
     /// and its target replaces that entry instead of adding a second one.
     editing: ?usize = null,
@@ -347,7 +347,7 @@ const Typing = struct {
     form: ?Form.Form = null,
     arena: std.heap.ArenaAllocator,
     /// A statement waiting for a yes at the confirmation prompt.
-    pending: std.ArrayListUnmanaged(u8) = .empty,
+    pending: std.ArrayList(u8) = .empty,
     /// The SQL editor, when it is open. This is where statements are written;
     /// the one-line prompt only takes the short `:` commands now.
     editor: ?Editor = null,
@@ -366,7 +366,7 @@ const Typing = struct {
     /// closes the editor, and in an editor with modes escape is also the key
     /// pressed twice to be sure of being in normal mode - so closing it cannot be
     /// what throws a statement away. The next time it opens, this is in it.
-    draft: std.ArrayListUnmanaged(u8) = .empty,
+    draft: std.ArrayList(u8) = .empty,
 
     fn deinit(self: *Typing, allocator: std.mem.Allocator) void {
         if (self.prompt) |*prompt| {
@@ -388,8 +388,8 @@ const Typing = struct {
 /// been typed to narrow it, which one the cursor is on and where it is scrolled
 /// to.
 const Sidebar = struct {
-    objects: std.ArrayListUnmanaged(Object) = .empty,
-    filter: std.ArrayListUnmanaged(u8) = .empty,
+    objects: std.ArrayList(Object) = .empty,
+    filter: std.ArrayList(u8) = .empty,
     selected: usize = 0,
     /// The first one visible, which is what scrolling a list means.
     scroll: usize = 0,
@@ -427,9 +427,9 @@ const Cursor = struct {
     row_scroll: usize = 0,
     col_scroll: usize = 0,
     /// Row indexes ticked with space.
-    marked: std.ArrayListUnmanaged(usize) = .empty,
+    marked: std.ArrayList(usize) = .empty,
     /// Column indexes put away, by index into the grid's own columns.
-    hidden: std.ArrayListUnmanaged(usize) = .empty,
+    hidden: std.ArrayList(usize) = .empty,
     /// How many rows the grid has room for, as last drawn: what "the middle of
     /// the screen" and "the bottom of it" are measured in.
     page: usize = 1,
@@ -449,11 +449,11 @@ const Cursor = struct {
 const Grid = struct {
     /// null while a query result is shown. Owned by the app.
     name: ?[]const u8 = null,
-    schema: std.ArrayListUnmanaged(u8) = .empty,
-    title: std.ArrayListUnmanaged(u8) = .empty,
-    cols: std.ArrayListUnmanaged([]const u8) = .empty,
-    widths: std.ArrayListUnmanaged(usize) = .empty,
-    rows: std.ArrayListUnmanaged(Row) = .empty,
+    schema: std.ArrayList(u8) = .empty,
+    title: std.ArrayList(u8) = .empty,
+    cols: std.ArrayList([]const u8) = .empty,
+    widths: std.ArrayList(usize) = .empty,
+    rows: std.ArrayList(Row) = .empty,
     total: i64 = 0,
     /// Whether `total` is a number at all. An engine that cannot count without
     /// reading everything - a bucket of a million keys - says so, and `of ?` is
@@ -466,9 +466,9 @@ const Grid = struct {
     descending: bool = false,
     /// What the filter form put together: conditions an engine of any kind can
     /// honour. The strings are owned.
-    conditions: std.ArrayListUnmanaged(database.ask.Filter) = .empty,
+    conditions: std.ArrayList(database.ask.Filter) = .empty,
     /// The raw box of the filter form, which only an engine with SQL can use.
-    where_text: std.ArrayListUnmanaged(u8) = .empty,
+    where_text: std.ArrayList(u8) = .empty,
     /// The last reload could not be answered, and has said why. Whoever asked for
     /// it must not then report a count as though it had worked.
     failed: bool = false,
@@ -613,7 +613,7 @@ pub const App = struct {
     /// Every tab, and which one is in front. The slot of the one in front is
     /// stale while it is there - see `Tab` - so anything that reads a slot calls
     /// `saveActiveTab` first.
-    tabs: std.ArrayListUnmanaged(Tab) = .empty,
+    tabs: std.ArrayList(Tab) = .empty,
     active_tab: usize = 0,
 
     read_only: bool = false,
@@ -641,7 +641,7 @@ pub const App = struct {
 
     typing: Typing,
     help: Help = .{},
-    history: std.ArrayListUnmanaged([]const u8) = .empty,
+    history: std.ArrayList([]const u8) = .empty,
     report: Reporting,
 
     quit: bool = false,
@@ -682,7 +682,7 @@ pub const App = struct {
         // The first tab. What is in it is what was just set up above.
         try self.tabs.append(allocator, undefined);
         self.saveActiveTab();
-        var buffer: [std.fs.max_path_bytes]u8 = undefined;
+        var buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
         if (conns.path(&buffer, env)) |file| {
             try self.saved.path.appendSlice(allocator, file);
             conns.load(&self.saved.list, file) catch {};
@@ -710,7 +710,7 @@ pub const App = struct {
     /// Open a target and take it as the current connection. `remember` puts it in
     /// the saved list, without its password.
     pub fn connect(self: *App, target: []const u8, keep: bool) !void {
-        var report: std.ArrayListUnmanaged(u8) = .empty;
+        var report: std.ArrayList(u8) = .empty;
         defer report.deinit(self.allocator);
         const opened = database.Db.open(self.allocator, target, &report) catch |err| {
             // A missing password is worth asking for rather than just failing.
@@ -910,7 +910,7 @@ pub const App = struct {
         var arena = std.heap.ArenaAllocator.init(self.allocator);
         defer arena.deinit();
         const scratch = arena.allocator();
-        var names: std.ArrayListUnmanaged([]const u8) = .empty;
+        var names: std.ArrayList([]const u8) = .empty;
 
         const prefix = editor.word();
         // Only where what is being written is SQL: on an engine whose editor is a
@@ -925,11 +925,11 @@ pub const App = struct {
         // `u.na`, `orders.` or `sales.orders.to`: the columns of what the dot
         // follows, written with it in front so the whole word is what is replaced.
         if (sql) {
-            if (std.mem.lastIndexOfScalar(u8, prefix, '.')) |dot| {
+            if (std.mem.findScalarLast(u8, prefix, '.')) |dot| {
                 const qualifier = prefix[0..dot];
                 if (self.tableCalled(aliases, qualifier)) |table| {
                     for (self.columnsFor(scratch, table)) |column| {
-                        try names.append(scratch, try std.fmt.allocPrint(scratch, "{s}.{s}", .{ qualifier, column }));
+                        try names.append(scratch, try scratch.print("{s}.{s}", .{ qualifier, column }));
                     }
                     if (names.items.len > 0) {
                         try editor.complete(names.items);
@@ -975,7 +975,7 @@ pub const App = struct {
                 return if (named.table.len != 0) self.inSchema(named.schema, named.table) else null;
             }
         }
-        if (std.mem.lastIndexOfScalar(u8, qualifier, '.')) |dot| {
+        if (std.mem.findScalarLast(u8, qualifier, '.')) |dot| {
             return .{ .schema = qualifier[0..dot], .name = qualifier[dot + 1 ..] };
         }
         for (self.sidebar.objects.items) |object| {
@@ -1004,7 +1004,7 @@ pub const App = struct {
         if (on_screen and self.grid.cols.items.len != 0) {
             return self.grid.cols.items;
         }
-        var out: std.ArrayListUnmanaged([]const u8) = .empty;
+        var out: std.ArrayList([]const u8) = .empty;
         for (self.conn.columns(arena, table) catch return &.{}) |column| {
             out.append(arena, column.name) catch return &.{};
         }
@@ -1060,7 +1060,7 @@ pub const App = struct {
         self.running.frame = (self.running.frame + 1) % frames.len;
         const size = self.screen.size();
         var line: [160]u8 = undefined;
-        const text = std.fmt.bufPrint(&line, " {s} running {d:.1}s   ctrl+c stops it", .{
+        const text = std.mem.print(&line, " {s} running {d:.1}s   ctrl+c stops it", .{
             frames[self.running.frame],
             elapsed / 1000.0,
         }) catch return;
@@ -1139,7 +1139,7 @@ pub const App = struct {
                 // question is asked once rather than for ever.
                 keychain.store(entry.target, value, .anyone) catch {};
                 var reason: [160]u8 = undefined;
-                const words = std.fmt.bufPrint(&reason, "unlock the password for {s}", .{entry.name}) catch "unlock a saved password";
+                const words = std.mem.print(&reason, "unlock the password for {s}", .{entry.name}) catch "unlock a saved password";
                 // A refusal is not a failure to connect: it falls back to asking for
                 // the password, which is what somebody who cannot use the reader
                 // needs to be able to do.
@@ -1212,7 +1212,7 @@ pub const App = struct {
             return;
         }
         var name: [128]u8 = undefined;
-        const label = std.fmt.bufPrint(&name, "{s}", .{going.name}) catch "it";
+        const label = std.mem.print(&name, "{s}", .{going.name}) catch "it";
         if (going.keeps.inKeychain()) {
             keychain.remove(going.target);
         }
@@ -1753,16 +1753,16 @@ pub const App = struct {
         // and coming back to find the next key eaten by it is a puzzle.
         self.typing.prefix = null;
         const tab = &self.tabs.items[self.active_tab];
-        inline for (std.meta.fields(Tab)) |field| {
-            @field(tab, field.name) = @field(self, field.name);
+        inline for (@typeInfo(Tab).@"struct".field_names) |name| {
+            @field(tab, name) = @field(self, name);
         }
     }
 
     /// And bring the tab now in front out of its slot.
     pub fn loadActiveTab(self: *App) void {
         const tab = &self.tabs.items[self.active_tab];
-        inline for (std.meta.fields(Tab)) |field| {
-            @field(self, field.name) = @field(tab, field.name);
+        inline for (@typeInfo(Tab).@"struct".field_names) |name| {
+            @field(self, name) = @field(tab, name);
         }
         // The timer is the screen's and there is one of it, so it is set to
         // whatever this tab was doing: following starts again where it was on,
@@ -2016,15 +2016,15 @@ pub const App = struct {
         return switch (rows.value(0)) {
             .null => null,
             .text, .blob => |bytes| try arena.dupe(u8, bytes),
-            .int => |v| try std.fmt.allocPrint(arena, "{d}", .{v}),
-            .float => |v| try std.fmt.allocPrint(arena, "{d}", .{v}),
+            .int => |v| try arena.print("{d}", .{v}),
+            .float => |v| try arena.print("{d}", .{v}),
         };
     }
 
     /// Column names of a table, in declared order.
     /// Column names in order, for the forms and the dumps.
     pub fn columnsOf(self: *App, arena: std.mem.Allocator, name: []const u8) ![]const []const u8 {
-        var list: std.ArrayListUnmanaged([]const u8) = .empty;
+        var list: std.ArrayList([]const u8) = .empty;
         for (try self.conn.columns(arena, .{ .schema = self.grid.schema.items, .name = name })) |column| {
             try list.append(arena, column.name);
         }
@@ -2140,7 +2140,7 @@ pub const App = struct {
         const facts = (self.conn.rowDetail(arena, table, name) catch null) orelse return false;
         self.object.facts = facts;
         self.object.actions = self.conn.rowActions(arena, table, name) catch &.{};
-        self.object.title = try std.fmt.allocPrint(arena, "{s}", .{name});
+        self.object.title = try arena.print("{s}", .{name});
         self.object.scroll = 0;
         self.view = .object;
         return true;
@@ -2366,18 +2366,18 @@ pub const App = struct {
     }
 
     pub fn isHidden(self: *App, column: usize) bool {
-        return std.mem.indexOfScalar(usize, self.cursor.hidden.items, column) != null;
+        return std.mem.findScalar(usize, self.cursor.hidden.items, column) != null;
     }
 
     pub fn isMarked(self: *App, row: usize) bool {
-        return std.mem.indexOfScalar(usize, self.cursor.marked.items, row) != null;
+        return std.mem.findScalar(usize, self.cursor.marked.items, row) != null;
     }
 
     pub fn toggleMark(self: *App) !void {
         if (self.cursor.row >= self.grid.rows.items.len) {
             return;
         }
-        if (std.mem.indexOfScalar(usize, self.cursor.marked.items, self.cursor.row)) |at| {
+        if (std.mem.findScalar(usize, self.cursor.marked.items, self.cursor.row)) |at| {
             _ = self.cursor.marked.orderedRemove(at);
         } else {
             try self.cursor.marked.append(self.allocator, self.cursor.row);
@@ -2449,7 +2449,7 @@ pub const App = struct {
             self.complain("{s}", .{self.caps().no_delete});
             return;
         }
-        var targets: std.ArrayListUnmanaged(usize) = .empty;
+        var targets: std.ArrayList(usize) = .empty;
         defer targets.deinit(self.allocator);
         if (self.cursor.marked.items.len != 0) {
             try targets.appendSlice(self.allocator, self.cursor.marked.items);
@@ -2501,8 +2501,8 @@ pub const App = struct {
         self.grid.rows.clearRetainingCapacity();
         self.grid.editable = false;
 
-        var raw: std.ArrayListUnmanaged([]Cell) = .empty;
-        var origins: std.ArrayListUnmanaged([]const u8) = .empty;
+        var raw: std.ArrayList([]Cell) = .empty;
+        var origins: std.ArrayList([]const u8) = .empty;
         var from: ?database.Table = source;
         var count: usize = 0;
         {
@@ -2556,7 +2556,7 @@ pub const App = struct {
 
         // The cursor is closed, so the engine can be asked things again.
         const skip: usize = if (hidden_key and count > 0) 1 else 0;
-        var keys: std.ArrayListUnmanaged(Position) = .empty;
+        var keys: std.ArrayList(Position) = .empty;
         if (hidden_key) {
             try keys.append(arena, .{ .name = "__key", .at = 0 });
             self.grid.editable = true;
@@ -3000,7 +3000,7 @@ pub const App = struct {
         var moved: [16]u8 = undefined;
         var all: [16]u8 = undefined;
         var line: [256]u8 = undefined;
-        const text = std.fmt.bufPrint(&line, " copying {s} - {s} of {s}   ctrl+c stops it", .{
+        const text = std.mem.print(&line, " copying {s} - {s} of {s}   ctrl+c stops it", .{
             Files.trim(database.store.basename(name), 40),
             Files.size(&moved, done),
             Files.size(&all, whole),
@@ -3395,7 +3395,7 @@ pub const App = struct {
 
     /// The rows currently in the grid.
     pub fn writeGrid(self: *App, path: []const u8, separator: u8) !void {
-        var out: std.ArrayListUnmanaged(u8) = .empty;
+        var out: std.ArrayList(u8) = .empty;
         defer out.deinit(self.allocator);
         for (self.grid.cols.items, 0..) |name, i| {
             if (self.isHidden(i)) {
@@ -3436,7 +3436,7 @@ pub const App = struct {
     /// A whole table, not just the page on screen.
     pub fn writeQuery(self: *App, path: []const u8, name: []const u8, separator: u8) !void {
         const table = database.Table{ .schema = self.grid.schema.items, .name = name };
-        var out: std.ArrayListUnmanaged(u8) = .empty;
+        var out: std.ArrayList(u8) = .empty;
         defer out.deinit(self.allocator);
         var cursor = (try self.conn.select(self.filtered(table))) orelse return;
         defer cursor.close();
@@ -3492,8 +3492,8 @@ pub const App = struct {
         }
         return switch (cursor.value(0)) {
             .null => null,
-            .int => |value| try std.fmt.allocPrint(arena, "{d}", .{value}),
-            .float => |value| try std.fmt.allocPrint(arena, "{d}", .{value}),
+            .int => |value| try arena.print("{d}", .{value}),
+            .float => |value| try arena.print("{d}", .{value}),
             .text, .blob => |bytes| try arena.dupe(u8, bytes),
         };
     }
@@ -3547,7 +3547,7 @@ pub const App = struct {
         cells: []const Cell,
         hidden: []const u8,
     ) ![]const database.ask.Filter {
-        var conditions: std.ArrayListUnmanaged(database.ask.Filter) = .empty;
+        var conditions: std.ArrayList(database.ask.Filter) = .empty;
         for (keys, 0..) |key, n| {
             const column = if (n == 0 and hidden.len != 0) hidden else key.name;
             if (key.at >= cells.len) {
@@ -3611,7 +3611,7 @@ pub const App = struct {
         if (target.len == 0) {
             return;
         }
-        var report: std.ArrayListUnmanaged(u8) = .empty;
+        var report: std.ArrayList(u8) = .empty;
         defer report.deinit(self.allocator);
         const opened = database.Db.open(self.allocator, target, &report) catch {
             self.complain("{s}", .{if (report.items.len != 0) report.items else "cannot open it"});
@@ -3688,7 +3688,7 @@ pub const App = struct {
         var arena = std.heap.ArenaAllocator.init(self.allocator);
         defer arena.deinit();
         const names = try self.columnsOf(arena.allocator(), table.name);
-        var out: std.ArrayListUnmanaged(u8) = .empty;
+        var out: std.ArrayList(u8) = .empty;
         try out.appendSlice(allocator, "INSERT INTO ");
         try database.quoteName(&out, allocator, table);
         try out.appendSlice(allocator, " (");
@@ -3714,7 +3714,7 @@ pub const App = struct {
     /// Column definitions as the DDL generator wants them, including the
     /// single-column UNIQUE constraints, which only exist as indexes.
     fn tableNames(self: *App, arena: std.mem.Allocator, last: []const u8) ![]const []const u8 {
-        var list: std.ArrayListUnmanaged([]const u8) = .empty;
+        var list: std.ArrayList([]const u8) = .empty;
         for (self.sidebar.objects.items) |object| {
             if (std.mem.eql(u8, object.kind, "table") and !std.mem.eql(u8, object.name, last)) {
                 try list.append(arena, try arena.dupe(u8, object.name));
@@ -3792,7 +3792,7 @@ pub const App = struct {
             // The label is what the column is *called*; what it is - the type, the
             // NOT NULL, the default - goes after the field, where it reads as a note
             // about the value rather than as part of the name.
-            var about: std.ArrayListUnmanaged(u8) = .empty;
+            var about: std.ArrayList(u8) = .empty;
             try about.appendSlice(form.arena.allocator(), column.type);
             if (column.notnull) {
                 try about.appendSlice(form.arena.allocator(), " NOT NULL");
@@ -3919,7 +3919,7 @@ pub const App = struct {
         };
         const form = try self.newForm(.index, "create index", "columns are comma separated");
         form.table = try form.arena.allocator().dupe(u8, table.name);
-        var suggested: std.ArrayListUnmanaged(u8) = .empty;
+        var suggested: std.ArrayList(u8) = .empty;
         try suggested.print(form.arena.allocator(), "{s}_idx", .{table.name});
         try form.text("index name", suggested.items, 30);
         try form.text("columns", if (self.grid.cols.items.len > 0) self.grid.cols.items[self.cursor.col] else "", 40);
@@ -3977,7 +3977,7 @@ pub const App = struct {
         };
         const form = try self.newForm(.copy_table, "copy table", "");
         form.table = try form.arena.allocator().dupe(u8, table.name);
-        var suggested: std.ArrayListUnmanaged(u8) = .empty;
+        var suggested: std.ArrayList(u8) = .empty;
         try suggested.print(form.arena.allocator(), "{s}_copy", .{table.name});
         try form.text("new name", suggested.items, 30);
         try form.toggle("with the rows", true);
@@ -3996,7 +3996,7 @@ pub const App = struct {
         const form = try self.newForm(.filter, "filter rows", "empty values are ignored");
         form.table = try form.arena.allocator().dupe(u8, table.name);
         const columns = try self.columnDefs(form.arena.allocator(), table.name);
-        var names: std.ArrayListUnmanaged([]const u8) = .empty;
+        var names: std.ArrayList([]const u8) = .empty;
         for (columns) |column| {
             try names.append(form.arena.allocator(), column.name);
         }
@@ -4059,7 +4059,7 @@ pub const App = struct {
         var arena = std.heap.ArenaAllocator.init(self.allocator);
         defer arena.deinit();
         const a = arena.allocator();
-        var sql: std.ArrayListUnmanaged(u8) = .empty;
+        var sql: std.ArrayList(u8) = .empty;
 
         if (form.purpose == .row) {
             const request = try self.rowChange(a, form);
@@ -4081,7 +4081,7 @@ pub const App = struct {
             .row => unreachable,
             .create_table, .alter_table => try self.buildTable(&sql, a, form),
             .index => {
-                var columns: std.ArrayListUnmanaged([]const u8) = .empty;
+                var columns: std.ArrayList([]const u8) = .empty;
                 var parts = std.mem.tokenizeAny(u8, form.valueOf(1), ",");
                 while (parts.next()) |part| {
                     try columns.append(a, std.mem.trim(u8, part, " \t"));
@@ -4102,7 +4102,7 @@ pub const App = struct {
                     self.complain("{s} has no column {s}", .{ form.table, form.valueOf(0) });
                     return;
                 }
-                var keys = std.ArrayListUnmanaged(database.ForeignKey).empty;
+                var keys = std.ArrayList(database.ForeignKey).empty;
                 for (try self.foreignKeyDefs(a, form.table)) |existing| {
                     try keys.append(a, existing);
                 }
@@ -4289,7 +4289,7 @@ pub const App = struct {
     /// is made and its own memory goes with it.
     fn rowChange(self: *App, a: std.mem.Allocator, form: *Form.Form) !database.ask.Change {
         const columns = try self.columnDefs(a, form.table);
-        var cells: std.ArrayListUnmanaged(database.ask.Cell) = .empty;
+        var cells: std.ArrayList(database.ask.Cell) = .empty;
         for (columns, 0..) |column, i| {
             const value_field = form.field(i * 2) orelse continue;
             const null_field = form.field(i * 2 + 1) orelse continue;
@@ -4299,7 +4299,7 @@ pub const App = struct {
                 continue;
             }
             if (text.len == 0 and form.key == null and
-                (column.dflt != null or (column.pk and std.ascii.indexOfIgnoreCase(column.type, "INT") != null)))
+                (column.dflt != null or (column.pk and std.ascii.findIgnoreCase(column.type, "INT") != null)))
             {
                 continue; // leave it to the engine: a default, or the next id
             }
@@ -4325,13 +4325,13 @@ pub const App = struct {
     }
 
     /// CREATE TABLE, or a rebuild when altering.
-    fn buildTable(self: *App, sql: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, form: *Form.Form) !void {
+    fn buildTable(self: *App, sql: *std.ArrayList(u8), a: std.mem.Allocator, form: *Form.Form) !void {
         const name = form.valueOf(0);
         if (name.len == 0) {
             self.complain("the table needs a name", .{});
             return;
         }
-        var columns: std.ArrayListUnmanaged(database.Column) = .empty;
+        var columns: std.ArrayList(database.Column) = .empty;
         var i: usize = 0;
         while (i < form.fields.items.len) : (i += 1) {
             const field = form.fields.items[i];
@@ -4380,7 +4380,7 @@ pub const App = struct {
             // `contains` is LIKE with the wildcards put in for the user.
             const wrapped = std.mem.eql(u8, operator, "contains");
             const text = if (wrapped)
-                try std.fmt.allocPrint(self.allocator, "%{s}%", .{value})
+                try self.allocator.print("%{s}%", .{value})
             else
                 try self.allocator.dupe(u8, value);
             errdefer self.allocator.free(text);
@@ -4427,8 +4427,8 @@ pub const App = struct {
         var arena = std.heap.ArenaAllocator.init(self.allocator);
         defer arena.deinit();
         const a = arena.allocator();
-        var sql: std.ArrayListUnmanaged(u8) = .empty;
-        var pattern: std.ArrayListUnmanaged(u8) = .empty;
+        var sql: std.ArrayList(u8) = .empty;
+        var pattern: std.ArrayList(u8) = .empty;
         try pattern.append(a, '%');
         try pattern.appendSlice(a, needle);
         try pattern.append(a, '%');
@@ -4440,7 +4440,7 @@ pub const App = struct {
             }
             const columns = try self.columnDefs(a, object.name);
             for (columns) |column| {
-                if (std.ascii.indexOfIgnoreCase(column.type, "BLOB") != null) {
+                if (std.ascii.findIgnoreCase(column.type, "BLOB") != null) {
                     continue;
                 }
                 if (parts != 0) {
@@ -4513,15 +4513,15 @@ pub const App = struct {
         // too, and a script of INSERTs is not something Redis or Kafka can read: the
         // import said "2 rows imported" and wrote nothing at all.
         const scripted = self.caps().speaks_sql;
-        var names: std.ArrayListUnmanaged([]const u8) = .empty;
-        var script: std.ArrayListUnmanaged(u8) = .empty;
+        var names: std.ArrayList([]const u8) = .empty;
+        var script: std.ArrayList(u8) = .empty;
         if (scripted) {
             try script.appendSlice(a, "BEGIN;\n");
         }
         var failed: usize = 0;
 
         var lines = std.mem.splitAny(u8, body, "\n");
-        var pending: std.ArrayListUnmanaged(u8) = .empty;
+        var pending: std.ArrayList(u8) = .empty;
         var first = true;
         var rows: usize = 0;
         while (lines.next()) |raw| {
@@ -4548,12 +4548,12 @@ pub const App = struct {
                 }
             }
             if (scripted) {
-                var values: std.ArrayListUnmanaged([]const u8) = .empty;
+                var values: std.ArrayList([]const u8) = .empty;
                 for (fields, 0..) |field, i| {
                     if (i >= names.items.len) {
                         break;
                     }
-                    var literal: std.ArrayListUnmanaged(u8) = .empty;
+                    var literal: std.ArrayList(u8) = .empty;
                     if (field.len == 0) {
                         try literal.appendSlice(a, "NULL");
                     } else {
@@ -4568,7 +4568,7 @@ pub const App = struct {
             // The values as values: an empty field is NULL, everything else is what
             // the file said, without a layer of quoting for a language this engine
             // does not speak.
-            var cells: std.ArrayListUnmanaged(database.ask.Cell) = .empty;
+            var cells: std.ArrayList(database.ask.Cell) = .empty;
             for (fields, 0..) |field, i| {
                 if (i >= names.items.len) {
                     break;
@@ -4637,8 +4637,8 @@ fn textOf(arena: std.mem.Allocator, value: database.Value) ![]const u8 {
     return switch (value) {
         .null => "",
         .text, .blob => |bytes| try arena.dupe(u8, bytes),
-        .int => |v| try std.fmt.allocPrint(arena, "{d}", .{v}),
-        .float => |v| try std.fmt.allocPrint(arena, "{d}", .{v}),
+        .int => |v| try arena.print("{d}", .{v}),
+        .float => |v| try arena.print("{d}", .{v}),
     };
 }
 
@@ -4648,12 +4648,12 @@ fn textOf(arena: std.mem.Allocator, value: database.Value) ![]const u8 {
 pub fn formatCell(arena: std.mem.Allocator, value: database.Value, numeric: bool) !Cell {
     return switch (value) {
         .null => .{ .text = "NULL", .kind = .nul },
-        .int => |v| .{ .text = try std.fmt.allocPrint(arena, "{d}", .{v}), .kind = .int },
-        .float => |v| .{ .text = try std.fmt.allocPrint(arena, "{d}", .{v}), .kind = .float },
-        .blob => |b| .{ .text = try std.fmt.allocPrint(arena, "<{d} B>", .{b.len}), .kind = .blob },
+        .int => |v| .{ .text = try arena.print("{d}", .{v}), .kind = .int },
+        .float => |v| .{ .text = try arena.print("{d}", .{v}), .kind = .float },
+        .blob => |b| .{ .text = try arena.print("<{d} B>", .{b.len}), .kind = .blob },
         .text => |t| .{
             .text = try flatten(arena, t),
-            .original = if (std.mem.indexOfAny(u8, t, "\n\r\t") != null) try arena.dupe(u8, t) else "",
+            .original = if (std.mem.findAny(u8, t, "\n\r\t") != null) try arena.dupe(u8, t) else "",
             .kind = if (numeric) .float else .text,
         },
     };
@@ -4670,8 +4670,8 @@ pub fn flatten(arena: std.mem.Allocator, text: []const u8) ![]const u8 {
     return copy;
 }
 
-pub fn writeDelimited(out: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocator, text: []const u8, separator: u8) !void {
-    if (std.mem.indexOfAny(u8, text, &[_]u8{ '"', '\n', '\r', separator }) == null) {
+pub fn writeDelimited(out: *std.ArrayList(u8), allocator: std.mem.Allocator, text: []const u8, separator: u8) !void {
+    if (std.mem.findAny(u8, text, &[_]u8{ '"', '\n', '\r', separator }) == null) {
         try out.appendSlice(allocator, text);
         return;
     }
@@ -4687,7 +4687,7 @@ pub fn writeDelimited(out: *std.ArrayListUnmanaged(u8), allocator: std.mem.Alloc
 
 /// std.fs is mid-rework in this Zig version and libc is linked anyway.
 pub fn writeFile(path: []const u8, bytes: []const u8) !void {
-    var buffer: [std.fs.max_path_bytes]u8 = undefined;
+    var buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     if (path.len >= buffer.len) {
         return error.NameTooLong;
     }
@@ -4710,7 +4710,7 @@ pub fn monotonicMs() f64 {
 /// Whether a declared type has numeric affinity.
 pub fn isNumeric(declared: []const u8) bool {
     for ([_][]const u8{ "INT", "REAL", "FLOA", "DOUB", "NUM", "DEC" }) |needle| {
-        if (std.ascii.indexOfIgnoreCase(declared, needle) != null) {
+        if (std.ascii.findIgnoreCase(declared, needle) != null) {
             return true;
         }
     }
@@ -4748,7 +4748,7 @@ pub fn looksNumeric(text: []const u8) bool {
 /// this is the fallback for the drivers that do not return it yet.
 fn needsPassword(message: []const u8) bool {
     for ([_][]const u8{ "password", "authentication", "secret key" }) |needle| {
-        if (std.ascii.indexOfIgnoreCase(message, needle) != null) {
+        if (std.ascii.findIgnoreCase(message, needle) != null) {
             return true;
         }
     }
@@ -4769,7 +4769,7 @@ pub fn connectionMatches(name: []const u8, target: []const u8, needle: []const u
         return true;
     }
     return fuzzy.match(name, needle, null) != null or
-        std.ascii.indexOfIgnoreCase(target, needle) != null;
+        std.ascii.findIgnoreCase(target, needle) != null;
 }
 
 pub fn divCeil(a: usize, b: usize) usize {

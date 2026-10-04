@@ -30,11 +30,11 @@ const Snapshot = struct {
     cursor: usize,
 };
 
-const Snapshots = std.ArrayListUnmanaged(Snapshot);
+const Snapshots = std.ArrayList(Snapshot);
 
 pub const Editor = struct {
     allocator: std.mem.Allocator,
-    text: std.ArrayListUnmanaged(u8) = .empty,
+    text: std.ArrayList(u8) = .empty,
     /// A byte offset into `text`, always on a character boundary.
     cursor: usize = 0,
     /// First line on screen, so a long statement can be scrolled.
@@ -43,7 +43,7 @@ pub const Editor = struct {
     history_at: ?usize = null,
     /// The open completion list: candidates, which one is picked, and the word
     /// they would replace.
-    candidates: std.ArrayListUnmanaged([]const u8) = .empty,
+    candidates: std.ArrayList([]const u8) = .empty,
     candidate_at: usize = 0,
     word_from: usize = 0,
     arena: std.heap.ArenaAllocator,
@@ -53,7 +53,7 @@ pub const Editor = struct {
     pending_op: ?u8 = null,
     /// What was last cut or yanked, and whether it was whole lines. Lines go
     /// back as lines; anything else goes back where the cursor is.
-    yank_buffer: std.ArrayListUnmanaged(u8) = .empty,
+    yank_buffer: std.ArrayList(u8) = .empty,
     yank_lines: bool = false,
     undo_stack: Snapshots = .empty,
     redo_stack: Snapshots = .empty,
@@ -590,14 +590,14 @@ pub const Editor = struct {
     }
 
     pub fn lineStart(self: *Editor, at: usize) usize {
-        if (std.mem.lastIndexOfScalar(u8, self.text.items[0..at], '\n')) |newline| {
+        if (std.mem.findScalarLast(u8, self.text.items[0..at], '\n')) |newline| {
             return newline + 1;
         }
         return 0;
     }
 
     pub fn lineEnd(self: *Editor, at: usize) usize {
-        if (std.mem.indexOfScalarPos(u8, self.text.items, at, '\n')) |newline| {
+        if (std.mem.findScalarPos(u8, self.text.items, at, '\n')) |newline| {
             return newline;
         }
         return self.text.items.len;
@@ -957,7 +957,7 @@ const References = struct {
 /// into the columns of `orders`, where being wrong offers a name that is not
 /// there and being absent offers nothing at all.
 pub fn extractAliases(arena: std.mem.Allocator, sql: []const u8) ![]Alias {
-    var words: std.ArrayListUnmanaged(Token) = .empty;
+    var words: std.ArrayList(Token) = .empty;
     var all = Tokens{ .sql = sql };
     while (all.next()) |token| {
         if (token.kind == .comment or std.mem.trim(u8, sql[token.from..token.to], " \t\r\n").len == 0) {
@@ -966,7 +966,7 @@ pub fn extractAliases(arena: std.mem.Allocator, sql: []const u8) ![]Alias {
         try words.append(arena, token);
     }
 
-    var found: std.ArrayListUnmanaged(Alias) = .empty;
+    var found: std.ArrayList(Alias) = .empty;
     var references = References{ .sql = sql, .tokens = words.items };
     // Every such word is looked at, wherever the last reference ended: a FROM
     // inside a subquery is inside the brackets the outer one stepped over.
@@ -1015,11 +1015,11 @@ pub const Tokens = struct {
 
         // A comment to the end of the line, or a bracketed one.
         if (char == '-' and self.peek(1) == '-') {
-            self.at = std.mem.indexOfScalarPos(u8, self.sql, from, '\n') orelse self.sql.len;
+            self.at = std.mem.findScalarPos(u8, self.sql, from, '\n') orelse self.sql.len;
             return .{ .kind = .comment, .from = from, .to = self.at };
         }
         if (char == '/' and self.peek(1) == '*') {
-            self.at = if (std.mem.indexOfPos(u8, self.sql, from + 2, "*/")) |stop| stop + 2 else self.sql.len;
+            self.at = if (std.mem.findPos(u8, self.sql, from + 2, "*/")) |stop| stop + 2 else self.sql.len;
             return .{ .kind = .comment, .from = from, .to = self.at };
         }
         // A string, with '' for a quote inside it.

@@ -108,8 +108,8 @@ pub const Conn = struct {
         return switch (cursor.value(0)) {
             .null => null,
             .text, .blob => |bytes| try allocator.dupe(u8, bytes),
-            .int => |v| try std.fmt.allocPrint(allocator, "{d}", .{v}),
-            .float => |v| try std.fmt.allocPrint(allocator, "{d}", .{v}),
+            .int => |v| try allocator.print("{d}", .{v}),
+            .float => |v| try allocator.print("{d}", .{v}),
         };
     }
 
@@ -188,7 +188,7 @@ pub fn version() []const u8 {
 }
 
 /// Quote an SQL string literal into `out`.
-pub fn quote(out: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocator, text: []const u8) !void {
+pub fn quote(out: *std.ArrayList(u8), allocator: std.mem.Allocator, text: []const u8) !void {
     try out.append(allocator, '\'');
     for (text) |char| {
         if (char == '\'') {
@@ -200,7 +200,7 @@ pub fn quote(out: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocator, tex
 }
 
 /// Quote an SQL identifier into `out`.
-pub fn quoteName(out: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocator, name: []const u8) !void {
+pub fn quoteName(out: *std.ArrayList(u8), allocator: std.mem.Allocator, name: []const u8) !void {
     try out.append(allocator, '"');
     for (name) |char| {
         if (char == '"') {

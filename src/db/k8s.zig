@@ -84,7 +84,7 @@ pub fn contexts(arena: std.mem.Allocator) []const Context {
     var why: List = .empty;
     const doc = yaml.parse(arena, text, &why) catch return &.{};
     const current = (doc.get("current-context") orelse yaml.Value{ .scalar = "" }).text();
-    var out: std.ArrayListUnmanaged(Context) = .empty;
+    var out: std.ArrayList(Context) = .empty;
     for (config.contexts(arena, doc) catch &.{}) |name| {
         // A context name may hold a slash - an EKS one is an ARN and always does -
         // and the last slash in a target is where the namespace begins. Escaped
@@ -234,7 +234,7 @@ pub const Db = struct {
         self.client.?.cert_pem = self.ready.cert_pem;
         self.client.?.key_pem = self.ready.key_pem;
         if (self.ready.token.len != 0) {
-            self.authorization = try std.fmt.allocPrint(home, "Bearer {s}", .{self.ready.token});
+            self.authorization = try home.print("Bearer {s}", .{self.ready.token});
         }
 
         var scratch = std.heap.ArenaAllocator.init(allocator);
@@ -348,7 +348,7 @@ pub const Db = struct {
     }
 
     fn callAs(self: *Db, arena: std.mem.Allocator, method: []const u8, path: []const u8, body: []const u8, content_type: []const u8) !http.Response {
-        var headers: std.ArrayListUnmanaged(http.Header) = .empty;
+        var headers: std.ArrayList(http.Header) = .empty;
         try headers.append(arena, .{ .name = "Accept", .value = "application/json" });
         if (self.authorization.len != 0) {
             try headers.append(arena, .{ .name = "Authorization", .value = self.authorization });
@@ -401,13 +401,13 @@ pub const Db = struct {
         const what = if (resource.path.len != 0) resource.path else resource.name;
         const mark = if (resource.query.len != 0) "?" else "";
         if (!resource.namespaced or namespace.len == 0 or std.mem.eql(u8, namespace, "*")) {
-            return std.fmt.allocPrint(arena, "{s}/{s}{s}{s}", .{ resource.root, what, mark, resource.query });
+            return arena.print("{s}/{s}{s}{s}", .{ resource.root, what, mark, resource.query });
         }
-        return std.fmt.allocPrint(arena, "{s}/namespaces/{s}/{s}{s}{s}", .{ resource.root, namespace, what, mark, resource.query });
+        return arena.print("{s}/namespaces/{s}/{s}{s}{s}", .{ resource.root, namespace, what, mark, resource.query });
     }
 
     fn objectPath(self: *Db, arena: std.mem.Allocator, resource: api.Resource, schema: []const u8, name: []const u8) ![]const u8 {
-        return std.fmt.allocPrint(arena, "{s}/{s}", .{ try self.listPath(arena, resource, schema), name });
+        return arena.print("{s}/{s}", .{ try self.listPath(arena, resource, schema), name });
     }
 
     /// Fetch a list and hand back its `items`.
@@ -438,7 +438,7 @@ pub const Db = struct {
     /// somebody asked for.
     pub fn schemas(self: *Db, arena: std.mem.Allocator) db.Error![][]const u8 {
         self.begin();
-        var out: std.ArrayListUnmanaged([]const u8) = .empty;
+        var out: std.ArrayList([]const u8) = .empty;
         try out.append(arena, try arena.dupe(u8, self.namespace));
         const items = self.fetch(arena, "/api/v1/namespaces", "the namespaces") catch {
             // A user who may not list namespaces can still work in their own, and
@@ -485,7 +485,7 @@ pub const Db = struct {
         const home = self.home.allocator();
 
         const items = self.fetch(arena, "/apis/apiextensions.k8s.io/v1/customresourcedefinitions", "definitions") catch return;
-        var out: std.ArrayListUnmanaged(api.Resource) = .empty;
+        var out: std.ArrayList(api.Resource) = .empty;
         for (items) |item| {
             const group = textAt(item, "spec.group");
             const many = textAt(item, "spec.names.plural");
@@ -496,7 +496,7 @@ pub const Db = struct {
             out.append(home, .{
                 .name = home.dupe(u8, many) catch continue,
                 .kind = home.dupe(u8, textAt(item, "spec.names.kind")) catch continue,
-                .root = std.fmt.allocPrint(home, "/apis/{s}/{s}", .{ group, textAt(serving, "name") }) catch continue,
+                .root = home.print("/apis/{s}/{s}", .{ group, textAt(serving, "name") }) catch continue,
                 .singular = home.dupe(u8, blk: {
                     const one = textAt(item, "spec.names.singular");
                     break :blk if (one.len != 0) one else many;
@@ -541,7 +541,7 @@ pub const Db = struct {
     /// index in it is left out rather than guessed at: a column showing the wrong
     /// field is worse than one that is not there.
     fn printerColumns(home: std.mem.Allocator, serving: Json) ![]const api.Column {
-        var shown: std.ArrayListUnmanaged(api.Column) = .empty;
+        var shown: std.ArrayList(api.Column) = .empty;
         try shown.append(home, .{ .name = "name", .from = .{ .at = "metadata.name" } });
         if (api.at(serving, "additionalPrinterColumns")) |extra| {
             if (extra == .array) {
@@ -551,7 +551,7 @@ pub const Db = struct {
                     if (path.len < 2 or path[0] != '.' or name.len == 0) {
                         continue;
                     }
-                    if (std.mem.indexOfAny(u8, path, "[]?*@()") != null) {
+                    if (std.mem.findAny(u8, path, "[]?*@()") != null) {
                         continue;
                     }
                     // kubectl's own age column, which this already has one of.
@@ -585,7 +585,7 @@ pub const Db = struct {
         if (schema.len != 0) {
             self.namespace = try self.home.allocator().dupe(u8, schema);
         }
-        var out: std.ArrayListUnmanaged(db.Object) = .empty;
+        var out: std.ArrayList(db.Object) = .empty;
         for (api.RESOURCES) |one| {
             try out.append(arena, .{
                 .name = try arena.dupe(u8, one.name),
@@ -613,7 +613,7 @@ pub const Db = struct {
             self.complain("there is no resource called {s}", .{table.name});
             return error.Driver;
         };
-        var out: std.ArrayListUnmanaged(db.Column) = .empty;
+        var out: std.ArrayList(db.Column) = .empty;
         for (resource.columns) |column| {
             try out.append(arena, .{
                 .name = try arena.dupe(u8, column.name),
@@ -667,7 +667,7 @@ pub const Db = struct {
 
     fn countKey(self: *Db, allocator: std.mem.Allocator, table: db.Table) ![]u8 {
         const namespace = if (table.schema.len != 0) table.schema else self.namespace;
-        return std.fmt.allocPrint(allocator, "{s}/{s}", .{ namespace, table.name });
+        return allocator.print("{s}/{s}", .{ namespace, table.name });
     }
 
     fn forgetCount(self: *Db, table: db.Table) void {
@@ -710,7 +710,7 @@ pub const Db = struct {
         }
         const object = std.json.parseFromSliceLeaky(Json, arena, response.body, .{}) catch return null;
 
-        var out: std.ArrayListUnmanaged(db.Setting) = .empty;
+        var out: std.ArrayList(db.Setting) = .empty;
         const now = nowSeconds();
         for (resource.columns) |column| {
             const said = api.cell(arena, object, column, now) catch "";
@@ -741,7 +741,7 @@ pub const Db = struct {
                     if (total != 0) {
                         try out.append(arena, .{
                             .label = "  restarts",
-                            .value = try std.fmt.allocPrint(arena, "{d}", .{total}),
+                            .value = try arena.print("{d}", .{total}),
                         });
                         try out.append(arena, .{ .label = "  last exit", .value = try state(arena, api.at(one, "lastState")) });
                     }
@@ -749,7 +749,7 @@ pub const Db = struct {
             }
         }
 
-        const path = try std.fmt.allocPrint(arena, "/api/v1/namespaces/{s}/events?fieldSelector=involvedObject.name%3D{s}", .{
+        const path = try arena.print("/api/v1/namespaces/{s}/events?fieldSelector=involvedObject.name%3D{s}", .{
             if (namespace.len != 0) namespace else self.namespace,
             name,
         });
@@ -759,7 +759,7 @@ pub const Db = struct {
         }
         for (events) |event| {
             try out.append(arena, .{
-                .label = try std.fmt.allocPrint(arena, "{s}", .{textAt(event, "reason")}),
+                .label = try arena.print("{s}", .{textAt(event, "reason")}),
                 .value = textAt(event, "message"),
             });
         }
@@ -774,22 +774,22 @@ pub const Db = struct {
         if (name.len == 0) {
             return &.{};
         }
-        var out: std.ArrayListUnmanaged(db.Action) = .empty;
+        var out: std.ArrayList(db.Action) = .empty;
         if (resource.loggable) {
             try out.append(arena, .{
                 .key = 'l',
                 .label = "logs",
-                .statement = try std.fmt.allocPrint(arena, "LOGS {s} 500", .{name}),
+                .statement = try arena.print("LOGS {s} 500", .{name}),
             });
             try out.append(arena, .{
                 .key = 's',
                 .label = "shell",
-                .statement = try std.fmt.allocPrint(arena, "EXEC {s}", .{name}),
+                .statement = try arena.print("EXEC {s}", .{name}),
             });
             try out.append(arena, .{
                 .key = 't',
                 .label = "terminal",
-                .statement = try std.fmt.allocPrint(arena, "EXEC -t {s}", .{name}),
+                .statement = try arena.print("EXEC -t {s}", .{name}),
                 .terminal = true,
             });
         }
@@ -797,20 +797,20 @@ pub const Db = struct {
             try out.append(arena, .{
                 .key = 'R',
                 .label = "restart",
-                .statement = try std.fmt.allocPrint(arena, "RESTART {s} {s}", .{ resource.name, name }),
+                .statement = try arena.print("RESTART {s} {s}", .{ resource.name, name }),
                 .confirm = true,
             });
         }
         try out.append(arena, .{
             .key = 'y',
             .label = "as JSON",
-            .statement = try std.fmt.allocPrint(arena, "DESCRIBE {s} {s}", .{ resource.name, name }),
+            .statement = try arena.print("DESCRIBE {s} {s}", .{ resource.name, name }),
         });
         if (resource.remove) {
             try out.append(arena, .{
                 .key = 'x',
-                .label = try std.fmt.allocPrint(arena, "delete this {s}", .{resource.singular}),
-                .statement = try std.fmt.allocPrint(arena, "DELETE {s} {s}", .{ resource.name, name }),
+                .label = try arena.print("delete this {s}", .{resource.singular}),
+                .statement = try arena.print("DELETE {s} {s}", .{ resource.name, name }),
                 .confirm = true,
             });
         }
@@ -823,7 +823,7 @@ pub const Db = struct {
 
     pub fn settings(self: *Db, arena: std.mem.Allocator) db.Error![]db.Setting {
         self.begin();
-        var out: std.ArrayListUnmanaged(db.Setting) = .empty;
+        var out: std.ArrayList(db.Setting) = .empty;
         try out.append(arena, .{ .label = "context", .value = try arena.dupe(u8, self.ready.context) });
         try out.append(arena, .{ .label = "server", .value = try arena.dupe(u8, self.ready.server) });
         try out.append(arena, .{ .label = "namespace", .value = try arena.dupe(u8, self.namespace) });
@@ -852,7 +852,7 @@ pub const Db = struct {
     /// A manifest is lines, and lines here are commands, so the two would eat each
     /// other: `kind: Pod` is not a command and never was one.
     pub fn split(_: *Db, arena: std.mem.Allocator, sql: []const u8) db.Error![]db.Statement {
-        var out: std.ArrayListUnmanaged(db.Statement) = .empty;
+        var out: std.ArrayList(db.Statement) = .empty;
         if (isApply(sql)) {
             try out.append(arena, .{ .sql = sql });
             return out.items;
@@ -926,8 +926,7 @@ pub const Db = struct {
         defer scratch.deinit();
         const arena = scratch.allocator();
 
-        const target = try std.fmt.allocPrint(
-            arena,
+        const target = try arena.print(
             "/api/v1/namespaces/{s}/pods/{s}/exec?stdin=true&stdout=true&stderr=true&tty=false&command=sh",
             .{ self.namespace, pod },
         );
@@ -942,12 +941,12 @@ pub const Db = struct {
         };
         var hex: [18]u8 = undefined;
         for (nonce, 0..) |byte, i| {
-            _ = std.fmt.bufPrint(hex[i * 2 ..][0..2], "{x:0>2}", .{byte}) catch {};
+            _ = std.mem.print(hex[i * 2 ..][0..2], "{x:0>2}", .{byte}) catch {};
         }
         // Zeroed first: what is written is read back with `sliceTo`, and an
         // unwritten tail of an undefined array is whatever was on the stack.
         @memset(&self.session_marker, 0);
-        _ = std.fmt.bufPrint(&self.session_marker, "@@{s}@@", .{hex}) catch {};
+        _ = std.mem.print(&self.session_marker, "@@{s}@@", .{hex}) catch {};
     }
 
     pub fn closeSession(self: *Db) void {
@@ -975,7 +974,7 @@ pub const Db = struct {
         const running = self.session orelse return error.Driver;
         const arena = self.replies.allocator();
         const marker = std.mem.sliceTo(&self.session_marker, 0);
-        const sent = try std.fmt.allocPrint(arena, "{s}\nprintf '\\n%s %d\\n' '{s}' \"$?\"\n", .{ line, marker });
+        const sent = try arena.print("{s}\nprintf '\\n%s %d\\n' '{s}' \"$?\"\n", .{ line, marker });
         running.write(sent) catch {
             self.remember("the shell has gone");
             self.closeSession();
@@ -1067,7 +1066,7 @@ pub const Db = struct {
     /// Open a WebSocket to an exec endpoint, however it was addressed.
     fn dial(self: *Db, arena: std.mem.Allocator, target: []const u8, pod: []const u8) db.Error!*Shell {
         const server = splitServer(self.ready.server) orelse return error.Driver;
-        var headers: std.ArrayListUnmanaged([2][]const u8) = .empty;
+        var headers: std.ArrayList([2][]const u8) = .empty;
         if (self.authorization.len != 0) {
             try headers.append(arena, .{ "Authorization", self.authorization });
         }
@@ -1123,7 +1122,7 @@ pub const Db = struct {
         // selector, and a filter that worked on some columns and not others would
         // be worse than one that plainly works on all of them.
         const now = nowSeconds();
-        var kept: std.ArrayListUnmanaged([]const Value) = .empty;
+        var kept: std.ArrayList([]const Value) = .empty;
         for (items) |item| {
             const cells = try arena.alloc(Value, resource.columns.len);
             for (resource.columns, 0..) |column, i| {
@@ -1250,7 +1249,7 @@ pub const Db = struct {
             if (eq(verb, "EXIT") or eq(verb, "QUIT")) {
                 const was = try arena.dupe(u8, self.session_pod);
                 self.closeSession();
-                return .{ .k8s = try self.oneText("shell", try std.fmt.allocPrint(arena, "the shell in {s} is closed", .{was})) };
+                return .{ .k8s = try self.oneText("shell", try arena.print("the shell in {s} is closed", .{was})) };
             }
             return .{ .k8s = try self.runInSession(std.mem.trim(u8, line, " \t\r\n;")) };
         }
@@ -1303,8 +1302,7 @@ pub const Db = struct {
                 return error.Driver;
             }
             try self.openSession(first);
-            return .{ .k8s = try self.oneText("shell", try std.fmt.allocPrint(
-                arena,
+            return .{ .k8s = try self.oneText("shell", try arena.print(
                 "a shell is open in {s} - what you type goes there until EXIT",
                 .{first},
             )) };
@@ -1326,7 +1324,7 @@ pub const Db = struct {
                 .table = .{ .name = resource.name },
                 .where = &[_]db.ask.Filter{.{ .column = "name", .value = second }},
             });
-            return .{ .k8s = try self.oneText("gone", try std.fmt.allocPrint(arena, "{s} {s} is deleted", .{ resource.singular, second })) };
+            return .{ .k8s = try self.oneText("gone", try arena.print("{s} {s} is deleted", .{ resource.singular, second })) };
         }
         if (eq(verb, "SCALE")) {
             try self.scale(arena, first, second, third);
@@ -1455,7 +1453,7 @@ pub const Db = struct {
                     const restarts = api.at(one, "restartCount");
                     const total: i64 = if (restarts) |value| (if (value == .integer) value.integer else 0) else 0;
                     if (total != 0) {
-                        try self.pair(arena, &rows, "  restarts", try std.fmt.allocPrint(arena, "{d}", .{total}));
+                        try self.pair(arena, &rows, "  restarts", try arena.print("{d}", .{total}));
                         try self.pair(arena, &rows, "  last exit", try state(arena, api.at(one, "lastState")));
                         const said = textAt(api.at(one, "lastState") orelse Json{ .null = {} }, "terminated.message");
                         if (said.len != 0) {
@@ -1469,14 +1467,14 @@ pub const Db = struct {
         // And what the cluster has been saying about it, which is where a pull
         // failure or a failed mount is written down and nowhere else.
         const namespace = textAt(pod, "metadata.namespace");
-        const path = try std.fmt.allocPrint(arena, "/api/v1/namespaces/{s}/events?fieldSelector=involvedObject.name%3D{s}", .{
+        const path = try arena.print("/api/v1/namespaces/{s}/events?fieldSelector=involvedObject.name%3D{s}", .{
             if (namespace.len != 0) namespace else self.namespace,
             name,
         });
         const events = self.fetch(arena, path, "the events") catch &[_]Json{};
         for (events) |event| {
             const reason = textAt(event, "reason");
-            try self.pair(arena, &rows, try std.fmt.allocPrint(arena, "event {s}", .{reason}), textAt(event, "message"));
+            try self.pair(arena, &rows, try arena.print("event {s}", .{reason}), textAt(event, "message"));
         }
         if (events.len == 0) {
             try self.pair(arena, &rows, "events", "none the cluster still has");
@@ -1540,7 +1538,7 @@ pub const Db = struct {
     fn applyOne(self: *Db, arena: std.mem.Allocator, document: []const u8, rows: *Rows) db.Error!void {
         var why: List = .empty;
         const parsed = yaml.parse(arena, document, &why) catch {
-            try self.note(arena, rows, "?", try std.fmt.allocPrint(arena, "not read: {s}", .{why.items}));
+            try self.note(arena, rows, "?", try arena.print("not read: {s}", .{why.items}));
             return error.Driver;
         };
         const api_version = (parsed.get("apiVersion") orelse yaml.Value{ .scalar = "" }).text();
@@ -1550,7 +1548,7 @@ pub const Db = struct {
             try self.note(arena, rows, "?", "a document needs apiVersion, kind and metadata.name");
             return error.Driver;
         }
-        const label = try std.fmt.allocPrint(arena, "{s}/{s}", .{ kind, name });
+        const label = try arena.print("{s}/{s}", .{ kind, name });
 
         // Where it lives: the table where this program knows the kind, and the
         // ordinary pluralisation where it does not - a custom resource, mostly.
@@ -1564,9 +1562,9 @@ pub const Db = struct {
         };
 
         const path = if (namespaced)
-            try std.fmt.allocPrint(arena, "{s}/namespaces/{s}/{s}/{s}?fieldManager=krtek&force=true", .{ root, namespace, in_path, name })
+            try arena.print("{s}/namespaces/{s}/{s}/{s}?fieldManager=krtek&force=true", .{ root, namespace, in_path, name })
         else
-            try std.fmt.allocPrint(arena, "{s}/{s}/{s}?fieldManager=krtek&force=true", .{ root, in_path, name });
+            try arena.print("{s}/{s}/{s}?fieldManager=krtek&force=true", .{ root, in_path, name });
 
         const response = self.callAs(arena, "PATCH", path, document, "application/apply-patch+yaml") catch {
             try self.note(arena, rows, label, self.message());
@@ -1577,8 +1575,7 @@ pub const Db = struct {
             // A kind this program does not know was sent to a path guessed from
             // its name, so a 404 is as likely to be the guess as the cluster.
             if (response.status == 404 and known == null) {
-                try self.note(arena, rows, label, try std.fmt.allocPrint(
-                    arena,
+                try self.note(arena, rows, label, try arena.print(
                     "{s} - nothing is served at {s}/{s}, so either the kind is not installed or it is not called that",
                     .{ self.message(), root, in_path },
                 ));
@@ -1642,14 +1639,14 @@ pub const Db = struct {
             memory += quantityAt(node, "status.allocatable.memory");
             room += quantityAt(node, "status.allocatable.pods");
         }
-        try self.pair(arena, &rows, "nodes", try std.fmt.allocPrint(arena, "{d} ready of {d}", .{ ready, found.len }));
+        try self.pair(arena, &rows, "nodes", try arena.print("{d} ready of {d}", .{ ready, found.len }));
         try self.pair(arena, &rows, "cpu", try api.coresText(arena, cpu));
         try self.pair(arena, &rows, "memory", try api.bytesText(arena, memory));
 
         // Every namespace, because a cluster's load is not the load in whichever
         // namespace somebody happens to be looking at.
         const pods = api.find("pods").?;
-        const all = try self.fetch(arena, try std.fmt.allocPrint(arena, "{s}/{s}", .{ pods.root, pods.name }), "pods");
+        const all = try self.fetch(arena, try arena.print("{s}/{s}", .{ pods.root, pods.name }), "pods");
         var running: usize = 0;
         var wanted_cpu: i64 = 0;
         var wanted_memory: i64 = 0;
@@ -1660,7 +1657,7 @@ pub const Db = struct {
             wanted_cpu += askedTotal(pod, "cpu");
             wanted_memory += askedTotal(pod, "memory");
         }
-        try self.pair(arena, &rows, "pods", try std.fmt.allocPrint(arena, "{d} running of {d}, room for {d}", .{
+        try self.pair(arena, &rows, "pods", try arena.print("{d} running of {d}, room for {d}", .{
             running,
             all.len,
             @divTrunc(room, 1000),
@@ -1686,11 +1683,11 @@ pub const Db = struct {
         }
         const path = if (pods)
             if (self.namespace.len == 0 or eq(self.namespace, "*"))
-                try std.fmt.allocPrint(arena, "{s}/pods", .{METRICS})
+                try arena.print("{s}/pods", .{METRICS})
             else
-                try std.fmt.allocPrint(arena, "{s}/namespaces/{s}/pods", .{ METRICS, self.namespace })
+                try arena.print("{s}/namespaces/{s}/pods", .{ METRICS, self.namespace })
         else
-            try std.fmt.allocPrint(arena, "{s}/nodes", .{METRICS});
+            try arena.print("{s}/nodes", .{METRICS});
 
         const response = self.call(arena, "GET", path, "") catch return error.Driver;
         if (response.status == 404) {
@@ -1828,7 +1825,7 @@ pub const Db = struct {
             .cores => try api.coresText(arena, whole),
             .bytes => try api.bytesText(arena, whole),
         };
-        return std.fmt.allocPrint(arena, "{s} of {s} ({d}%)", .{ one, other, @divTrunc(part * 100, whole) });
+        return arena.print("{s} of {s} ({d}%)", .{ one, other, @divTrunc(part * 100, whole) });
     }
 
     fn logs(self: *Db, arena: std.mem.Allocator, name: []const u8, howMany: []const u8) db.Error!Rows {
@@ -1842,7 +1839,7 @@ pub const Db = struct {
         // line, and go into a column of their own here rather than staying there:
         // the grid has columns, and a stamp in front of the text is a stamp the
         // text has to be read around.
-        const path = try std.fmt.allocPrint(arena, "{s}/log?tailLines={d}&timestamps=true", .{
+        const path = try arena.print("{s}/log?tailLines={d}&timestamps=true", .{
             try self.objectPath(arena, resource, "", name),
             wanted,
         });
@@ -1886,7 +1883,7 @@ pub const Db = struct {
     /// log is whatever the container wrote and this has to hold it either way. Such
     /// a line keeps all of itself and has no time beside it.
     fn timeOf(line: []const u8) struct { when: []const u8, what: []const u8 } {
-        const space = std.mem.indexOfScalar(u8, line, ' ') orelse return .{ .when = "", .what = line };
+        const space = std.mem.findScalar(u8, line, ' ') orelse return .{ .when = "", .what = line };
         const stamp = line[0..space];
         // 2026-08-21T15:55:33.775431123Z, and nothing shorter than the seconds.
         if (stamp.len < 20 or stamp[10] != 'T' or stamp[stamp.len - 1] != 'Z') {
@@ -1934,7 +1931,7 @@ pub const Db = struct {
             self.complain("{s} is not a number of replicas", .{howMany});
             return error.Driver;
         };
-        const body = try std.fmt.allocPrint(arena, "{{\"spec\":{{\"replicas\":{d}}}}}", .{wanted});
+        const body = try arena.print("{{\"spec\":{{\"replicas\":{d}}}}}", .{wanted});
         const response = self.call(arena, "PATCH", try self.objectPath(arena, resource, "", name), body) catch return error.Driver;
         if (!response.ok()) {
             return self.fail(response, name);
@@ -1957,8 +1954,7 @@ pub const Db = struct {
             self.complain("RESTART {s} <name>", .{resource.name});
             return error.Driver;
         }
-        const body = try std.fmt.allocPrint(
-            arena,
+        const body = try arena.print(
             "{{\"spec\":{{\"template\":{{\"metadata\":{{\"annotations\":{{\"krtek.restartedAt\":\"{d}\"}}}}}}}}}}",
             .{nowSeconds()},
         );
@@ -1984,10 +1980,10 @@ const Ending = struct {
 /// where the output before it stopped. The marker is written on a line of its own
 /// with the exit status after it.
 fn findMarker(text: []const u8, marker: []const u8) ?Ending {
-    const at = std.mem.lastIndexOf(u8, text, marker) orelse return null;
+    const at = std.mem.findLast(u8, text, marker) orelse return null;
     // Everything the marker's own line holds after it is the status.
     const rest = text[at + marker.len ..];
-    const line_end = std.mem.indexOfScalar(u8, rest, '\n') orelse rest.len;
+    const line_end = std.mem.findScalar(u8, rest, '\n') orelse rest.len;
     // And the line the marker is on does not belong to the output.
     var stop = at;
     while (stop > 0 and text[stop - 1] != '\n') {
@@ -2019,7 +2015,7 @@ fn isApply(text: []const u8) bool {
 /// Everything after the first word, which for `APPLY` is the manifest.
 fn afterVerb(line: []const u8) []const u8 {
     const text = std.mem.trimStart(u8, line, " \t\r\n");
-    const space = std.mem.indexOfAny(u8, text, " \t\r\n") orelse return "";
+    const space = std.mem.findAny(u8, text, " \t\r\n") orelse return "";
     return text[space..];
 }
 
@@ -2042,7 +2038,7 @@ pub const DocumentIterator = struct {
         const start = self.at;
         var walk = self.at;
         while (walk < self.text.len) {
-            const end = std.mem.indexOfScalarPos(u8, self.text, walk, '\n') orelse self.text.len;
+            const end = std.mem.findScalarPos(u8, self.text, walk, '\n') orelse self.text.len;
             const line = std.mem.trim(u8, self.text[walk..end], " \t\r");
             // A separator, and only one: `---` inside a block scalar is indented,
             // and a line of dashes that is longer is not a separator at all.
@@ -2074,15 +2070,15 @@ fn state(arena: std.mem.Allocator, value: ?Json) ![]const u8 {
         return "";
     }
     if (api.at(found, "running")) |running| {
-        return std.fmt.allocPrint(arena, "running since {s}", .{textAt(running, "startedAt")});
+        return arena.print("running since {s}", .{textAt(running, "startedAt")});
     }
     if (api.at(found, "waiting")) |waiting| {
         const reason = textAt(waiting, "reason");
         const said = textAt(waiting, "message");
         return if (said.len != 0)
-            std.fmt.allocPrint(arena, "waiting: {s} - {s}", .{ reason, said })
+            arena.print("waiting: {s} - {s}", .{ reason, said })
         else
-            std.fmt.allocPrint(arena, "waiting: {s}", .{reason});
+            arena.print("waiting: {s}", .{reason});
     }
     if (api.at(found, "terminated")) |ended| {
         const code = api.at(ended, "exitCode");
@@ -2176,7 +2172,7 @@ fn keeps(resource: api.Resource, cells: []const Value, request: db.ask.Select) b
             .le => std.mem.order(u8, value, filter.value) != .gt,
             .gt => std.mem.order(u8, value, filter.value) == .gt,
             .ge => std.mem.order(u8, value, filter.value) != .lt,
-            .like => std.ascii.indexOfIgnoreCase(value, std.mem.trim(u8, filter.value, "%")) != null,
+            .like => std.ascii.findIgnoreCase(value, std.mem.trim(u8, filter.value, "%")) != null,
             .is_null => value.len == 0,
             .not_null => value.len != 0,
         };
@@ -2267,7 +2263,7 @@ pub const Shell = struct {
     /// eighty columns when it is not draws everything in the wrong place.
     pub fn resize(self: *Shell, cols: u16, rows: u16) void {
         var buffer: [64]u8 = undefined;
-        const message = std.fmt.bufPrint(&buffer, "{c}{{\"Width\":{d},\"Height\":{d}}}", .{ RESIZE, cols, rows }) catch return;
+        const message = std.mem.print(&buffer, "{c}{{\"Width\":{d},\"Height\":{d}}}", .{ RESIZE, cols, rows }) catch return;
         self.socket.send(.binary, message) catch {};
     }
 
@@ -2393,7 +2389,7 @@ fn splitServer(url: []const u8) ?Server {
     } else {
         return null;
     }
-    if (std.mem.indexOfScalar(u8, rest, '/')) |mark| {
+    if (std.mem.findScalar(u8, rest, '/')) |mark| {
         rest = rest[0..mark];
     }
     if (rest.len == 0) {
@@ -2401,7 +2397,7 @@ fn splitServer(url: []const u8) ?Server {
     }
     // A bracketed IPv6 literal keeps its colons.
     if (rest[0] == '[') {
-        const end = std.mem.indexOfScalar(u8, rest, ']') orelse return null;
+        const end = std.mem.findScalar(u8, rest, ']') orelse return null;
         const host = rest[1..end];
         const after = rest[end + 1 ..];
         const port = if (after.len > 1 and after[0] == ':')
@@ -2409,7 +2405,7 @@ fn splitServer(url: []const u8) ?Server {
         else if (tls) @as(u16, 443) else 80;
         return .{ .host = host, .port = port, .tls = tls };
     }
-    if (std.mem.lastIndexOfScalar(u8, rest, ':')) |mark| {
+    if (std.mem.findScalarLast(u8, rest, ':')) |mark| {
         const port = std.fmt.parseInt(u16, rest[mark + 1 ..], 10) catch return null;
         return .{ .host = rest[0..mark], .port = port, .tls = tls };
     }
@@ -2544,9 +2540,9 @@ test "a manifest comes apart at its document separators" {
     var found: usize = 0;
     var walk = splitDocuments(text);
     while (walk.next()) |document| : (found += 1) {
-        try testing.expect(std.mem.indexOf(u8, document, "apiVersion") != null);
+        try testing.expect(std.mem.find(u8, document, "apiVersion") != null);
         // A separator belongs to neither side of it.
-        try testing.expect(std.mem.indexOf(u8, document, "---") == null);
+        try testing.expect(std.mem.find(u8, document, "---") == null);
     }
     try testing.expectEqual(@as(usize, 3), found);
 
@@ -2562,7 +2558,7 @@ test "a manifest comes apart at its document separators" {
     ;
     var one = splitDocuments(tricky);
     const whole = one.next().?;
-    try testing.expect(std.mem.indexOf(u8, whole, "still the same document") != null);
+    try testing.expect(std.mem.find(u8, whole, "still the same document") != null);
     try testing.expect(one.next() == null);
 
     // One document with no separator at all is one document.

@@ -82,11 +82,11 @@ pub fn parse(arena: std.mem.Allocator, target: []const u8) !Parts {
     // part of the address. A secret key routinely has both.
     var endpoint_given: ?[]const u8 = null;
     var style_given: ?bool = null;
-    if (std.mem.indexOfScalar(u8, rest, '?')) |mark| {
+    if (std.mem.findScalar(u8, rest, '?')) |mark| {
         var options = std.mem.tokenizeScalar(u8, rest[mark + 1 ..], '&');
         rest = rest[0..mark];
         while (options.next()) |option| {
-            const equals = std.mem.indexOfScalar(u8, option, '=') orelse continue;
+            const equals = std.mem.findScalar(u8, option, '=') orelse continue;
             const name = option[0..equals];
             const value = try targets.unescape(arena, option[equals + 1 ..]);
             if (targets.eql(name, "region")) {
@@ -114,10 +114,10 @@ pub fn parse(arena: std.mem.Allocator, target: []const u8) !Parts {
     // The credentials end at the *last* at sign rather than at the first slash: a
     // secret key is base64 and holds slashes, and no bucket name may hold an at
     // sign.
-    if (std.mem.lastIndexOfScalar(u8, rest, '@')) |at| {
+    if (std.mem.findScalarLast(u8, rest, '@')) |at| {
         const userinfo = rest[0..at];
         rest = rest[at + 1 ..];
-        if (std.mem.indexOfScalar(u8, userinfo, ':')) |colon| {
+        if (std.mem.findScalar(u8, userinfo, ':')) |colon| {
             self.key = try targets.unescape(arena, userinfo[0..colon]);
             self.secret = try targets.unescape(arena, userinfo[colon + 1 ..]);
         } else {
@@ -130,14 +130,14 @@ pub fn parse(arena: std.mem.Allocator, target: []const u8) !Parts {
 
     var authority = rest;
     var path: []const u8 = "";
-    if (std.mem.indexOfScalar(u8, rest, '/')) |slash| {
+    if (std.mem.findScalar(u8, rest, '/')) |slash| {
         authority = rest[0..slash];
         path = std.mem.trim(u8, rest[slash + 1 ..], "/");
     }
 
     var host = authority;
     var port: ?u16 = null;
-    if (std.mem.lastIndexOfScalar(u8, authority, ':')) |colon| {
+    if (std.mem.findScalarLast(u8, authority, ':')) |colon| {
         if (std.fmt.parseInt(u16, authority[colon + 1 ..], 10)) |value| {
             host = authority[0..colon];
             port = value;
@@ -163,7 +163,7 @@ pub fn parse(arena: std.mem.Allocator, target: []const u8) !Parts {
             self.bucket = self.endpoint;
         }
         self.endpoint = given;
-        if (std.mem.lastIndexOfScalar(u8, given, ':')) |colon| {
+        if (std.mem.findScalarLast(u8, given, ':')) |colon| {
             if (std.fmt.parseInt(u16, given[colon + 1 ..], 10)) |value| {
                 self.endpoint = given[0..colon];
                 port = value;
@@ -185,7 +185,7 @@ pub fn isAmazon(endpoint: []const u8) bool {
 
 /// Where a bucket lives when nobody said: Amazon's own name for the region.
 pub fn amazonEndpoint(arena: std.mem.Allocator, region: []const u8) ![]const u8 {
-    return std.fmt.allocPrint(arena, "s3.{s}.amazonaws.com", .{region});
+    return arena.print("s3.{s}.amazonaws.com", .{region});
 }
 
 // ------------------------------------------------------- finding the secrets
@@ -211,7 +211,7 @@ pub fn resolve(arena: std.mem.Allocator, self: *Parts) !void {
         const home = targets.getenv("HOME") orelse "";
         if (home.len != 0) {
             for ([_][]const u8{ "credentials", "config" }) |name| {
-                const path = try std.fmt.allocPrint(arena, "{s}/.aws/{s}", .{ home, name });
+                const path = try arena.print("{s}/.aws/{s}", .{ home, name });
                 const text = targets.readFile(arena, path) catch continue;
                 take(self, fromIni(arena, text, self.profile), "~/.aws");
             }
@@ -264,7 +264,7 @@ pub fn fromIni(arena: std.mem.Allocator, text: []const u8, profile: []const u8) 
             continue;
         }
         if (line[0] == '[') {
-            const name = std.mem.trim(u8, line[1 .. std.mem.indexOfScalar(u8, line, ']') orelse line.len], " \t");
+            const name = std.mem.trim(u8, line[1 .. std.mem.findScalar(u8, line, ']') orelse line.len], " \t");
             const bare = if (std.mem.startsWith(u8, name, "profile "))
                 std.mem.trim(u8, name["profile ".len..], " \t")
             else
@@ -275,7 +275,7 @@ pub fn fromIni(arena: std.mem.Allocator, text: []const u8, profile: []const u8) 
         if (!inside) {
             continue;
         }
-        const equals = std.mem.indexOfScalar(u8, line, '=') orelse continue;
+        const equals = std.mem.findScalar(u8, line, '=') orelse continue;
         const name = std.mem.trim(u8, line[0..equals], " \t");
         const value = arena.dupe(u8, std.mem.trim(u8, line[equals + 1 ..], " \t")) catch continue;
         if (targets.eql(name, "aws_access_key_id")) {

@@ -5,11 +5,12 @@
 //!     zig build fuzz -- 1000000          # longer
 //!     zig build fuzz -- 1000000 12345    # and from another seed
 //!
-//! This exists because `zig build test --fuzz` does not compile with Zig 0.16.0:
-//! its own test runner passes a `*builtin.StackTrace` where a
-//! `*const debug.StackTrace` is wanted. The fuzz targets in `src/db/kafka.zig` are
-//! still there and still run over their corpus on every ordinary test run; this is
-//! what actually generates input in the meantime.
+//! This exists because `zig build test --fuzz` cannot stand in for it. With Zig
+//! 0.16.0 it did not compile; with 0.17.0 it does, but it instruments the vendored
+//! sqlite3.c along with everything else, which its runtime refuses to start with,
+//! and a crash it does find still leaves `zig build` exiting 0 - no use as a gate.
+//! The fuzz targets in `src/db/kafka.zig` are still there and still run over their
+//! corpus on every ordinary test run; this is what actually generates input.
 //!
 //! Deterministic on purpose: a crash prints the seed and the iteration, and the
 //! same two numbers produce the same bytes again. The input itself is printed as
@@ -75,12 +76,12 @@ pub fn main(init: std.process.Init) !void {
         verbose = true;
     }
 
-    var counts = [_]usize{0} ** std.meta.fields(Target).len;
+    var counts: [@typeInfo(Target).@"enum".field_names.len]usize = @splat(0);
     var survived: usize = 0;
     for (0..iterations) |iteration| {
         const target = random.enumValue(Target);
         const input = shape(random, &buffer, target);
-        counts[@intFromEnum(target)] += 1;
+        counts[@backingInt(target)] += 1;
         if (verbose) {
             std.debug.print("{d} {t} {x}\n", .{ iteration, target, input });
         }
@@ -93,8 +94,8 @@ pub fn main(init: std.process.Init) !void {
     }
 
     std.debug.print("survived {d} inputs:", .{survived});
-    inline for (std.meta.fields(Target), 0..) |field, i| {
-        std.debug.print(" {s}={d}", .{ field.name, counts[i] });
+    inline for (@typeInfo(Target).@"enum".field_names, 0..) |name, i| {
+        std.debug.print(" {s}={d}", .{ name, counts[i] });
     }
     std.debug.print("\n", .{});
 }

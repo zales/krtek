@@ -110,9 +110,7 @@ pub fn build(b: *std.Build) void {
 
     const run = b.addRunArtifact(exe);
     run.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        run.addArgs(args);
-    }
+    run.addPassthruArgs();
     b.step("run", "Open a database in the terminal app").dependOn(&run.step);
 
     const test_module = b.createModule(.{
@@ -174,18 +172,16 @@ pub fn build(b: *std.Build) void {
     linkSsh(b, check_module, target, libssh2, linking);
     const check = b.addExecutable(.{ .name = "dbcheck", .root_module = check_module });
     const run_check = b.addRunArtifact(check);
-    if (b.args) |args| {
-        run_check.addArgs(args);
-    }
+    run_check.addPassthruArgs();
     b.step("dbcheck", "Talk to a real server, without the interface").dependOn(&run_check.step);
     // Malformed bytes at the parsers that read from a socket. Its own executable
-    // rather than `zig build test --fuzz`, which does not compile with Zig 0.16.0 -
-    // see tests/fuzz.zig.
+    // rather than `zig build test --fuzz`, which cannot fail a build - see
+    // tests/fuzz.zig.
     const fuzz_module = b.createModule(.{
         .root_source_file = b.path("tests/fuzz.zig"),
         .target = target,
         // Whatever was asked for: Debug by default, because a crash here is read
-        // rather than counted, and `-Doptimize=ReleaseSafe` for a long run, which is
+        // rather than counted, and `-Doptimize=safe` for a long run, which is
         // many times the inputs for the same wait and keeps every check that matters.
         .optimize = optimize,
         .link_libc = true,
@@ -202,9 +198,7 @@ pub fn build(b: *std.Build) void {
     }
     const fuzz = b.addExecutable(.{ .name = "fuzz", .root_module = fuzz_module });
     const run_fuzz = b.addRunArtifact(fuzz);
-    if (b.args) |args| {
-        run_fuzz.addArgs(args);
-    }
+    run_fuzz.addPassthruArgs();
     b.step("fuzz", "Throw malformed bytes at the protocol parsers").dependOn(&run_fuzz.step);
 
     // A one-off check that the keychain really answers on this machine.
@@ -230,12 +224,12 @@ pub fn build(b: *std.Build) void {
 
 fn linkPostgres(b: *std.Build, module: *std.Build.Module, target: std.Build.ResolvedTarget, prefix: ?[]const u8, options: Linking) void {
     if (prefix orelse defaultPrefix(target, "libpq")) |root| {
-        module.addIncludePath(.{ .cwd_relative = b.pathJoin(&.{ root, "include" }) });
-        module.addLibraryPath(.{ .cwd_relative = b.pathJoin(&.{ root, "lib" }) });
+        module.addIncludePath(b.graph.cwdRelativePath(b.pathJoin(&.{ root, "include" })));
+        module.addLibraryPath(b.graph.cwdRelativePath(b.pathJoin(&.{ root, "lib" })));
     } else {
         // Where the distributions put it; a path that is not there is only an
         // unused -I flag.
-        module.addIncludePath(.{ .cwd_relative = "/usr/include/postgresql" });
+        module.addIncludePath(b.graph.cwdRelativePath("/usr/include/postgresql"));
     }
     if (!options.static) {
         module.linkSystemLibrary("pq", .{});
@@ -261,17 +255,23 @@ const Linking = struct {
 /// `use_pkg_config`, because that reads only the shared link line and so misses
 /// everything a static libpq needs.
 fn linkClientLibraries(b: *std.Build, module: *std.Build.Module) void {
-    var code: u8 = 0;
-    const out = b.runAllowFail(
+    // What pkg-config answers, and which archives are on disk, is read while the
+    // build is being configured, and Zig keeps a configuration it thinks is pure,
+    // keyed on the -D options and the target and not on the environment: another
+    // PKG_CONFIG_PATH, or a `brew upgrade`, and the next build would link the old
+    // line again. So this configuration is not kept. Only -Dstatic gets here;
+    // every other build still is.
+    b.graph.poisonCache();
+    const out = switch (b.runFallible(
         &.{ "pkg-config", "--static", "--libs", "libpq", "libmariadb", "libssh2" },
-        &code,
-        .ignore,
-    ) catch {
-        std.debug.panic(
+        .{ .stderr_behavior = .ignore },
+    )) {
+        .success => |stdout| stdout,
+        else => std.debug.panic(
             "-Dstatic needs pkg-config with libpq.pc, libmariadb.pc and libssh2.pc; " ++
                 "on a Mac set PKG_CONFIG_PATH to the keg-only prefixes",
             .{},
-        );
+        ),
     };
 
     // The search paths first, so an archive can be looked for in them below. The
@@ -290,14 +290,14 @@ fn linkClientLibraries(b: *std.Build, module: *std.Build.Module) void {
         // only the shared one is.
         if (std.Io.Dir.cwd().access(b.graph.io, where, .{})) |_| {
             paths.append(b.allocator, where) catch @panic("out of memory");
-            module.addLibraryPath(.{ .cwd_relative = where });
+            module.addLibraryPath(b.graph.cwdRelativePath(where));
         } else |_| {}
     }
     var scan = std.mem.tokenizeAny(u8, out, " \r\n\t");
     while (scan.next()) |flag| {
         if (std.mem.startsWith(u8, flag, "-L")) {
             paths.append(b.allocator, flag[2..]) catch @panic("out of memory");
-            module.addLibraryPath(.{ .cwd_relative = flag[2..] });
+            module.addLibraryPath(b.graph.cwdRelativePath(flag[2..]));
         }
     }
 
@@ -319,7 +319,7 @@ fn linkClientLibraries(b: *std.Build, module: *std.Build.Module) void {
         const entry = flag[2..];
         // A real archive given by path goes in as it is.
         if (std.mem.endsWith(u8, entry, ".a")) {
-            module.addObjectFile(.{ .cwd_relative = entry });
+            module.addObjectFile(b.graph.cwdRelativePath(entry));
             continue;
         }
         const library = shlibVariant(b, paths.items, libraryName(entry));
@@ -336,7 +336,7 @@ fn linkClientLibraries(b: *std.Build, module: *std.Build.Module) void {
         // archive and a shared library and is the one thing that must not happen
         // here: a single shared library in the line makes the whole link dynamic.
         if (archive(b, paths.items, library)) |found| {
-            module.addObjectFile(.{ .cwd_relative = found });
+            module.addObjectFile(b.graph.cwdRelativePath(found));
             continue;
         }
         // No archive: on musl these are the pieces libc already contains, and
@@ -352,13 +352,13 @@ fn linkClientLibraries(b: *std.Build, module: *std.Build.Module) void {
 /// is named in a .pc file.
 fn libraryName(entry: []const u8) []const u8 {
     var name = entry;
-    if (std.mem.lastIndexOfScalar(u8, name, '/')) |slash| {
+    if (std.mem.findScalarLast(u8, name, '/')) |slash| {
         name = name[slash + 1 ..];
     }
     if (std.mem.startsWith(u8, name, "lib")) {
         name = name["lib".len..];
     }
-    if (std.mem.lastIndexOfScalar(u8, name, '.')) |dot| {
+    if (std.mem.findScalarLast(u8, name, '.')) |dot| {
         name = name[0..dot];
     }
     return name;
@@ -414,11 +414,11 @@ fn linkKeychain(module: *std.Build.Module, target: std.Build.ResolvedTarget) voi
 
 fn linkMysql(b: *std.Build, module: *std.Build.Module, target: std.Build.ResolvedTarget, prefix: ?[]const u8, options: Linking) void {
     if (prefix orelse defaultPrefix(target, "mariadb-connector-c")) |root| {
-        module.addIncludePath(.{ .cwd_relative = b.pathJoin(&.{ root, "include", "mariadb" }) });
-        module.addLibraryPath(.{ .cwd_relative = b.pathJoin(&.{ root, "lib" }) });
+        module.addIncludePath(b.graph.cwdRelativePath(b.pathJoin(&.{ root, "include", "mariadb" })));
+        module.addLibraryPath(b.graph.cwdRelativePath(b.pathJoin(&.{ root, "lib" })));
     } else {
         for ([_][]const u8{ "/usr/include/mariadb", "/usr/include/mysql" }) |candidate| {
-            module.addIncludePath(.{ .cwd_relative = candidate });
+            module.addIncludePath(b.graph.cwdRelativePath(candidate));
         }
     }
     if (!options.static) {
@@ -435,7 +435,7 @@ fn linkTls(b: *std.Build, module: *std.Build.Module, target: std.Build.ResolvedT
     }
     const root = prefix orelse defaultPrefix(target, "openssl");
     if (root) |where| {
-        module.addLibraryPath(.{ .cwd_relative = b.pathJoin(&.{ where, "lib" }) });
+        module.addLibraryPath(b.graph.cwdRelativePath(b.pathJoin(&.{ where, "lib" })));
     }
     module.linkSystemLibrary("ssl", .{});
     module.linkSystemLibrary("crypto", .{});
@@ -447,8 +447,8 @@ fn linkSsh(b: *std.Build, module: *std.Build.Module, target: std.Build.ResolvedT
     }
     const root = prefix orelse defaultPrefix(target, "libssh2");
     if (root) |where| {
-        module.addLibraryPath(.{ .cwd_relative = b.pathJoin(&.{ where, "lib" }) });
-        module.addIncludePath(.{ .cwd_relative = b.pathJoin(&.{ where, "include" }) });
+        module.addLibraryPath(b.graph.cwdRelativePath(b.pathJoin(&.{ where, "lib" })));
+        module.addIncludePath(b.graph.cwdRelativePath(b.pathJoin(&.{ where, "include" })));
     }
     module.linkSystemLibrary("ssh2", .{});
 }

@@ -25,7 +25,7 @@ const builtin = @import("builtin");
 pub var available: bool = false;
 
 pub fn detect() void {
-    if (comptime builtin.os.tag != .macos) {
+    if (comptime builtin.target.os.tag != .macos) {
         return;
     }
     const context = newContext() orelse return;
@@ -44,7 +44,7 @@ pub fn ask(reason: []const u8) bool {
     // is the Objective-C runtime, and a Linux build that merely *compiles* the
     // calls fails to link over four symbols that are not there. `comptime`
     // makes the rest of this function stop existing off macOS.
-    if (comptime builtin.os.tag != .macos) {
+    if (comptime builtin.target.os.tag != .macos) {
         return false;
     }
     if (!available) {
@@ -65,7 +65,7 @@ pub fn ask(reason: []const u8) bool {
     };
 
     var buffer: [256]u8 = undefined;
-    const text = std.fmt.bufPrintZ(&buffer, "{s}", .{reason[0..@min(reason.len, buffer.len - 1)]}) catch return false;
+    const text = std.mem.printSentinel(&buffer, "{s}", .{reason[0..@min(reason.len, buffer.len - 1)]}, 0) catch return false;
     const localized = nsString(text) orelse return false;
 
     const evaluate: *const fn (?*anyopaque, ?*anyopaque, i64, ?*anyopaque, *Block) callconv(.c) void =

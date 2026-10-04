@@ -347,7 +347,7 @@ pub const Db = struct {
                 .{ .text = kindOf(attributes) },
                 .{ .text = try address.stamp(arena, attributes.mtime) },
                 .{ .text = try arena.dupe(u8, address.mode(&buffer, attributes.permissions)) },
-                .{ .text = try std.fmt.allocPrint(arena, "{d}:{d}", .{ attributes.uid, attributes.gid }) },
+                .{ .text = try arena.print("{d}:{d}", .{ attributes.uid, attributes.gid }) },
             });
         }
         return .{ .sftp = rows };
@@ -361,7 +361,7 @@ pub const Db = struct {
         self.requests += 1;
         const all = ssh.readDir(conn, arena, where, ENTRIES) catch return self.fromServer();
 
-        var kept: std.ArrayListUnmanaged(ssh.Entry) = .empty;
+        var kept: std.ArrayList(ssh.Entry) = .empty;
         for (all) |entry| {
             if (try self.keep(entry, request.where)) {
                 try kept.append(arena, entry);
@@ -558,7 +558,7 @@ pub const Db = struct {
     /// a schema is here, so `#` walks the tree.
     pub fn schemas(self: *Db, arena: std.mem.Allocator) db.Error![][]const u8 {
         const conn = self.conn orelse return error.Driver;
-        var out: std.ArrayListUnmanaged([]const u8) = .empty;
+        var out: std.ArrayList([]const u8) = .empty;
         try out.append(arena, try arena.dupe(u8, self.cwd));
         const above = address.parent(self.cwd);
         if (!std.mem.eql(u8, above, self.cwd)) {
@@ -585,7 +585,7 @@ pub const Db = struct {
             self.cwd = where;
             self.relabel();
         }
-        var out: std.ArrayListUnmanaged(db.Object) = .empty;
+        var out: std.ArrayList(db.Object) = .empty;
         try out.append(arena, .{
             .schema = try arena.dupe(u8, self.cwd),
             .name = try arena.dupe(u8, address.basename(self.cwd)),
@@ -595,7 +595,7 @@ pub const Db = struct {
     }
 
     pub fn columns(_: *Db, arena: std.mem.Allocator, _: db.Table) db.Error![]db.Column {
-        var out: std.ArrayListUnmanaged(db.Column) = .empty;
+        var out: std.ArrayList(db.Column) = .empty;
         try out.append(arena, .{ .name = NAME, .type = "string", .notnull = true, .pk = true, .original = NAME });
         try out.append(arena, .{ .name = SIZE, .type = "integer", .original = SIZE });
         try out.append(arena, .{ .name = KIND, .type = "string", .original = KIND });
@@ -606,7 +606,7 @@ pub const Db = struct {
     }
 
     pub fn indexes(_: *Db, arena: std.mem.Allocator, _: db.Table) db.Error![]db.Index {
-        var out: std.ArrayListUnmanaged(db.Index) = .empty;
+        var out: std.ArrayList(db.Index) = .empty;
         try out.append(arena, .{ .name = NAME, .kind = "PRIMARY", .columns = NAME });
         return out.items;
     }
@@ -629,7 +629,7 @@ pub const Db = struct {
     }
 
     pub fn rowKey(_: *Db, arena: std.mem.Allocator, _: db.Table) db.Error!db.RowKey {
-        var out: std.ArrayListUnmanaged([]const u8) = .empty;
+        var out: std.ArrayList([]const u8) = .empty;
         try out.append(arena, NAME);
         return .{ .columns = out.items };
     }
@@ -639,18 +639,18 @@ pub const Db = struct {
     }
 
     pub fn settings(self: *Db, arena: std.mem.Allocator) db.Error![]db.Setting {
-        var out: std.ArrayListUnmanaged(db.Setting) = .empty;
-        try out.append(arena, .{ .label = "host", .value = try std.fmt.allocPrint(arena, "{s}:{d}", .{ self.parts.host, self.parts.port }) });
+        var out: std.ArrayList(db.Setting) = .empty;
+        try out.append(arena, .{ .label = "host", .value = try arena.print("{s}:{d}", .{ self.parts.host, self.parts.port }) });
         try out.append(arena, .{ .label = "user", .value = self.parts.user });
         try out.append(arena, .{ .label = "directory", .value = self.cwd });
         try out.append(arena, .{ .label = "host key", .value = if (self.parts.verify) "checked against ~/.ssh/known_hosts" else "not checked - insecure=1" });
-        try out.append(arena, .{ .label = "transport", .value = try std.fmt.allocPrint(arena, "libssh2 {s}", .{ssh.version.text()}) });
-        try out.append(arena, .{ .label = "listings read", .value = try std.fmt.allocPrint(arena, "{d}", .{self.requests}) });
+        try out.append(arena, .{ .label = "transport", .value = try arena.print("libssh2 {s}", .{ssh.version.text()}) });
+        try out.append(arena, .{ .label = "listings read", .value = try arena.print("{d}", .{self.requests}) });
         return out.items;
     }
 
     pub fn split(_: *Db, arena: std.mem.Allocator, sql: []const u8) db.Error![]db.Statement {
-        var out: std.ArrayListUnmanaged(db.Statement) = .empty;
+        var out: std.ArrayList(db.Statement) = .empty;
         var lines = std.mem.splitScalar(u8, sql, '\n');
         while (lines.next()) |raw| {
             const line = std.mem.trim(u8, raw, " \t\r");
@@ -715,7 +715,7 @@ pub const Db = struct {
                     .{ .text = kindOf(entry.attributes) },
                     .{ .text = try address.stamp(replies, entry.attributes.mtime) },
                     .{ .text = try replies.dupe(u8, address.mode(&buffer, entry.attributes.permissions)) },
-                    .{ .text = try std.fmt.allocPrint(replies, "{d}:{d}", .{ entry.attributes.uid, entry.attributes.gid }) },
+                    .{ .text = try replies.print("{d}:{d}", .{ entry.attributes.uid, entry.attributes.gid }) },
                 });
             }
             return rows;
@@ -782,7 +782,7 @@ pub const Db = struct {
             try rows.add(&.{ .{ .text = "kind" }, .{ .text = kindOf(what) } });
             try rows.add(&.{ .{ .text = "size" }, .{ .number = @intCast(what.filesize) } });
             try rows.add(&.{ .{ .text = "mode" }, .{ .text = try replies.dupe(u8, address.mode(&buffer, what.permissions)) } });
-            try rows.add(&.{ .{ .text = "owner" }, .{ .text = try std.fmt.allocPrint(replies, "{d}:{d}", .{ what.uid, what.gid }) } });
+            try rows.add(&.{ .{ .text = "owner" }, .{ .text = try replies.print("{d}:{d}", .{ what.uid, what.gid }) } });
             try rows.add(&.{ .{ .text = "modified" }, .{ .text = try address.stamp(replies, what.mtime) } });
             return rows;
         }

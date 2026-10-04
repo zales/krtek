@@ -57,11 +57,11 @@ pub fn parse(arena: std.mem.Allocator, target: []const u8) !Parts {
     }
 
     // The query first: a password may hold an @ or a /.
-    if (std.mem.indexOfScalar(u8, rest, '?')) |mark| {
+    if (std.mem.findScalar(u8, rest, '?')) |mark| {
         var options = std.mem.tokenizeScalar(u8, rest[mark + 1 ..], '&');
         rest = rest[0..mark];
         while (options.next()) |option| {
-            const equals = std.mem.indexOfScalar(u8, option, '=') orelse continue;
+            const equals = std.mem.findScalar(u8, option, '=') orelse continue;
             const name = option[0..equals];
             const value = try targets.unescape(arena, option[equals + 1 ..]);
             if (targets.eql(name, "password")) {
@@ -81,16 +81,16 @@ pub fn parse(arena: std.mem.Allocator, target: []const u8) !Parts {
     }
 
     var authority = rest;
-    if (std.mem.indexOfScalar(u8, rest, '/')) |slash| {
+    if (std.mem.findScalar(u8, rest, '/')) |slash| {
         authority = rest[0..slash];
         // The path is what follows the host, and it is absolute: `sftp://h/etc`
         // means /etc, as scp and every other tool has it.
         self.path = try targets.unescape(arena, rest[slash..]);
     }
-    if (std.mem.lastIndexOfScalar(u8, authority, '@')) |at| {
+    if (std.mem.findScalarLast(u8, authority, '@')) |at| {
         const userinfo = authority[0..at];
         authority = authority[at + 1 ..];
-        if (std.mem.indexOfScalar(u8, userinfo, ':')) |colon| {
+        if (std.mem.findScalar(u8, userinfo, ':')) |colon| {
             self.user = try targets.unescape(arena, userinfo[0..colon]);
             self.password = try targets.unescape(arena, userinfo[colon + 1 ..]);
         } else {
@@ -99,7 +99,7 @@ pub fn parse(arena: std.mem.Allocator, target: []const u8) !Parts {
     }
 
     var host = authority;
-    if (std.mem.lastIndexOfScalar(u8, authority, ':')) |colon| {
+    if (std.mem.findScalarLast(u8, authority, ':')) |colon| {
         if (std.fmt.parseInt(u16, authority[colon + 1 ..], 10)) |value| {
             host = authority[0..colon];
             self.port = value;
@@ -125,7 +125,7 @@ pub fn expand(arena: std.mem.Allocator, path: []const u8) ![]const u8 {
         return path;
     }
     const home = targets.getenv("HOME") orelse return path;
-    return std.fmt.allocPrint(arena, "{s}{s}", .{ home, path[1..] });
+    return arena.print("{s}{s}", .{ home, path[1..] });
 }
 
 // ------------------------------------------------------------------- paths
@@ -179,7 +179,7 @@ pub fn stamp(arena: std.mem.Allocator, seconds: c_ulong) ![]const u8 {
     const day = moment.getEpochDay().calculateYearDay();
     const month_day = day.calculateMonthDay();
     const clock = moment.getDaySeconds();
-    return std.fmt.allocPrint(arena, "{d:0>4}-{d:0>2}-{d:0>2} {d:0>2}:{d:0>2}:{d:0>2}", .{
+    return arena.print("{d:0>4}-{d:0>2}-{d:0>2} {d:0>2}:{d:0>2}:{d:0>2}", .{
         day.year,
         month_day.month.numeric(),
         month_day.day_index + 1,

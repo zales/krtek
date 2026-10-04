@@ -233,11 +233,11 @@ pub const Db = struct {
         // the header still has to be there. Signing "0" is a 403 and leaving the
         // header out is a 400; the server was asked which it wanted.
         const length = if (request.body.len != 0)
-            try std.fmt.allocPrint(arena, "{d}", .{request.body.len})
+            try arena.print("{d}", .{request.body.len})
         else
             "";
 
-        var headers: std.ArrayListUnmanaged(http.Header) = .empty;
+        var headers: std.ArrayList(http.Header) = .empty;
         if (request.body.len == 0 and std.mem.eql(u8, request.method, "PUT")) {
             try headers.append(arena, .{ .name = "Content-Length", .value = "0" });
         }
@@ -275,7 +275,7 @@ pub const Db = struct {
         }
 
         const target = if (params.items.len != 0)
-            try std.fmt.allocPrint(arena, "{s}?{s}", .{ path, params.items })
+            try arena.print("{s}?{s}", .{ path, params.items })
         else
             path;
 
@@ -328,8 +328,8 @@ pub const Db = struct {
         const host = if (self.parts.port == http.defaultPort(self.parts.tls))
             try arena.dupe(u8, self.parts.host)
         else
-            try std.fmt.allocPrint(arena, "{s}:{d}", .{ self.parts.host, self.parts.port });
-        return std.fmt.allocPrint(arena, "{s}://{s}{s}", .{
+            try arena.print("{s}:{d}", .{ self.parts.host, self.parts.port });
+        return arena.print("{s}://{s}{s}", .{
             if (self.parts.tls) "https" else "http",
             host,
             try self.pathOf(arena, container, blob),
@@ -343,7 +343,7 @@ pub const Db = struct {
             // Azure's Message carries the request id on a line of its own, which is
             // for a support ticket and not for a status bar.
             const first = detail orelse "";
-            const cut = std.mem.indexOfScalar(u8, first, '\n') orelse first.len;
+            const cut = std.mem.findScalar(u8, first, '\n') orelse first.len;
             self.complain("{s}{s}{s}", .{
                 name,
                 if (cut != 0) ": " else "",
@@ -402,12 +402,12 @@ pub const Db = struct {
         limit: usize,
         folded: bool,
     ) db.Error!Listing {
-        var params: std.ArrayListUnmanaged(sign.Param) = .empty;
+        var params: std.ArrayList(sign.Param) = .empty;
         try params.append(arena, .{ .name = "restype", .value = "container" });
         try params.append(arena, .{ .name = "comp", .value = "list" });
         try params.append(arena, .{
             .name = "maxresults",
-            .value = try std.fmt.allocPrint(arena, "{d}", .{limit}),
+            .value = try arena.print("{d}", .{limit}),
         });
         if (prefix.len != 0) {
             try params.append(arena, .{ .name = "prefix", .value = prefix });
@@ -707,7 +707,7 @@ pub const Db = struct {
                 .eq => out.exact = try arena.dupe(u8, filter.value),
                 .like => {
                     const body = std.mem.trimEnd(u8, filter.value, "%");
-                    if (std.mem.indexOfAny(u8, body, "%_") != null) {
+                    if (std.mem.findAny(u8, body, "%_") != null) {
                         self.remember("Azure matches a prefix, not a pattern: name LIKE 'a/b%' is all it can do");
                         return error.Driver;
                     }
@@ -727,13 +727,13 @@ pub const Db = struct {
     }
 
     pub fn schemas(_: *Db, arena: std.mem.Allocator) db.Error![][]const u8 {
-        var out: std.ArrayListUnmanaged([]const u8) = .empty;
+        var out: std.ArrayList([]const u8) = .empty;
         return out.toOwnedSlice(arena);
     }
 
     pub fn objects(self: *Db, arena: std.mem.Allocator, _: []const u8) db.Error![]db.Object {
         if (self.parts.container.len != 0) {
-            var out: std.ArrayListUnmanaged(db.Object) = .empty;
+            var out: std.ArrayList(db.Object) = .empty;
             try out.append(arena, .{ .name = try arena.dupe(u8, self.parts.container), .kind = .table });
             return out.items;
         }
@@ -741,7 +741,7 @@ pub const Db = struct {
     }
 
     fn containers(self: *Db, arena: std.mem.Allocator) db.Error![]db.Object {
-        var out: std.ArrayListUnmanaged(db.Object) = .empty;
+        var out: std.ArrayList(db.Object) = .empty;
         const response = try self.call(arena, .{ .query = &.{.{ .name = "comp", .value = "list" }} });
         if (!response.ok()) {
             return self.fail(response);
@@ -774,7 +774,7 @@ pub const Db = struct {
     }
 
     pub fn columns(_: *Db, arena: std.mem.Allocator, _: db.Table) db.Error![]db.Column {
-        var out: std.ArrayListUnmanaged(db.Column) = .empty;
+        var out: std.ArrayList(db.Column) = .empty;
         try out.append(arena, .{ .name = NAME, .type = "string", .notnull = true, .pk = true, .original = NAME });
         try out.append(arena, .{ .name = SIZE, .type = "integer", .original = SIZE });
         try out.append(arena, .{ .name = MODIFIED, .type = "timestamp", .original = MODIFIED });
@@ -785,7 +785,7 @@ pub const Db = struct {
     }
 
     pub fn indexes(_: *Db, arena: std.mem.Allocator, _: db.Table) db.Error![]db.Index {
-        var out: std.ArrayListUnmanaged(db.Index) = .empty;
+        var out: std.ArrayList(db.Index) = .empty;
         try out.append(arena, .{ .name = NAME, .kind = "PRIMARY", .columns = NAME });
         return out.items;
     }
@@ -815,7 +815,7 @@ pub const Db = struct {
     }
 
     pub fn rowKey(_: *Db, arena: std.mem.Allocator, _: db.Table) db.Error!db.RowKey {
-        var out: std.ArrayListUnmanaged([]const u8) = .empty;
+        var out: std.ArrayList([]const u8) = .empty;
         try out.append(arena, NAME);
         return .{ .columns = out.items };
     }
@@ -825,11 +825,11 @@ pub const Db = struct {
     }
 
     pub fn settings(self: *Db, arena: std.mem.Allocator) db.Error![]db.Setting {
-        var out: std.ArrayListUnmanaged(db.Setting) = .empty;
+        var out: std.ArrayList(db.Setting) = .empty;
         try out.append(arena, .{ .label = "account", .value = self.parts.account });
         try out.append(arena, .{
             .label = "endpoint",
-            .value = try std.fmt.allocPrint(arena, "{s}:{d}", .{ self.parts.host, self.parts.port }),
+            .value = try arena.print("{s}:{d}", .{ self.parts.host, self.parts.port }),
         });
         try out.append(arena, .{ .label = "addressing", .value = if (self.parts.path_style) "account in the path" else "account in the host" });
         try out.append(arena, .{ .label = "encrypted", .value = if (self.parts.tls) "yes, TLS" else "no" });
@@ -844,13 +844,13 @@ pub const Db = struct {
         try out.append(arena, .{ .label = "api version", .value = sign.VERSION });
         try out.append(arena, .{
             .label = "requests made",
-            .value = try std.fmt.allocPrint(arena, "{d}", .{self.requests}),
+            .value = try arena.print("{d}", .{self.requests}),
         });
         return out.items;
     }
 
     pub fn split(_: *Db, arena: std.mem.Allocator, sql: []const u8) db.Error![]db.Statement {
-        var out: std.ArrayListUnmanaged(db.Statement) = .empty;
+        var out: std.ArrayList(db.Statement) = .empty;
         var lines = std.mem.splitScalar(u8, sql, '\n');
         while (lines.next()) |raw| {
             const line = std.mem.trim(u8, raw, " \t\r");
@@ -1007,7 +1007,7 @@ pub const Db = struct {
             if (self.owner.parts.container.len == 0) {
                 return "/";
             }
-            return std.fmt.allocPrint(arena, "/{s}", .{self.owner.parts.container}) catch error.OutOfMemory;
+            return arena.print("/{s}", .{self.owner.parts.container}) catch error.OutOfMemory;
         }
 
         const Split = struct {
@@ -1017,7 +1017,7 @@ pub const Db = struct {
 
         fn partsOf(path: []const u8) Split {
             const trimmed = std.mem.trimStart(u8, path, "/");
-            const slash = std.mem.indexOfScalar(u8, trimmed, '/') orelse return .{ .container = trimmed };
+            const slash = std.mem.findScalar(u8, trimmed, '/') orelse return .{ .container = trimmed };
             return .{ .container = trimmed[0..slash], .blob = trimmed[slash + 1 ..] };
         }
 
@@ -1025,7 +1025,7 @@ pub const Db = struct {
             if (name.len == 0 or std.mem.endsWith(u8, name, "/")) {
                 return name;
             }
-            return std.fmt.allocPrint(arena, "{s}/", .{name}) catch error.OutOfMemory;
+            return arena.print("{s}/", .{name}) catch error.OutOfMemory;
         }
 
         fn blame(self: Files, response: http.Response) db.store.Error {
@@ -1034,7 +1034,7 @@ pub const Db = struct {
         }
 
         pub fn list(self: Files, arena: std.mem.Allocator, path: []const u8) db.store.Error![]db.store.Entry {
-            var out: std.ArrayListUnmanaged(db.store.Entry) = .empty;
+            var out: std.ArrayList(db.store.Entry) = .empty;
             const where = partsOf(path);
             if (where.container.len == 0) {
                 const found = self.owner.containers(arena) catch return error.Store;
@@ -1205,7 +1205,7 @@ pub const Db = struct {
             const arena = self.scratch.?.allocator();
 
             const last = @min(self.at + RANGE, self.size) - 1;
-            const range = std.fmt.allocPrint(arena, "bytes={d}-{d}", .{ self.at, last }) catch return error.OutOfMemory;
+            const range = arena.print("bytes={d}-{d}", .{ self.at, last }) catch return error.OutOfMemory;
             const response = self.owner.call(arena, .{
                 .container = self.container,
                 .blob = self.blob,
@@ -1343,7 +1343,7 @@ const Pages = struct {
     container: []const u8 = "",
     prefix: []const u8 = "",
     size: usize = 0,
-    markers: std.ArrayListUnmanaged([]const u8) = .empty,
+    markers: std.ArrayList([]const u8) = .empty,
     ended: bool = false,
 
     fn matches(self: *Pages, container: []const u8, prefix: []const u8, size: usize) bool {
@@ -1374,8 +1374,8 @@ const Pages = struct {
 /// One listing. The blob's name is an element of its own and everything else
 /// hangs under `Properties`, which is the whole of the difference from S3.
 pub fn parseListing(arena: std.mem.Allocator, body: []const u8) !Db.Listing {
-    var entries: std.ArrayListUnmanaged(Db.Entry) = .empty;
-    var folders: std.ArrayListUnmanaged([]const u8) = .empty;
+    var entries: std.ArrayList(Db.Entry) = .empty;
+    var folders: std.ArrayList([]const u8) = .empty;
     var next: ?[]const u8 = null;
 
     var reader = xml.Reader{ .text = body };
@@ -1452,7 +1452,7 @@ fn trimQuotes(text: []const u8) []const u8 {
 
 fn serverName(header: ?[]const u8) []const u8 {
     const text = header orelse return "Azure Blob";
-    if (std.ascii.indexOfIgnoreCase(text, "azurite") != null) {
+    if (std.ascii.findIgnoreCase(text, "azurite") != null) {
         return "Azurite";
     }
     return "Azure Blob";
@@ -1464,7 +1464,7 @@ fn eql(left: []const u8, right: []const u8) bool {
 
 /// A container name has no slash in it; a prefix nearly always does.
 fn looksLikeContainer(word: []const u8) bool {
-    return std.mem.indexOfScalar(u8, word, '/') == null and !std.mem.endsWith(u8, word, "%");
+    return std.mem.findScalar(u8, word, '/') == null and !std.mem.endsWith(u8, word, "%");
 }
 
 fn flat(value: ??[]const u8) ?[]const u8 {

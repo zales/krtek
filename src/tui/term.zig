@@ -287,7 +287,7 @@ pub const Term = struct {
 
     pub fn print(self: *Term, comptime fmt: []const u8, args: anytype) void {
         var tmp: [512]u8 = undefined;
-        self.put(std.fmt.bufPrint(&tmp, fmt, args) catch return);
+        self.put(std.mem.print(&tmp, fmt, args) catch return);
     }
 
     /// Move to a 0-based position.
@@ -513,7 +513,7 @@ pub const Term = struct {
     // --- input ---
 
     /// Wait for something to happen, then take whatever else is already queued.
-    pub fn keys(self: *Term, out: *std.ArrayListUnmanaged(Key)) !void {
+    pub fn keys(self: *Term, out: *std.ArrayList(Key)) !void {
         out.clearRetainingCapacity();
         var first = true;
         // Ticks are coalesced: a reload that took longer than the interval leaves

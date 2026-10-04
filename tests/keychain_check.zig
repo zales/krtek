@@ -21,7 +21,7 @@ pub fn main(init: std.process.Init) !void {
     }
     const a = std.heap.c_allocator;
 
-    try keychain.store(ACCOUNT, "hunter2");
+    try keychain.store(ACCOUNT, "hunter2", .keychain);
     std.debug.print("stored\n", .{});
 
     if (try keychain.fetch(a, ACCOUNT)) |got| {
@@ -35,7 +35,7 @@ pub fn main(init: std.process.Init) !void {
     }
 
     // Storing again has to update rather than add a second item.
-    try keychain.store(ACCOUNT, "changed");
+    try keychain.store(ACCOUNT, "changed", .keychain);
     if (try keychain.fetch(a, ACCOUNT)) |got| {
         defer a.free(got);
         std.debug.print("after update: {s}\n", .{got});

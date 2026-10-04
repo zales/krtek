@@ -92,11 +92,11 @@ pub fn parse(allocator: std.mem.Allocator, target: []const u8) !Parts {
     var password: []const u8 = "";
     var mechanism: ?Mechanism = null;
     var verify = true;
-    if (std.mem.indexOfScalar(u8, rest, '?')) |mark| {
+    if (std.mem.findScalar(u8, rest, '?')) |mark| {
         var options = std.mem.tokenizeScalar(u8, rest[mark + 1 ..], '&');
         rest = rest[0..mark];
         while (options.next()) |option| {
-            const equals = std.mem.indexOfScalar(u8, option, '=') orelse continue;
+            const equals = std.mem.findScalar(u8, option, '=') orelse continue;
             const key = option[0..equals];
             const value = option[equals + 1 ..];
             if (std.mem.eql(u8, key, "password")) {
@@ -113,13 +113,13 @@ pub fn parse(allocator: std.mem.Allocator, target: []const u8) !Parts {
         }
     }
     // A path is not part of the address: Kafka has no database to name.
-    if (std.mem.indexOfScalar(u8, rest, '/')) |slash| {
+    if (std.mem.findScalar(u8, rest, '/')) |slash| {
         rest = rest[0..slash];
     }
-    if (std.mem.lastIndexOfScalar(u8, rest, '@')) |at| {
+    if (std.mem.findScalarLast(u8, rest, '@')) |at| {
         const userinfo = rest[0..at];
         rest = rest[at + 1 ..];
-        if (std.mem.indexOfScalar(u8, userinfo, ':')) |colon| {
+        if (std.mem.findScalar(u8, userinfo, ':')) |colon| {
             user = userinfo[0..colon];
             password = userinfo[colon + 1 ..];
         } else {
@@ -129,7 +129,7 @@ pub fn parse(allocator: std.mem.Allocator, target: []const u8) !Parts {
 
     var host = rest;
     var port: u16 = if (tls) 9093 else 9092;
-    if (std.mem.lastIndexOfScalar(u8, rest, ':')) |colon| {
+    if (std.mem.findScalarLast(u8, rest, ':')) |colon| {
         host = rest[0..colon];
         port = std.fmt.parseInt(u16, rest[colon + 1 ..], 10) catch port;
     }

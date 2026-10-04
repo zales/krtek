@@ -19,7 +19,7 @@ pub const Kind = union(enum) {
 pub const Field = struct {
     label: []const u8,
     kind: Kind,
-    text: std.ArrayListUnmanaged(u8) = .empty,
+    text: std.ArrayList(u8) = .empty,
     on: bool = false,
     pick: usize = 0,
     /// Drawn on the same line as the field before it.
@@ -81,7 +81,7 @@ pub const Form = struct {
     purpose: Purpose,
     title: []const u8,
     hint: []const u8 = "",
-    fields: std.ArrayListUnmanaged(Field) = .empty,
+    fields: std.ArrayList(Field) = .empty,
     cursor: usize = 0,
     scroll: usize = 0,
     /// How many fields make up one repeatable row, 0 when the form is fixed.

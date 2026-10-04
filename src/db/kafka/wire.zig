@@ -424,8 +424,7 @@ test "every API this driver speaks is one the broker still answers without flexi
     try testing.expectEqual(@as(i16, 11), versionOf(.fetch));
     try testing.expectEqual(@as(i16, 7), versionOf(.metadata));
     try testing.expectEqual(@as(i16, 0), versionOf(.api_versions));
-    inline for (std.meta.fields(Api)) |field| {
-        const api: Api = @enumFromInt(field.value);
+    inline for (comptime std.enums.values(Api)) |api| {
         try testing.expect(versionOf(api) >= 0);
     }
 }

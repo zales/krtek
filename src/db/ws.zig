@@ -54,7 +54,7 @@ pub const Frame = struct {
 /// Write a frame's header for `length` bytes of masked payload into `out`, and
 /// give back the four mask bytes to XOR the payload with.
 pub fn header(out: *[14]u8, opcode: Opcode, length: usize, mask: [4]u8) []const u8 {
-    out[0] = 0x80 | @as(u8, @intFromEnum(opcode)); // FIN, and never a fragment
+    out[0] = 0x80 | @as(u8, @backingInt(opcode)); // FIN, and never a fragment
     var at: usize = 2;
     if (length < 126) {
         out[1] = 0x80 | @as(u8, @intCast(length));
@@ -119,7 +119,7 @@ pub fn readHead(bytes: []const u8) ?Head {
     }
     return .{
         .final = (first & 0x80) != 0,
-        .opcode = @enumFromInt(@as(u4, @truncate(first & 0x0f))),
+        .opcode = @fromBackingInt(@as(u4, @truncate(first & 0x0f))),
         .masked = masked,
         .length = length,
         .size = size,
@@ -223,7 +223,7 @@ pub const Socket = struct {
 
             // A control frame may sit in the middle of a fragmented message and
             // must not join it.
-            if (@intFromEnum(opcode) >= 8) {
+            if (@backingInt(opcode) >= 8) {
                 const copy = try self.allocator.dupe(u8, payload);
                 errdefer self.allocator.free(copy);
                 try self.eat(total);
@@ -244,7 +244,7 @@ pub const Socket = struct {
     /// Drop what has been read, and start the next message with nothing behind it.
     fn eat(self: *Socket, count: usize) Error!void {
         const left = self.buffer.items.len - count;
-        std.mem.copyForwards(u8, self.buffer.items[0..left], self.buffer.items[count..]);
+        @memmove(self.buffer.items[0..left], self.buffer.items[count..]);
         self.buffer.shrinkRetainingCapacity(left);
     }
 
@@ -368,7 +368,7 @@ pub fn connect(allocator: std.mem.Allocator, options: Options, why: *List) Error
     // The answer's headers, up to the blank line. Whatever follows them is the
     // first frames and is kept.
     const end = while (true) {
-        if (std.mem.indexOf(u8, socket.buffer.items, "\r\n\r\n")) |at| {
+        if (std.mem.find(u8, socket.buffer.items, "\r\n\r\n")) |at| {
             break at + 4;
         }
         if (socket.buffer.items.len > 64 << 10) {
@@ -382,7 +382,7 @@ pub fn connect(allocator: std.mem.Allocator, options: Options, why: *List) Error
     };
     const answer = socket.buffer.items[0..end];
     if (!std.mem.startsWith(u8, answer, "HTTP/1.1 101") and !std.mem.startsWith(u8, answer, "HTTP/1.0 101")) {
-        const line_end = std.mem.indexOfScalar(u8, answer, '\r') orelse answer.len;
+        const line_end = std.mem.findScalar(u8, answer, '\r') orelse answer.len;
         try why.print(allocator, "the server would not upgrade: {s}", .{answer[0..line_end]});
         return error.Ws;
     }
@@ -407,7 +407,7 @@ fn headerOf(answer: []const u8, name: []const u8) ?[]const u8 {
     var lines = std.mem.splitSequence(u8, answer, "\r\n");
     _ = lines.next();
     while (lines.next()) |line| {
-        const colon = std.mem.indexOfScalar(u8, line, ':') orelse continue;
+        const colon = std.mem.findScalar(u8, line, ':') orelse continue;
         if (std.ascii.eqlIgnoreCase(std.mem.trim(u8, line[0..colon], " "), name)) {
             return std.mem.trim(u8, line[colon + 1 ..], " ");
         }
@@ -500,7 +500,7 @@ fn withBytes(allocator: std.mem.Allocator, bytes: []const u8) !Socket {
 
 fn serverFrame(out: *List, allocator: std.mem.Allocator, final: bool, opcode: Opcode, payload: []const u8) !void {
     // Unmasked, as a server sends.
-    try out.append(allocator, (if (final) @as(u8, 0x80) else 0) | @intFromEnum(opcode));
+    try out.append(allocator, (if (final) @as(u8, 0x80) else 0) | @backingInt(opcode));
     if (payload.len < 126) {
         try out.append(allocator, @intCast(payload.len));
     } else {

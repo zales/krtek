@@ -12,12 +12,12 @@
 
 const std = @import("std");
 
-const List = std.ArrayListUnmanaged(u8);
+const List = std.ArrayList(u8);
 
 /// %20 and the like, as a URL carries them. A secret key is base64 and can hold
 /// a `+` and a `/`, which is why the escaped form has to work.
 pub fn unescape(arena: std.mem.Allocator, text: []const u8) ![]const u8 {
-    if (std.mem.indexOfScalar(u8, text, '%') == null) {
+    if (std.mem.findScalar(u8, text, '%') == null) {
         return text;
     }
     var out: List = .empty;
@@ -62,7 +62,7 @@ pub fn getenv(name: [:0]const u8) ?[]const u8 {
 /// depending on who is asking.
 pub fn firstSegment(path: []const u8) []const u8 {
     const trimmed = std.mem.trimStart(u8, path, "/");
-    const end = std.mem.indexOfScalar(u8, trimmed, '/') orelse trimmed.len;
+    const end = std.mem.findScalar(u8, trimmed, '/') orelse trimmed.len;
     return trimmed[0..end];
 }
 
@@ -70,7 +70,7 @@ pub fn firstSegment(path: []const u8) []const u8 {
 /// target names and the ones the environment names for it: a credentials file, a
 /// kubeconfig, a certificate.
 pub fn readFile(arena: std.mem.Allocator, path: []const u8) ![]u8 {
-    var zero: [std.fs.max_path_bytes]u8 = undefined;
+    var zero: [std.Io.Dir.max_path_bytes]u8 = undefined;
     if (path.len >= zero.len) {
         return error.NameTooLong;
     }

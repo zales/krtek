@@ -28,7 +28,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: mlugg/setup-zig@v2
         with:
-          version: 0.16.0
+          version: 0.17.0
 
       # One way of writing it, decided by the compiler rather than by whoever
       # touched the file last. Before this the repository was tab-indented by
@@ -45,7 +45,7 @@ jobs:
       # the runner's CPU dies with an illegal instruction on anybody else's.
       - name: build
         run: |
-          zig build -Doptimize=ReleaseSafe -Dstatic -Dcpu=baseline \
+          zig build -Doptimize=safe -Dstatic -Dcpu=baseline \
             -Dlibpq="$(brew --prefix libpq)" -Dmariadb="$(brew --prefix mariadb-connector-c)"
 
       # Nothing of the client libraries may be left as a runtime dependency: that
@@ -73,7 +73,7 @@ jobs:
       # regression check rather than a lottery: whatever it found once, it finds
       # again. `zig build fuzz -- 2000000 <seed>` is the long version, by hand.
       - name: the parsers survive malformed input
-        run: zig build fuzz -Doptimize=ReleaseSafe -Dlibpq="$(brew --prefix libpq)" -Dmariadb="$(brew --prefix mariadb-connector-c)" -- 150000
+        run: zig build fuzz -Doptimize=safe -Dlibpq="$(brew --prefix libpq)" -Dmariadb="$(brew --prefix mariadb-connector-c)" -- 150000
 
   # Linux is built static against musl inside an Alpine container, which gets one
   # binary that runs on any distribution - verified on Debian, with nothing
@@ -101,11 +101,11 @@ jobs:
             apk add --no-cache build-base cmake pkgconf python3 curl tar xz \
               postgresql-dev openssl-dev openssl-libs-static zlib-static \
               libssh2-dev libssh2-static >/dev/null
-            curl -fsSL "https://ziglang.org/download/0.16.0/zig-$(uname -m)-linux-0.16.0.tar.xz" -o /tmp/zig.tar.xz
+            curl -fsSL "https://ziglang.org/download/0.17.0/zig-$(uname -m)-linux-0.17.0.tar.xz" -o /tmp/zig.tar.xz
             mkdir -p /opt/zig && tar xJf /tmp/zig.tar.xz -C /opt/zig --strip-components=1
             export PATH=/opt/zig:$PATH ZIG_GLOBAL_CACHE_DIR=/tmp/zig-cache
             ./fetch-sqlite.sh
-            TEST=1 OPTIMIZE=ReleaseSafe ./tests/linux-static.sh -Dcpu=baseline
+            TEST=1 OPTIMIZE=safe ./tests/linux-static.sh -Dcpu=baseline
             ./tests/smoke.sh
           '
 

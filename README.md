@@ -58,10 +58,10 @@ builds are static against musl and run on any distribution - checked on Debian w
 installed at all; the macOS builds leave only Apple's own libraries dynamic. That
 is `-Dstatic`.
 
-Or from source, which needs nothing but Zig 0.16:
+Or from source, which needs nothing but Zig 0.17:
 
 ```sh
-zig build -Doptimize=ReleaseSafe
+zig build -Doptimize=safe
 ./zig-out/bin/krtek              # the list of saved connections
 ./zig-out/bin/krtek database.db
 ./zig-out/bin/krtek postgres://user@host:5432/database
@@ -793,7 +793,7 @@ Zig fetches libvaxis itself, from `build.zig.zon`.
 
 ```sh
 ./fetch-sqlite.sh   # download the SQLite amalgamation into vendor/
-zig build           # zig-out/bin/krtek (needs Zig 0.16 and libpq)
+zig build           # zig-out/bin/krtek (needs Zig 0.17 and libpq)
 zig build run -- x.db
 zig build test      # unit tests
 tests/screen.py x.db '{down}{enter}' 'oo'   # drive it headlessly, see below
@@ -1059,9 +1059,10 @@ five of the six things it has found were real -
 [the details are in the driver](src/db/kafka.zig). CI runs 150 000 inputs from a
 fixed seed on every push, so whatever it found once it finds again.
 
-`zig build test --fuzz` is what this would otherwise be; it does not compile with
-Zig 0.16.0, whose test runner passes a `*builtin.StackTrace` where a
-`*const debug.StackTrace` is wanted.
+`zig build test --fuzz` is what this would otherwise be. With Zig 0.17.0 it
+compiles, but it instruments the vendored SQLite too, which its runtime will not
+start with, and a crash it finds still leaves `zig build` exiting 0 - so it could
+not fail CI anyway.
 
 The same harness records the colours, so the screenshots in this file are written
 out of it: [tests/shot.py](tests/shot.py) turns a captured screen into an SVG and

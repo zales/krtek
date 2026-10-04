@@ -29,7 +29,7 @@ pub fn dumpTo(app: *App, path: []const u8, only: ?[]const u8, structure: bool, d
     var arena = std.heap.ArenaAllocator.init(app.allocator);
     defer arena.deinit();
     const scratch = arena.allocator();
-    var out: std.ArrayListUnmanaged(u8) = .empty;
+    var out: std.ArrayList(u8) = .empty;
     defer out.deinit(app.allocator);
     try out.print(app.allocator, "-- krtek dump of {s}, {s}\n", .{ app.conn.describe(), app.conn.version() });
     try app.conn.ddl().prologue(&out, app.allocator);
@@ -68,7 +68,7 @@ pub fn dumpTo(app: *App, path: []const u8, only: ?[]const u8, structure: bool, d
                 if (std.mem.eql(u8, index.kind, "PRIMARY") or index.partial) {
                     continue; // part of the table, or not reconstructable
                 }
-                var members: std.ArrayListUnmanaged([]const u8) = .empty;
+                var members: std.ArrayList([]const u8) = .empty;
                 var parts = std.mem.tokenizeSequence(u8, index.columns, ", ");
                 while (parts.next()) |part| {
                     try members.append(scratch, part);
@@ -90,7 +90,7 @@ pub fn dumpTo(app: *App, path: []const u8, only: ?[]const u8, structure: bool, d
     app.say("{d} object(s), {d} bytes written to {s}", .{ written, out.items.len, path });
 }
 
-pub fn dumpRows(app: *App, out: *std.ArrayListUnmanaged(u8), table: database.Table) !void {
+pub fn dumpRows(app: *App, out: *std.ArrayList(u8), table: database.Table) !void {
     var arena = std.heap.ArenaAllocator.init(app.allocator);
     defer arena.deinit();
     const names = try app.columnsOf(arena.allocator(), table.name);
@@ -119,7 +119,7 @@ pub fn dumpRows(app: *App, out: *std.ArrayListUnmanaged(u8), table: database.Tab
     defer rows.close();
 
     var first = true;
-    var values: std.ArrayListUnmanaged([]const u8) = .empty;
+    var values: std.ArrayList([]const u8) = .empty;
     while (try rows.next()) {
         if (first) {
             first = false;
@@ -127,7 +127,7 @@ pub fn dumpRows(app: *App, out: *std.ArrayListUnmanaged(u8), table: database.Tab
             try out.appendSlice(app.allocator, ",\n");
         }
         values.clearRetainingCapacity();
-        var line: std.ArrayListUnmanaged(u8) = .empty;
+        var line: std.ArrayList(u8) = .empty;
         for (0..rows.columnCount()) |i| {
             if (i != 0) {
                 try line.appendSlice(app.allocator, ", ");
@@ -179,7 +179,7 @@ pub fn dumpRows(app: *App, out: *std.ArrayListUnmanaged(u8), table: database.Tab
 /// the file as a script replays them.
 pub fn dumpCommands(
     app: *App,
-    out: *std.ArrayListUnmanaged(u8),
+    out: *std.ArrayList(u8),
     table: database.Table,
     names: []const []const u8,
 ) !void {
@@ -191,13 +191,13 @@ pub fn dumpCommands(
     while (try rows.next()) {
         _ = arena.reset(.retain_capacity);
         const a = arena.allocator();
-        var cells: std.ArrayListUnmanaged(database.ask.Cell) = .empty;
+        var cells: std.ArrayList(database.ask.Cell) = .empty;
         for (0..rows.columnCount()) |i| {
             const name = if (i < names.len) names[i] else rows.name(i);
             const value: ?[]const u8 = switch (rows.value(i)) {
                 .null => null,
-                .int => |number| try std.fmt.allocPrint(a, "{d}", .{number}),
-                .float => |number| try std.fmt.allocPrint(a, "{d}", .{number}),
+                .int => |number| try a.print("{d}", .{number}),
+                .float => |number| try a.print("{d}", .{number}),
                 .text, .blob => |bytes| try a.dupe(u8, bytes),
             };
             try cells.append(a, .{ .column = try a.dupe(u8, name), .value = value });
@@ -237,7 +237,7 @@ pub fn copyRow(app: *App) !void {
         app.complain("there is no row under the cursor", .{});
         return;
     }
-    var out: std.ArrayListUnmanaged(u8) = .empty;
+    var out: std.ArrayList(u8) = .empty;
     defer out.deinit(app.allocator);
     for (app.grid.rows.items[app.cursor.row].cells, 0..) |cell, i| {
         if (app.isHidden(i)) {
@@ -258,7 +258,7 @@ pub fn copyRow(app: *App) !void {
 
 /// The whole page, header included, as CSV.
 pub fn copyPage(app: *App) !void {
-    var out: std.ArrayListUnmanaged(u8) = .empty;
+    var out: std.ArrayList(u8) = .empty;
     defer out.deinit(app.allocator);
     var written: usize = 0;
     for (app.grid.cols.items, 0..) |name, i| {

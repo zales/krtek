@@ -413,7 +413,7 @@ fn score(action: Action, query: []const u8, hit: ?*fuzzy.Hit) ?u16 {
         if (fuzzy.match(action.label, word, hit)) |got| {
             total += got * 4;
             // Typed as one piece, in the label: as good as it gets.
-            if (std.ascii.indexOfIgnoreCase(action.label, word) != null) {
+            if (std.ascii.findIgnoreCase(action.label, word) != null) {
                 total += 40;
             }
             continue;
@@ -1410,7 +1410,7 @@ fn askAction(app: *App, action: database.Action) !void {
 /// Drop the selected object, whatever it is, through the engine's own DDL.
 fn drop(app: *App) !void {
     const object = app.current() orelse return;
-    var sql: std.ArrayListUnmanaged(u8) = .empty;
+    var sql: std.ArrayList(u8) = .empty;
     defer sql.deinit(app.allocator);
     try app.conn.ddl().dropObject(
         &sql,
@@ -1423,7 +1423,7 @@ fn drop(app: *App) !void {
 
 fn truncate(app: *App) !void {
     const table = app.currentTable() orelse return;
-    var sql: std.ArrayListUnmanaged(u8) = .empty;
+    var sql: std.ArrayList(u8) = .empty;
     defer sql.deinit(app.allocator);
     try app.conn.ddl().truncate(&sql, app.allocator, table);
     try app.confirm(std.mem.trimEnd(u8, sql.items, ";\n"), "empty");

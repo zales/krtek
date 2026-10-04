@@ -16,7 +16,7 @@ const std = @import("std");
 /// one argument; nothing else is interpreted, because a console line is not a
 /// shell and pretending otherwise is how a key with a `$` in it goes missing.
 pub fn split(arena: std.mem.Allocator, text: []const u8) ![]const []const u8 {
-    var out: std.ArrayListUnmanaged([]const u8) = .empty;
+    var out: std.ArrayList([]const u8) = .empty;
     var at: usize = 0;
     while (at < text.len) {
         while (at < text.len and (text[at] == ' ' or text[at] == '\t')) : (at += 1) {}
@@ -50,13 +50,13 @@ pub fn split(arena: std.mem.Allocator, text: []const u8) ![]const []const u8 {
 /// the quote used is whichever kind the text does not have in it. A text with
 /// both kinds and a space is the one thing this cannot carry: it is written in
 /// double quotes and comes back cut at the first of them.
-pub fn word(out: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocator, text: []const u8) !void {
+pub fn word(out: *std.ArrayList(u8), allocator: std.mem.Allocator, text: []const u8) !void {
     const bare = text.len != 0 and text[0] != '"' and text[0] != '\'' and
-        std.mem.indexOfAny(u8, text, " \t") == null;
+        std.mem.findAny(u8, text, " \t") == null;
     if (bare) {
         return out.appendSlice(allocator, text);
     }
-    const quote: u8 = if (std.mem.indexOfScalar(u8, text, '"') == null) '"' else '\'';
+    const quote: u8 = if (std.mem.findScalar(u8, text, '"') == null) '"' else '\'';
     try out.append(allocator, quote);
     try out.appendSlice(allocator, text);
     try out.append(allocator, quote);
@@ -119,7 +119,7 @@ test "what is written as one argument is read back as one" {
     const arena = scratch.allocator();
 
     for ([_][]const u8{ "orders", "dead letters", "", "order.#", "it's here", "say \"hi\" twice", "\"quoted\"", "tab\there" }) |text| {
-        var line: std.ArrayListUnmanaged(u8) = .empty;
+        var line: std.ArrayList(u8) = .empty;
         try line.appendSlice(arena, "DECLARE QUEUE ");
         try word(&line, arena, text);
         try line.appendSlice(arena, " classic");
@@ -129,7 +129,7 @@ test "what is written as one argument is read back as one" {
         try testing.expectEqualStrings("classic", args[3]);
     }
     // And a plain name is left as somebody would have typed it.
-    var plain: std.ArrayListUnmanaged(u8) = .empty;
+    var plain: std.ArrayList(u8) = .empty;
     try word(&plain, arena, "orders");
     try testing.expectEqualStrings("orders", plain.items);
 }

@@ -21,7 +21,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 
 /// Only macOS has this; everywhere else the option is not offered.
-pub const available = builtin.os.tag == .macos;
+pub const available = builtin.target.os.tag == .macos;
 
 const SERVICE = "krtek";
 

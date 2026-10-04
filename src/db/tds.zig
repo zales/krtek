@@ -67,7 +67,7 @@ pub const Header = extern struct {
 
 pub fn header(kind: Kind, length: u16, last: bool, number: u8) [Header.SIZE]u8 {
     return .{
-        @intFromEnum(kind),
+        @backingInt(kind),
         if (last) Header.LAST else 0,
         @intCast(length >> 8),
         @truncate(length),
@@ -208,7 +208,7 @@ pub const Connection = struct {
     fn readPlain(self: *Connection, into: *db.List, why: *db.List) !void {
         var head: [Header.SIZE]u8 = undefined;
         self.stream.readExactly(&head) catch return self.gone(why);
-        const said: Header = @bitCast(head);
+        const said = std.mem.bytesToValue(Header, &head);
         const length = said.length();
         if (length < Header.SIZE) {
             try why.appendSlice(self.allocator, "the server sent a packet shorter than its own header");
@@ -256,7 +256,7 @@ pub const Connection = struct {
         ssl.SSL_set_bio(self.session, self.incoming, self.outgoing);
         ssl.SSL_set_connect_state(self.session);
 
-        const zero_host = try self.allocator.dupeZ(u8, host);
+        const zero_host = try self.allocator.dupeSentinel(u8, host, 0);
         defer self.allocator.free(zero_host);
         _ = ssl.SSL_ctrl(self.session, ssl.CTRL_SET_TLSEXT_HOSTNAME, ssl.TLSEXT_NAMETYPE_host_name, @ptrCast(@constCast(zero_host.ptr)));
         if (options.verify) {
@@ -433,7 +433,7 @@ pub const Connection = struct {
     /// One whole message - every packet up to the one that says it is the last -
     /// as the token stream it carries.
     pub fn message(self: *Connection, arena: std.mem.Allocator, why: *db.List, may_stop: bool) ![]const u8 {
-        var out: std.ArrayListUnmanaged(u8) = .empty;
+        var out: std.ArrayList(u8) = .empty;
         while (true) {
             var head: [Header.SIZE]u8 = undefined;
             self.readExactlySecure(&head, why, may_stop) catch |e| {
@@ -442,7 +442,7 @@ pub const Connection = struct {
                 }
                 return e;
             };
-            const said: Header = @bitCast(head);
+            const said = std.mem.bytesToValue(Header, &head);
             const length = said.length();
             if (length < Header.SIZE) {
                 try why.appendSlice(self.allocator, "the server sent a packet shorter than its own header");
@@ -506,7 +506,7 @@ pub const Connection = struct {
         // more pairs nothing here uses, and a length that goes with them.
         const FIXED: u16 = 94;
         const PAIRS: usize = 36;
-        var out: std.ArrayListUnmanaged(u8) = .empty;
+        var out: std.ArrayList(u8) = .empty;
         try out.appendNTimes(arena, 0, FIXED);
         // TDS 7.4, the packet size asked for, and a version for the log.
         std.mem.writeInt(u32, out.items[4..][0..4], 0x74000004, .little);
@@ -535,7 +535,7 @@ pub const Connection = struct {
     /// it saying which transaction it belongs to; none of these belong to one.
     pub fn batch(self: *Connection, arena: std.mem.Allocator, sql: []const u8, why: *db.List) ![]const u8 {
         const text = try utf16(arena, sql);
-        var out: std.ArrayListUnmanaged(u8) = .empty;
+        var out: std.ArrayList(u8) = .empty;
         try out.appendSlice(arena, &std.mem.toBytes(@as(u32, 22)));
         try out.appendSlice(arena, &std.mem.toBytes(@as(u32, 18)));
         try out.appendSlice(arena, &std.mem.toBytes(@as(u16, 2)));
@@ -648,7 +648,7 @@ const Reader = struct {
 };
 
 pub fn fromUtf16(arena: std.mem.Allocator, bytes: []const u8) ![]const u8 {
-    var out: std.ArrayListUnmanaged(u8) = .empty;
+    var out: std.ArrayList(u8) = .empty;
     try out.ensureTotalCapacity(arena, bytes.len);
     var i: usize = 0;
     while (i + 1 < bytes.len) : (i += 2) {
@@ -681,9 +681,9 @@ pub fn fromUtf16(arena: std.mem.Allocator, bytes: []const u8) ![]const u8 {
 pub fn read(arena: std.mem.Allocator, bytes: []const u8, why: *db.List, allocator: std.mem.Allocator) !Reply {
     var reader = Reader{ .bytes = bytes };
     var out = Reply{};
-    var columns: std.ArrayListUnmanaged(Column) = .empty;
-    var rows: std.ArrayListUnmanaged([]const db.Value) = .empty;
-    var notes: std.ArrayListUnmanaged(u8) = .empty;
+    var columns: std.ArrayList(Column) = .empty;
+    var rows: std.ArrayList([]const db.Value) = .empty;
+    var notes: std.ArrayList(u8) = .empty;
     var failed = false;
 
     while (!reader.done()) {
@@ -999,7 +999,7 @@ fn chunks(arena: std.mem.Allocator, reader: *Reader) !?[]const u8 {
     if (total == 0xFFFFFFFFFFFFFFFF) {
         return null;
     }
-    var out: std.ArrayListUnmanaged(u8) = .empty;
+    var out: std.ArrayList(u8) = .empty;
     while (true) {
         const length = try reader.int(u32);
         if (length == 0) {
@@ -1041,30 +1041,30 @@ fn decimal(arena: std.mem.Allocator, bytes: []const u8, scale: u8) ![]const u8 {
         i -= 1;
         magnitude = (magnitude << 8) | bytes[i];
     }
-    var out: std.ArrayListUnmanaged(u8) = .empty;
+    var out: std.ArrayList(u8) = .empty;
     if (bytes[0] == 0 and magnitude != 0) {
         try out.append(arena, '-');
     }
     var digits: [40]u8 = undefined;
-    const text = std.fmt.bufPrint(&digits, "{d}", .{magnitude}) catch "0";
+    const text = std.mem.print(&digits, "{d}", .{magnitude}) catch "0";
     try point(arena, &out, text, scale);
     return out.items;
 }
 
 fn scaled(arena: std.mem.Allocator, units: i64, scale: u8) ![]const u8 {
-    var out: std.ArrayListUnmanaged(u8) = .empty;
+    var out: std.ArrayList(u8) = .empty;
     if (units < 0) {
         try out.append(arena, '-');
     }
     var digits: [24]u8 = undefined;
-    const text = std.fmt.bufPrint(&digits, "{d}", .{@abs(units)}) catch "0";
+    const text = std.mem.print(&digits, "{d}", .{@abs(units)}) catch "0";
     try point(arena, &out, text, scale);
     return out.items;
 }
 
 /// The digits with a point put `scale` places from the right, padded with the
 /// zeros the number does not have.
-fn point(arena: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), text: []const u8, scale: u8) !void {
+fn point(arena: std.mem.Allocator, out: *std.ArrayList(u8), text: []const u8, scale: u8) !void {
     if (scale == 0) {
         try out.appendSlice(arena, text);
         return;
@@ -1086,7 +1086,7 @@ fn guid(arena: std.mem.Allocator, bytes: []const u8) ![]const u8 {
     }
     // The first three groups are numbers and travel little end first; the last
     // two are bytes and do not.
-    return std.fmt.allocPrint(arena, "{X:0>8}-{X:0>4}-{X:0>4}-{X:0>2}{X:0>2}-{X:0>2}{X:0>2}{X:0>2}{X:0>2}{X:0>2}{X:0>2}", .{
+    return arena.print("{X:0>8}-{X:0>4}-{X:0>4}-{X:0>2}{X:0>2}-{X:0>2}{X:0>2}{X:0>2}{X:0>2}{X:0>2}{X:0>2}", .{
         std.mem.readInt(u32, bytes[0..4], .little),
         std.mem.readInt(u16, bytes[4..6], .little),
         std.mem.readInt(u16, bytes[6..8], .little),
@@ -1118,7 +1118,7 @@ fn datetime(arena: std.mem.Allocator, bytes: []const u8) ![]const u8 {
     if (bytes.len == 4) {
         const day = std.mem.readInt(u16, bytes[0..2], .little);
         const minutes = std.mem.readInt(u16, bytes[2..4], .little);
-        return std.fmt.allocPrint(arena, "{s} {d:0>2}:{d:0>2}:00", .{
+        return arena.print("{s} {d:0>2}:{d:0>2}:00", .{
             try dateText(arena, @as(i64, day) - FROM_1900),
             @as(u64, minutes / 60),
             @as(u64, minutes % 60),
@@ -1130,7 +1130,7 @@ fn datetime(arena: std.mem.Allocator, bytes: []const u8) ![]const u8 {
     const day = std.mem.readInt(i32, bytes[0..4], .little);
     const ticks = std.mem.readInt(u32, bytes[4..8], .little);
     const millis = (@as(u64, ticks) * 10 + 1) / 3; // 1/300 of a second, rounded
-    return std.fmt.allocPrint(arena, "{s} {d:0>2}:{d:0>2}:{d:0>2}.{d:0>3}", .{
+    return arena.print("{s} {d:0>2}:{d:0>2}:{d:0>2}.{d:0>3}", .{
         try dateText(arena, @as(i64, day) - FROM_1900),
         millis / 3_600_000,
         millis / 60_000 % 60,
@@ -1144,7 +1144,7 @@ fn timeText(arena: std.mem.Allocator, count: i64, scale: u8) ![]const u8 {
     const divisor = tenTo(scale);
     const fraction = @mod(count, divisor);
     const units = @divFloor(count, divisor);
-    var out: std.ArrayListUnmanaged(u8) = .empty;
+    var out: std.ArrayList(u8) = .empty;
     try out.print(arena, "{d:0>2}:{d:0>2}:{d:0>2}", .{
         @as(u64, @intCast(@divFloor(units, 3600))),
         @as(u64, @intCast(@mod(@divFloor(units, 60), 60))),
@@ -1156,7 +1156,7 @@ fn timeText(arena: std.mem.Allocator, count: i64, scale: u8) ![]const u8 {
     // The fraction is padded to as many places as the column has, which is a
     // width nobody knows until the row arrives - so it is written out.
     var digits: [24]u8 = undefined;
-    const text = std.fmt.bufPrint(&digits, "{d}", .{@as(u64, @intCast(fraction))}) catch "0";
+    const text = std.mem.print(&digits, "{d}", .{@as(u64, @intCast(fraction))}) catch "0";
     try out.append(arena, '.');
     if (text.len < scale) {
         try out.appendNTimes(arena, '0', scale - text.len);
@@ -1203,10 +1203,10 @@ fn stamp(arena: std.mem.Allocator, bytes: []const u8, scale: u8, offset: ?i16) !
     // between the two types - and a column that dropped it where it happened to
     // be zero would read as the other type on some rows and not on others.
     if (offset == null) {
-        return std.fmt.allocPrint(arena, "{s} {s}", .{ date, time });
+        return arena.print("{s} {s}", .{ date, time });
     }
     const away: u16 = @intCast(@abs(minutes));
-    return std.fmt.allocPrint(arena, "{s} {s} {c}{d:0>2}:{d:0>2}", .{
+    return arena.print("{s} {s} {c}{d:0>2}:{d:0>2}", .{
         date, time, @as(u8, if (minutes < 0) '-' else '+'), away / 60, away % 60,
     });
 }
@@ -1224,7 +1224,7 @@ pub fn dateText(arena: std.mem.Allocator, from_epoch: i64) ![]const u8 {
     const shifted = @divFloor(5 * of_year + 2, 153); // March is month zero
     const dayOfMonth = of_year - @divFloor(153 * shifted + 2, 5) + 1;
     const month = shifted + (if (shifted < 10) @as(i64, 3) else -9);
-    return std.fmt.allocPrint(arena, "{d:0>4}-{d:0>2}-{d:0>2}", .{
+    return arena.print("{d:0>4}-{d:0>2}-{d:0>2}", .{
         @as(u64, @intCast(@max(0, year + @as(i64, if (month <= 2) 1 else 0)))),
         @as(u64, @intCast(month)),
         @as(u64, @intCast(dayOfMonth)),
@@ -1243,7 +1243,7 @@ test "a packet header says how long it is, big end first" {
     try testing.expectEqual(@as(u8, 0), head[2]);
     try testing.expectEqual(@as(u8, 13), head[3]);
 
-    const said: Header = @bitCast(head);
+    const said = std.mem.bytesToValue(Header, &head);
     try testing.expectEqual(@as(u16, 13), said.length());
     try testing.expect(said.status & Header.LAST != 0);
 }
@@ -1350,8 +1350,8 @@ test "every type this reads comes back as what was put in" {
         };
         const text = switch (reply.rows[0][at]) {
             .null => "NULL",
-            .int => |n| try std.fmt.allocPrint(arena, "{d}", .{n}),
-            .float => |n| try std.fmt.allocPrint(arena, "{d}", .{n}),
+            .int => |n| try arena.print("{d}", .{n}),
+            .float => |n| try arena.print("{d}", .{n}),
             .text, .blob => |t| t,
         };
         testing.expectEqualStrings(one.text, text) catch |e| {
@@ -1390,7 +1390,7 @@ test "a login says who is asking, in the shape the server reads it" {
     // The password is at the third pair, and is masked rather than sent.
     const at = std.mem.readInt(u16, body[44..46], .little);
     try testing.expectEqual(@as(u16, 13), std.mem.readInt(u16, body[46..48], .little));
-    try testing.expect(std.mem.indexOf(u8, body[at..], "K") == null);
+    try testing.expect(std.mem.find(u8, body[at..], "K") == null);
 }
 
 test "a date is worked out from a count of days, either side of the epoch" {
@@ -1455,7 +1455,7 @@ test "an error token is the reason, and the ones after it are the server explain
     var scratch = std.heap.ArenaAllocator.init(testing.allocator);
     defer scratch.deinit();
     const arena = scratch.allocator();
-    var stream: std.ArrayListUnmanaged(u8) = .empty;
+    var stream: std.ArrayList(u8) = .empty;
     for ([_][]const u8{ "spatne", "a jeste neco" }) |text| {
         const wide = try utf16(arena, text);
         try stream.append(arena, 0xAA);

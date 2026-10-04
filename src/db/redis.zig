@@ -26,7 +26,7 @@ const std = @import("std");
 const db = @import("db.zig");
 const typed = @import("typed.zig");
 
-const List = std.ArrayListUnmanaged(u8);
+const List = std.ArrayList(u8);
 
 /// How many keys one page of the grid fetches at most, so a database with
 /// millions of them still answers.
@@ -312,7 +312,7 @@ pub const Db = struct {
                 return error.Driver;
             }
             const code = std.c._errno().*;
-            const timed_out = code == @intFromEnum(std.c.E.AGAIN) or code == @intFromEnum(std.c.E.INTR);
+            const timed_out = code == @backingInt(std.c.E.AGAIN) or code == @backingInt(std.c.E.INTR);
             if (!timed_out) {
                 self.remember("redis closed the connection");
                 return error.Driver;
@@ -365,7 +365,7 @@ pub const Db = struct {
                 if (length < 0) {
                     return .{ .nil = {} };
                 }
-                var items: std.ArrayListUnmanaged(Value) = .empty;
+                var items: std.ArrayList(Value) = .empty;
                 var left: usize = @intCast(@max(0, length));
                 while (left > 0) : (left -= 1) {
                     try items.append(arena, try self.parseValue(arena));
@@ -375,7 +375,7 @@ pub const Db = struct {
             '%' => {
                 // A map: read twice as many values and keep them flat.
                 const pairs = std.fmt.parseInt(i64, body, 10) catch return error.Malformed;
-                var items: std.ArrayListUnmanaged(Value) = .empty;
+                var items: std.ArrayList(Value) = .empty;
                 var left: usize = @as(usize, @intCast(@max(0, pairs))) * 2;
                 while (left > 0) : (left -= 1) {
                     try items.append(arena, try self.parseValue(arena));
@@ -388,7 +388,7 @@ pub const Db = struct {
 
     /// The next CRLF terminated line, leaving the cursor after it.
     fn line(self: *Db) ParseError![]const u8 {
-        const end = std.mem.indexOfPos(u8, self.buffer.items, self.at, "\r\n") orelse return error.Incomplete;
+        const end = std.mem.findPos(u8, self.buffer.items, self.at, "\r\n") orelse return error.Incomplete;
         const text = self.buffer.items[self.at..end];
         self.at = end + 2;
         return text;
@@ -645,7 +645,7 @@ pub const Db = struct {
             const reply = try self.command(&[_][]const u8{
                 "SCAN",  cursor,
                 "MATCH", if (pattern.len != 0) pattern else "*",
-                "COUNT", std.fmt.bufPrint(&buf, "{d}", .{PAGE}) catch "100",
+                "COUNT", std.mem.print(&buf, "{d}", .{PAGE}) catch "100",
             });
             if (reply == .failure) {
                 self.remember(reply.failure);
@@ -661,7 +661,7 @@ pub const Db = struct {
             // Which of this page's keys are going to be shown. Only those are
             // asked about: the rest of the page is skipped without a word to the
             // server.
-            var wanted: std.ArrayListUnmanaged([]const u8) = .empty;
+            var wanted: std.ArrayList([]const u8) = .empty;
             for (keys) |item| {
                 const key = item.text orelse continue;
                 if (passed < skip) {
@@ -677,7 +677,7 @@ pub const Db = struct {
                 // The type and the age of every one of them, in one exchange. Asked
                 // key by key this was two round trips each, and a screen of a hundred
                 // keys on a link with any latency at all took half a minute.
-                var asking: std.ArrayListUnmanaged([]const []const u8) = .empty;
+                var asking: std.ArrayList([]const []const u8) = .empty;
                 for (wanted.items) |key| {
                     try asking.append(arena, try arena.dupe([]const u8, &[_][]const u8{ "TYPE", key }));
                     try asking.append(arena, try arena.dupe([]const u8, &[_][]const u8{ "TTL", key }));
@@ -722,7 +722,7 @@ pub const Db = struct {
     /// collection is cut off at the server rather than fetched and thrown away.
     fn valueCommand(arena: std.mem.Allocator, key: []const u8, kind: []const u8) ![]const []const u8 {
         var buf: [16]u8 = undefined;
-        const stop = try arena.dupe(u8, std.fmt.bufPrint(&buf, "{d}", .{PREVIEW - 1}) catch "49");
+        const stop = try arena.dupe(u8, std.mem.print(&buf, "{d}", .{PREVIEW - 1}) catch "49");
         if (std.mem.eql(u8, kind, "string")) {
             return arena.dupe([]const u8, &[_][]const u8{ "GET", key });
         }
@@ -751,7 +751,7 @@ pub const Db = struct {
         }
         switch (reply) {
             .text => |text| return text orelse "",
-            .number => |number| return std.fmt.allocPrint(arena, "{d}", .{number}) catch "",
+            .number => |number| return arena.print("{d}", .{number}) catch "",
             .nil => return "",
             .failure => |text| return text,
             .list => |maybe| {
@@ -785,7 +785,7 @@ pub const Db = struct {
     /// known first - they decide which command each key takes - which is why this
     /// is a second pipeline and not part of the first.
     fn previews(self: *Db, arena: std.mem.Allocator, keys: []const []const u8, kinds: []const []const u8) db.Error![][]const u8 {
-        var asking: std.ArrayListUnmanaged([]const []const u8) = .empty;
+        var asking: std.ArrayList([]const []const u8) = .empty;
         for (keys, kinds) |key, kind| {
             try asking.append(arena, valueCommand(arena, key, kind) catch return error.OutOfMemory);
         }
@@ -820,7 +820,7 @@ pub const Db = struct {
         else blk: {
             var buf: [24]u8 = undefined;
             break :blk try self.command(&[_][]const u8{
-                "EXPIRE", pair.key, std.fmt.bufPrint(&buf, "{d}", .{seconds}) catch "0",
+                "EXPIRE", pair.key, std.mem.print(&buf, "{d}", .{seconds}) catch "0",
             });
         };
         if (reply == .failure) {
@@ -849,10 +849,10 @@ pub const Db = struct {
     }
 
     pub fn schemas(self: *Db, arena: std.mem.Allocator) db.Error![][]const u8 {
-        var list: std.ArrayListUnmanaged([]const u8) = .empty;
+        var list: std.ArrayList([]const u8) = .empty;
         var index: u8 = 0;
         while (index < self.count) : (index += 1) {
-            try list.append(arena, try std.fmt.allocPrint(arena, "{d}", .{index}));
+            try list.append(arena, try arena.print("{d}", .{index}));
         }
         // The one in use first, as the other drivers order theirs.
         if (self.index < list.items.len and self.index != 0) {
@@ -872,9 +872,9 @@ pub const Db = struct {
                 }
             } else |_| {}
         }
-        var list: std.ArrayListUnmanaged(db.Object) = .empty;
+        var list: std.ArrayList(db.Object) = .empty;
         try list.append(arena, .{
-            .schema = try std.fmt.allocPrint(arena, "{d}", .{self.index}),
+            .schema = try arena.print("{d}", .{self.index}),
             .name = "data",
             .kind = .table,
             .rows = self.dbSize(),
@@ -885,7 +885,7 @@ pub const Db = struct {
     fn useIndex(self: *Db, wanted: u8) db.Error!void {
         var buf: [8]u8 = undefined;
         const reply = try self.command(&[_][]const u8{
-            "SELECT", std.fmt.bufPrint(&buf, "{d}", .{wanted}) catch "0",
+            "SELECT", std.mem.print(&buf, "{d}", .{wanted}) catch "0",
         });
         if (reply == .failure) {
             self.remember(reply.failure);
@@ -896,7 +896,7 @@ pub const Db = struct {
     }
 
     pub fn columns(_: *Db, arena: std.mem.Allocator, _: db.Table) db.Error![]db.Column {
-        var list: std.ArrayListUnmanaged(db.Column) = .empty;
+        var list: std.ArrayList(db.Column) = .empty;
         try list.append(arena, .{ .name = "key", .type = "string", .notnull = true, .pk = true, .original = "key" });
         try list.append(arena, .{ .name = "type", .type = "string", .original = "type" });
         try list.append(arena, .{ .name = "ttl", .type = "integer", .original = "ttl" });
@@ -905,7 +905,7 @@ pub const Db = struct {
     }
 
     pub fn indexes(_: *Db, arena: std.mem.Allocator, _: db.Table) db.Error![]db.Index {
-        var list: std.ArrayListUnmanaged(db.Index) = .empty;
+        var list: std.ArrayList(db.Index) = .empty;
         try list.append(arena, .{ .name = "key", .kind = "PRIMARY", .columns = "key" });
         return list.items;
     }
@@ -924,7 +924,7 @@ pub const Db = struct {
 
     /// The key is the key, which is what makes a row editable.
     pub fn rowKey(_: *Db, arena: std.mem.Allocator, _: db.Table) db.Error!db.RowKey {
-        var list: std.ArrayListUnmanaged([]const u8) = .empty;
+        var list: std.ArrayList([]const u8) = .empty;
         try list.append(arena, "key");
         return .{ .columns = list.items };
     }
@@ -934,7 +934,7 @@ pub const Db = struct {
     }
 
     pub fn settings(self: *Db, arena: std.mem.Allocator) db.Error![]db.Setting {
-        var list: std.ArrayListUnmanaged(db.Setting) = .empty;
+        var list: std.ArrayList(db.Setting) = .empty;
         const FACTS = [_][2][]const u8{
             .{ "version", "redis_version" },
             .{ "mode", "redis_mode" },
@@ -953,11 +953,11 @@ pub const Db = struct {
         }
         try list.append(arena, .{
             .label = "keys in this database",
-            .value = try std.fmt.allocPrint(arena, "{d}", .{self.dbSize() orelse 0}),
+            .value = try arena.print("{d}", .{self.dbSize() orelse 0}),
         });
         try list.append(arena, .{
             .label = "databases",
-            .value = try std.fmt.allocPrint(arena, "{d}", .{self.count}),
+            .value = try arena.print("{d}", .{self.count}),
         });
         return list.items;
     }
@@ -969,7 +969,7 @@ pub const Db = struct {
         var lines = std.mem.splitScalar(u8, text, '\n');
         while (lines.next()) |raw| {
             const trimmed = std.mem.trim(u8, raw, " \r");
-            const colon = std.mem.indexOfScalar(u8, trimmed, ':') orelse continue;
+            const colon = std.mem.findScalar(u8, trimmed, ':') orelse continue;
             if (std.mem.eql(u8, trimmed[0..colon], name)) {
                 return trimmed[colon + 1 ..];
             }
@@ -997,7 +997,7 @@ pub const Db = struct {
 
     /// Redis has no batch: the console runs one command per line.
     pub fn split(_: *Db, arena: std.mem.Allocator, sql: []const u8) db.Error![]db.Statement {
-        var list: std.ArrayListUnmanaged(db.Statement) = .empty;
+        var list: std.ArrayList(db.Statement) = .empty;
         var lines = std.mem.splitScalar(u8, sql, '\n');
         while (lines.next()) |raw| {
             const line_text = std.mem.trim(u8, raw, " \t\r");
@@ -1205,11 +1205,11 @@ fn parse(allocator: std.mem.Allocator, target: []const u8) !Parts {
         }
     }
     var password: []const u8 = "";
-    if (std.mem.lastIndexOfScalar(u8, rest, '@')) |at| {
+    if (std.mem.findScalarLast(u8, rest, '@')) |at| {
         const credentials = rest[0..at];
         rest = rest[at + 1 ..];
         // `user:password` or just `:password`; Redis before 6 has no user.
-        password = if (std.mem.indexOfScalar(u8, credentials, ':')) |colon|
+        password = if (std.mem.findScalar(u8, credentials, ':')) |colon|
             credentials[colon + 1 ..]
         else
             credentials;
@@ -1219,7 +1219,7 @@ fn parse(allocator: std.mem.Allocator, target: []const u8) !Parts {
     // database on it - `redis://host`, which is what somebody types - kept its
     // `?password=…` as part of the host name, and the app said it could not reach
     // `host?password=hunter2:6379`. Which also put the password on the screen.
-    if (std.mem.indexOfScalar(u8, rest, '?')) |question| {
+    if (std.mem.findScalar(u8, rest, '?')) |question| {
         var parameters = std.mem.tokenizeAny(u8, rest[question + 1 ..], "&");
         while (parameters.next()) |parameter| {
             if (std.ascii.startsWithIgnoreCase(parameter, "password=")) {
@@ -1229,18 +1229,18 @@ fn parse(allocator: std.mem.Allocator, target: []const u8) !Parts {
         rest = rest[0..question];
     }
     var index: u8 = 0;
-    if (std.mem.indexOfScalar(u8, rest, '/')) |slash| {
+    if (std.mem.findScalar(u8, rest, '/')) |slash| {
         index = std.fmt.parseInt(u8, rest[slash + 1 ..], 10) catch 0;
         rest = rest[0..slash];
     }
     var host: []const u8 = if (rest.len != 0) rest else "127.0.0.1";
     var port: u16 = 6379;
-    if (std.mem.lastIndexOfScalar(u8, host, ':')) |colon| {
+    if (std.mem.findScalarLast(u8, host, ':')) |colon| {
         port = std.fmt.parseInt(u16, host[colon + 1 ..], 10) catch port;
         host = host[0..colon];
     }
     return .{
-        .host = try allocator.dupeZ(u8, host),
+        .host = try allocator.dupeSentinel(u8, host, 0),
         .password = try unescape(allocator, password),
         .port = port,
         .index = index,
@@ -1365,8 +1365,8 @@ test "many commands go out together and their answers come back in order" {
     const got = std.c.recv(pair[1], &sent, sent.len, 0);
     try std.testing.expect(got > 0);
     const wire = sent[0..@intCast(got)];
-    try std.testing.expect(std.mem.indexOf(u8, wire, "TYPE").? < std.mem.indexOf(u8, wire, "TTL").?);
-    try std.testing.expect(std.mem.indexOf(u8, wire, "TTL").? < std.mem.indexOf(u8, wire, "GET").?);
+    try std.testing.expect(std.mem.find(u8, wire, "TYPE").? < std.mem.find(u8, wire, "TTL").?);
+    try std.testing.expect(std.mem.find(u8, wire, "TTL").? < std.mem.find(u8, wire, "GET").?);
 }
 
 test "what a failed connection says never carries the password" {

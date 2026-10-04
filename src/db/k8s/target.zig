@@ -51,14 +51,14 @@ pub fn parse(arena: std.mem.Allocator, target: []const u8) !Parts {
     }
 
     var parts = Parts{};
-    if (std.mem.indexOfScalar(u8, rest, '?')) |mark| {
+    if (std.mem.findScalar(u8, rest, '?')) |mark| {
         try options(arena, &parts, rest[mark + 1 ..]);
         rest = rest[0..mark];
     }
     // A context name may have a slash in it - a kubeconfig written by hand often
     // does - so the namespace is what follows the *last* one, and only when the
     // target has two parts to begin with.
-    if (std.mem.lastIndexOfScalar(u8, rest, '/')) |mark| {
+    if (std.mem.findScalarLast(u8, rest, '/')) |mark| {
         parts.namespace = try unescape(arena, rest[mark + 1 ..]);
         rest = rest[0..mark];
     }
@@ -72,7 +72,7 @@ fn options(arena: std.mem.Allocator, parts: *Parts, query: []const u8) !void {
         if (pair.len == 0) {
             continue;
         }
-        const cut = std.mem.indexOfScalar(u8, pair, '=') orelse pair.len;
+        const cut = std.mem.findScalar(u8, pair, '=') orelse pair.len;
         const name = pair[0..cut];
         const value = if (cut < pair.len) try unescape(arena, pair[cut + 1 ..]) else "";
         if (std.ascii.eqlIgnoreCase(name, "kubeconfig")) {
@@ -90,7 +90,7 @@ fn options(arena: std.mem.Allocator, parts: *Parts, query: []const u8) !void {
 /// Percent decoding, because a context name may hold a slash or a colon and
 /// somebody who escaped one meant it.
 fn unescape(arena: std.mem.Allocator, text: []const u8) ![]const u8 {
-    if (std.mem.indexOfScalar(u8, text, '%') == null) {
+    if (std.mem.findScalar(u8, text, '%') == null) {
         return text;
     }
     var out: db.List = .empty;

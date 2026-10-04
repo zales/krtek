@@ -39,10 +39,10 @@ pub fn owns(target: []const u8) bool {
         }
     }
     // The connection string, which is what the portal hands out.
-    return std.mem.indexOf(u8, target, "AccountName=") != null and
-        (std.mem.indexOf(u8, target, "AccountKey=") != null or
-            std.mem.indexOf(u8, target, "SharedAccessSignature=") != null or
-            std.mem.indexOf(u8, target, "BlobEndpoint=") != null);
+    return std.mem.find(u8, target, "AccountName=") != null and
+        (std.mem.find(u8, target, "AccountKey=") != null or
+            std.mem.find(u8, target, "SharedAccessSignature=") != null or
+            std.mem.find(u8, target, "BlobEndpoint=") != null);
 }
 
 pub const Parts = struct {
@@ -71,7 +71,7 @@ pub const Parts = struct {
 };
 
 pub fn parse(arena: std.mem.Allocator, target: []const u8) !Parts {
-    if (std.mem.indexOf(u8, target, "AccountName=") != null) {
+    if (std.mem.find(u8, target, "AccountName=") != null) {
         return fromConnectionString(arena, target);
     }
     var self = Parts{};
@@ -90,11 +90,11 @@ pub fn parse(arena: std.mem.Allocator, target: []const u8) !Parts {
     // The query first: an account key is base64 and ends in `==` often enough,
     // and a SAS is a query string of its own.
     var endpoint_given: ?[]const u8 = null;
-    if (std.mem.indexOfScalar(u8, rest, '?')) |mark| {
+    if (std.mem.findScalar(u8, rest, '?')) |mark| {
         var options = std.mem.tokenizeScalar(u8, rest[mark + 1 ..], '&');
         rest = rest[0..mark];
         while (options.next()) |option| {
-            const equals = std.mem.indexOfScalar(u8, option, '=') orelse continue;
+            const equals = std.mem.findScalar(u8, option, '=') orelse continue;
             const name = option[0..equals];
             const value = try targets.unescape(arena, option[equals + 1 ..]);
             if (targets.eql(name, "key") or targets.eql(name, "account_key") or targets.eql(name, "password")) {
@@ -121,10 +121,10 @@ pub fn parse(arena: std.mem.Allocator, target: []const u8) !Parts {
     var path: []const u8 = "";
     // The credentials end at the *last* at sign, not at the first slash: an account
     // key is base64 and holds slashes, and no container name may hold an at sign.
-    if (std.mem.lastIndexOfScalar(u8, rest, '@')) |at| {
+    if (std.mem.findScalarLast(u8, rest, '@')) |at| {
         const userinfo = rest[0..at];
         authority = rest[at + 1 ..];
-        if (std.mem.indexOfScalar(u8, userinfo, ':')) |colon| {
+        if (std.mem.findScalar(u8, userinfo, ':')) |colon| {
             self.account = try targets.unescape(arena, userinfo[0..colon]);
             self.key = try targets.unescape(arena, userinfo[colon + 1 ..]);
         } else {
@@ -134,14 +134,14 @@ pub fn parse(arena: std.mem.Allocator, target: []const u8) !Parts {
             self.source = "the target";
         }
     }
-    if (std.mem.indexOfScalar(u8, authority, '/')) |slash| {
+    if (std.mem.findScalar(u8, authority, '/')) |slash| {
         path = std.mem.trim(u8, authority[slash + 1 ..], "/");
         authority = authority[0..slash];
     }
 
     var host = authority;
     var port: ?u16 = null;
-    if (std.mem.lastIndexOfScalar(u8, authority, ':')) |colon| {
+    if (std.mem.findScalarLast(u8, authority, ':')) |colon| {
         if (std.fmt.parseInt(u16, authority[colon + 1 ..], 10)) |value| {
             host = authority[0..colon];
             port = value;
@@ -164,7 +164,7 @@ pub fn parse(arena: std.mem.Allocator, target: []const u8) !Parts {
     }
     if (endpoint_given) |given| {
         self.host = given;
-        if (std.mem.lastIndexOfScalar(u8, given, ':')) |colon| {
+        if (std.mem.findScalarLast(u8, given, ':')) |colon| {
             if (std.fmt.parseInt(u16, given[colon + 1 ..], 10)) |value| {
                 self.host = given[0..colon];
                 port = value;
@@ -175,7 +175,7 @@ pub fn parse(arena: std.mem.Allocator, target: []const u8) !Parts {
     self.tls = tls;
     self.port = port orelse (if (tls) @as(u16, 443) else 80);
     if (self.host.len == 0 and self.account.len != 0) {
-        self.host = try std.fmt.allocPrint(arena, "{s}.{s}", .{ self.account, SUFFIX });
+        self.host = try arena.print("{s}.{s}", .{ self.account, SUFFIX });
     }
     self.path_style = self.path_style or !inHost(self.host, self.account);
     return self;
@@ -202,7 +202,7 @@ pub fn fromConnectionString(arena: std.mem.Allocator, text: []const u8) !Parts {
     var protocol: []const u8 = "https";
     var parts = std.mem.tokenizeScalar(u8, text, ';');
     while (parts.next()) |item| {
-        const equals = std.mem.indexOfScalar(u8, item, '=') orelse continue;
+        const equals = std.mem.findScalar(u8, item, '=') orelse continue;
         const name = std.mem.trim(u8, item[0..equals], " ");
         // A key is base64 and ends in `=`, so only the first one separates.
         const value = item[equals + 1 ..];
@@ -231,14 +231,14 @@ pub fn fromConnectionString(arena: std.mem.Allocator, text: []const u8) !Parts {
             }
         }
         var authority = rest;
-        if (std.mem.indexOfScalar(u8, rest, '/')) |slash| {
+        if (std.mem.findScalar(u8, rest, '/')) |slash| {
             authority = rest[0..slash];
             // The path of a blob endpoint is the account, which is how Azurite
             // writes it - and which says the account belongs in the path.
             self.path_style = true;
         }
         self.host = authority;
-        if (std.mem.lastIndexOfScalar(u8, authority, ':')) |colon| {
+        if (std.mem.findScalarLast(u8, authority, ':')) |colon| {
             if (std.fmt.parseInt(u16, authority[colon + 1 ..], 10)) |value| {
                 self.host = authority[0..colon];
                 self.port = value;
@@ -248,7 +248,7 @@ pub fn fromConnectionString(arena: std.mem.Allocator, text: []const u8) !Parts {
         }
     } else {
         self.tls = !targets.eql(protocol, "http");
-        self.host = try std.fmt.allocPrint(arena, "{s}.blob.{s}", .{ self.account, suffix });
+        self.host = try arena.print("{s}.blob.{s}", .{ self.account, suffix });
         self.port = if (self.tls) 443 else 80;
     }
     self.path_style = self.path_style or !inHost(self.host, self.account);
@@ -284,7 +284,7 @@ pub fn resolve(arena: std.mem.Allocator, self: *Parts) !void {
 }
 
 fn secondSegment(path: []const u8) []const u8 {
-    const slash = std.mem.indexOfScalar(u8, path, '/') orelse return "";
+    const slash = std.mem.findScalar(u8, path, '/') orelse return "";
     return targets.firstSegment(path[slash + 1 ..]);
 }
 

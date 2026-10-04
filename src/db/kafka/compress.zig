@@ -39,10 +39,6 @@ pub fn codecName(codec: Codec) []const u8 {
     };
 }
 
-/// How much readable slack to leave after a compressed payload. A bit reader that
-/// runs off the end lands here rather than past the buffer.
-const SLACK = 64;
-
 /// The most a batch may unpack to. A fetch brings back at most PARTITION_BYTES per
 /// partition, so even very compressible records cannot honestly exceed this - and
 /// the length that says otherwise is a number out of the bytes being parsed. Before
@@ -91,17 +87,11 @@ fn drain(arena: std.mem.Allocator, reader: *std.Io.Reader) CompressError![]const
 }
 
 fn unzip(arena: std.mem.Allocator, bytes: []const u8) CompressError![]const u8 {
-    // Room after the input, and this is not tidiness: Zig 0.16.0's inflater, given a
-    // corrupt stream, tosses more bits than it has read and trips
-    // `assert(seek <= end)` inside the reader it is tossing from. The slack is where
-    // that over-toss lands, so it reaches its own error instead of an unreachable.
-    // A deflate stream ends where its own bits say it ends, so trailing zeroes change
-    // nothing about a sound one. Found by the fuzzer, held by it across millions of
-    // inputs, and to be taken out when the standard library stops needing it.
-    const padded = try arena.alloc(u8, bytes.len + SLACK);
-    @memcpy(padded[0..bytes.len], bytes);
-    @memset(padded[bytes.len..], 0);
-    var input = std.Io.Reader.fixed(padded);
+    // The input as it came. Zig 0.16.0's inflater, given a corrupt stream, tossed
+    // more bits than it had read and tripped `assert(seek <= end)`, so this used to
+    // hand it a copy with zeroes after the end; 0.17.0 counts the bits it has
+    // before tossing them, and the fuzzer agrees.
+    var input = std.Io.Reader.fixed(bytes);
     // And no window of its own: with one, the inflater keeps the history itself and
     // streams through a writer that cannot make room. With none it writes straight
     // into the caller's, which grows - see `drain`.
@@ -168,7 +158,7 @@ fn snappyBlock(arena: std.mem.Allocator, bytes: []const u8) CompressError![]cons
     if (length > MAX_UNPACKED) {
         return error.Malformed;
     }
-    var out = try std.ArrayListUnmanaged(u8).initCapacity(arena, length);
+    var out = try std.ArrayList(u8).initCapacity(arena, length);
     while (at < bytes.len) {
         const tag = bytes[at];
         at += 1;
@@ -407,7 +397,7 @@ test "gzip comes out of the standard library, and is checked here anyway" {
 test "a codec krtek does not know says so rather than returning rubbish" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    const made_up: Codec = @enumFromInt(6);
+    const made_up: Codec = @fromBackingInt(6);
     try testing.expectError(error.Unsupported, decompress(arena.allocator(), made_up, "anything"));
     // And no compression is the bytes themselves.
     try testing.expectEqualStrings("plain", try decompress(arena.allocator(), .none, "plain"));

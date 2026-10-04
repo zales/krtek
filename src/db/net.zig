@@ -142,7 +142,7 @@ pub const Stream = struct {
         // number everywhere this runs; a signal that interrupted the wait is also
         // worth waiting again after.
         const code = std.c._errno().*;
-        return code == @intFromEnum(std.c.E.AGAIN) or code == @intFromEnum(std.c.E.INTR);
+        return code == @backingInt(std.c.E.AGAIN) or code == @backingInt(std.c.E.INTR);
     }
 
     pub fn close(self: *Stream) void {
@@ -274,7 +274,7 @@ pub fn startTls(allocator: std.mem.Allocator, stream: *Stream, host: []const u8,
     if (ssl.SSL_set_fd(session, stream.fd) != 1) {
         return error.Tls;
     }
-    const zero_host = try allocator.dupeZ(u8, host);
+    const zero_host = try allocator.dupeSentinel(u8, host, 0);
     defer allocator.free(zero_host);
     // The name to ask for, and - when verifying - the name to insist on.
     _ = ssl.SSL_ctrl(session, ssl.CTRL_SET_TLSEXT_HOSTNAME, ssl.TLSEXT_NAMETYPE_host_name, @ptrCast(@constCast(zero_host.ptr)));
@@ -395,15 +395,15 @@ pub fn connect(allocator: std.mem.Allocator, host: []const u8, port: u16) !Strea
 /// for: taking only the first would leave a host unreachable on a machine whose
 /// IPv6 goes nowhere.
 pub fn dial(allocator: std.mem.Allocator, host: []const u8, port: u16) !std.c.fd_t {
-    const zero = try allocator.dupeZ(u8, host);
+    const zero = try allocator.dupeSentinel(u8, host, 0);
     defer allocator.free(zero);
     var hints = std.mem.zeroes(std.c.addrinfo);
     hints.family = std.c.AF.UNSPEC;
     hints.socktype = std.c.SOCK.STREAM;
     var service: [8]u8 = undefined;
-    const service_text = std.fmt.bufPrintZ(&service, "{d}", .{port}) catch return error.BadPort;
+    const service_text = std.mem.printSentinel(&service, "{d}", .{port}, 0) catch return error.BadPort;
     var found: ?*std.c.addrinfo = null;
-    if (std.c.getaddrinfo(zero.ptr, service_text.ptr, &hints, &found) != @as(std.c.EAI, @enumFromInt(0))) {
+    if (std.c.getaddrinfo(zero.ptr, service_text.ptr, &hints, &found) != @as(std.c.EAI, @fromBackingInt(0))) {
         return error.NoSuchHost;
     }
     defer if (found) |list| std.c.freeaddrinfo(list);
@@ -486,7 +486,7 @@ test "a certificate authority is read out of memory, and rubbish is not" {
     try testing.expectEqualStrings("", why.items);
 
     try testing.expectEqual(@as(usize, 0), try trustPem(testing.allocator, ctx, "not a certificate at all", &why));
-    try testing.expect(std.mem.indexOf(u8, why.items, "not a certificate") != null);
+    try testing.expect(std.mem.find(u8, why.items, "not a certificate") != null);
 }
 
 test "a client certificate and its key go in together, or the pair is refused" {
@@ -506,7 +506,7 @@ test "a client certificate and its key go in together, or the pair is refused" {
         const ctx = ssl.SSL_CTX_new(ssl.TLS_client_method()) orelse return error.SkipZigTest;
         defer ssl.SSL_CTX_free(ctx);
         try testing.expectError(error.Tls, useClientCertificate(testing.allocator, ctx, CLIENT_PEM, OTHER_KEY, &why));
-        try testing.expect(std.mem.indexOf(u8, why.items, "does not go with") != null);
+        try testing.expect(std.mem.find(u8, why.items, "does not go with") != null);
     }
     // And a certificate with no key at all is a sentence rather than a crash.
     {
@@ -514,13 +514,13 @@ test "a client certificate and its key go in together, or the pair is refused" {
         defer ssl.SSL_CTX_free(ctx);
         why.clearRetainingCapacity();
         try testing.expectError(error.Tls, useClientCertificate(testing.allocator, ctx, CLIENT_PEM, "", &why));
-        try testing.expect(std.mem.indexOf(u8, why.items, "without its key") != null);
+        try testing.expect(std.mem.find(u8, why.items, "without its key") != null);
     }
     {
         const ctx = ssl.SSL_CTX_new(ssl.TLS_client_method()) orelse return error.SkipZigTest;
         defer ssl.SSL_CTX_free(ctx);
         why.clearRetainingCapacity();
         try testing.expectError(error.Tls, useClientCertificate(testing.allocator, ctx, "nonsense", CLIENT_KEY, &why));
-        try testing.expect(std.mem.indexOf(u8, why.items, "not a certificate") != null);
+        try testing.expect(std.mem.find(u8, why.items, "not a certificate") != null);
     }
 }

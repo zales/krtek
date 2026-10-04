@@ -254,11 +254,11 @@ pub const Db = struct {
             var payload: [64]u8 = undefined;
             sigv4.hashHex(&payload, request.body);
 
-            var signing: std.ArrayListUnmanaged(sigv4.Header) = .empty;
+            var signing: std.ArrayList(sigv4.Header) = .empty;
             try signing.append(arena, .{ .name = "host", .value = try self.hostHeader(arena, host) });
             try signing.appendSlice(arena, request.headers);
 
-            var headers: std.ArrayListUnmanaged(http.Header) = .empty;
+            var headers: std.ArrayList(http.Header) = .empty;
             var params: []const u8 = "";
             if (self.parts.anonymous()) {
                 // A public bucket takes an unsigned request, and there is nothing to
@@ -290,7 +290,7 @@ pub const Db = struct {
             }
 
             const target = if (params.len != 0)
-                try std.fmt.allocPrint(arena, "{s}?{s}", .{ path, params })
+                try arena.print("{s}?{s}", .{ path, params })
             else
                 path;
 
@@ -357,7 +357,7 @@ pub const Db = struct {
         if (bucket.len == 0 or self.parts.path_style) {
             return self.parts.endpoint;
         }
-        return std.fmt.allocPrint(arena, "{s}.{s}", .{ bucket, self.parts.endpoint });
+        return arena.print("{s}.{s}", .{ bucket, self.parts.endpoint });
     }
 
     /// The `Host` header, which carries the port unless it is the usual one - and
@@ -366,7 +366,7 @@ pub const Db = struct {
         if (self.parts.port == http.defaultPort(self.parts.tls)) {
             return host;
         }
-        return std.fmt.allocPrint(arena, "{s}:{d}", .{ host, self.parts.port });
+        return arena.print("{s}:{d}", .{ host, self.parts.port });
     }
 
     fn pathFor(self: *Db, arena: std.mem.Allocator, bucket: []const u8, key: []const u8) db.Error![]const u8 {
@@ -374,7 +374,7 @@ pub const Db = struct {
         if (bucket.len == 0 or !self.parts.path_style) {
             return tail;
         }
-        return std.fmt.allocPrint(arena, "/{s}{s}", .{ bucket, if (tail.len == 1) "" else tail });
+        return arena.print("/{s}{s}", .{ bucket, if (tail.len == 1) "" else tail });
     }
 
     fn clientFor(self: *Db, host: []const u8) db.Error!*http.Client {
@@ -460,14 +460,14 @@ pub const Db = struct {
         limit: usize,
         folded: bool,
     ) db.Error!Listing {
-        var params: std.ArrayListUnmanaged(sigv4.Param) = .empty;
+        var params: std.ArrayList(sigv4.Param) = .empty;
         try params.append(arena, .{ .name = "list-type", .value = "2" });
         // Keys may hold anything, including bytes XML cannot carry; asked for
         // escaped, they always come back readable.
         try params.append(arena, .{ .name = "encoding-type", .value = "url" });
         try params.append(arena, .{
             .name = "max-keys",
-            .value = try std.fmt.allocPrint(arena, "{d}", .{limit}),
+            .value = try arena.print("{d}", .{limit}),
         });
         if (prefix.len != 0) {
             try params.append(arena, .{ .name = "prefix", .value = prefix });
@@ -707,10 +707,10 @@ pub const Db = struct {
         to: []const u8,
         storage: ?[]const u8,
     ) db.Error!void {
-        var headers: std.ArrayListUnmanaged(sigv4.Header) = .empty;
+        var headers: std.ArrayList(sigv4.Header) = .empty;
         try headers.append(arena, .{
             .name = "x-amz-copy-source",
-            .value = try std.fmt.allocPrint(arena, "/{s}{s}", .{ bucket, try sigv4.escapePath(arena, from) }),
+            .value = try arena.print("/{s}{s}", .{ bucket, try sigv4.escapePath(arena, from) }),
         });
         if (storage) |class| {
             try headers.append(arena, .{ .name = "x-amz-storage-class", .value = class });
@@ -799,7 +799,7 @@ pub const Db = struct {
                     // here and calling that the answer.
                     const pattern = filter.value;
                     const body = std.mem.trimEnd(u8, pattern, "%");
-                    if (std.mem.indexOfAny(u8, body, "%_") != null) {
+                    if (std.mem.findAny(u8, body, "%_") != null) {
                         self.remember("S3 matches a prefix, not a pattern: key LIKE 'a/b%' is all it can do");
                         return error.Driver;
                     }
@@ -819,7 +819,7 @@ pub const Db = struct {
     }
 
     pub fn schemas(_: *Db, arena: std.mem.Allocator) db.Error![][]const u8 {
-        var list_of: std.ArrayListUnmanaged([]const u8) = .empty;
+        var list_of: std.ArrayList([]const u8) = .empty;
         return list_of.toOwnedSlice(arena);
     }
 
@@ -827,7 +827,7 @@ pub const Db = struct {
     /// shown, because a key that may see one bucket often may not list them all.
     pub fn objects(self: *Db, arena: std.mem.Allocator, _: []const u8) db.Error![]db.Object {
         if (self.parts.bucket.len != 0) {
-            var out: std.ArrayListUnmanaged(db.Object) = .empty;
+            var out: std.ArrayList(db.Object) = .empty;
             try out.append(arena, .{ .name = try arena.dupe(u8, self.parts.bucket), .kind = .table });
             return out.items;
         }
@@ -836,7 +836,7 @@ pub const Db = struct {
 
     /// Every bucket this key can see, whatever the target named.
     fn buckets(self: *Db, arena: std.mem.Allocator) db.Error![]db.Object {
-        var out: std.ArrayListUnmanaged(db.Object) = .empty;
+        var out: std.ArrayList(db.Object) = .empty;
         const response = try self.call(arena, .{});
         if (!response.ok()) {
             return self.fail(response);
@@ -869,7 +869,7 @@ pub const Db = struct {
     }
 
     pub fn columns(_: *Db, arena: std.mem.Allocator, _: db.Table) db.Error![]db.Column {
-        var out: std.ArrayListUnmanaged(db.Column) = .empty;
+        var out: std.ArrayList(db.Column) = .empty;
         try out.append(arena, .{ .name = KEY, .type = "string", .notnull = true, .pk = true, .original = KEY });
         try out.append(arena, .{ .name = SIZE, .type = "integer", .original = SIZE });
         try out.append(arena, .{ .name = MODIFIED, .type = "timestamp", .original = MODIFIED });
@@ -879,7 +879,7 @@ pub const Db = struct {
     }
 
     pub fn indexes(_: *Db, arena: std.mem.Allocator, _: db.Table) db.Error![]db.Index {
-        var out: std.ArrayListUnmanaged(db.Index) = .empty;
+        var out: std.ArrayList(db.Index) = .empty;
         try out.append(arena, .{ .name = KEY, .kind = "PRIMARY", .columns = KEY });
         return out.items;
     }
@@ -910,7 +910,7 @@ pub const Db = struct {
     }
 
     pub fn rowKey(_: *Db, arena: std.mem.Allocator, _: db.Table) db.Error!db.RowKey {
-        var out: std.ArrayListUnmanaged([]const u8) = .empty;
+        var out: std.ArrayList([]const u8) = .empty;
         try out.append(arena, KEY);
         return .{ .columns = out.items };
     }
@@ -920,8 +920,8 @@ pub const Db = struct {
     }
 
     pub fn settings(self: *Db, arena: std.mem.Allocator) db.Error![]db.Setting {
-        var out: std.ArrayListUnmanaged(db.Setting) = .empty;
-        try out.append(arena, .{ .label = "endpoint", .value = try std.fmt.allocPrint(arena, "{s}:{d}", .{ self.parts.endpoint, self.parts.port }) });
+        var out: std.ArrayList(db.Setting) = .empty;
+        try out.append(arena, .{ .label = "endpoint", .value = try arena.print("{s}:{d}", .{ self.parts.endpoint, self.parts.port }) });
         try out.append(arena, .{ .label = "region", .value = self.parts.region });
         try out.append(arena, .{ .label = "addressing", .value = if (self.parts.path_style) "path" else "virtual host" });
         try out.append(arena, .{ .label = "encrypted", .value = if (self.parts.tls) "yes, TLS" else "no" });
@@ -932,13 +932,13 @@ pub const Db = struct {
         if (self.parts.bucket.len != 0) {
             try out.append(arena, .{ .label = "bucket", .value = self.parts.bucket });
         }
-        try out.append(arena, .{ .label = "requests made", .value = try std.fmt.allocPrint(arena, "{d}", .{self.requests}) });
+        try out.append(arena, .{ .label = "requests made", .value = try arena.print("{d}", .{self.requests}) });
         return out.items;
     }
 
     /// One command per line, as in the other console drivers.
     pub fn split(_: *Db, arena: std.mem.Allocator, sql: []const u8) db.Error![]db.Statement {
-        var out: std.ArrayListUnmanaged(db.Statement) = .empty;
+        var out: std.ArrayList(db.Statement) = .empty;
         var lines = std.mem.splitScalar(u8, sql, '\n');
         while (lines.next()) |raw| {
             const line = std.mem.trim(u8, raw, " \t\r");
@@ -1092,7 +1092,7 @@ pub const Db = struct {
             return error.Driver;
         };
         const replies = self.replies.allocator();
-        const url = try std.fmt.allocPrint(replies, "{s}://{s}{s}?{s}", .{
+        const url = try replies.print("{s}://{s}{s}?{s}", .{
             if (self.parts.tls) "https" else "http",
             try self.hostHeader(replies, host),
             try self.pathFor(replies, bucket, key),
@@ -1129,7 +1129,7 @@ pub const Db = struct {
             if (self.owner.parts.bucket.len == 0) {
                 return "/";
             }
-            return std.fmt.allocPrint(arena, "/{s}", .{self.owner.parts.bucket}) catch error.OutOfMemory;
+            return arena.print("/{s}", .{self.owner.parts.bucket}) catch error.OutOfMemory;
         }
 
         /// A path split into the bucket and the key under it.
@@ -1140,7 +1140,7 @@ pub const Db = struct {
 
         fn partsOf(path: []const u8) Split {
             const trimmed = std.mem.trimStart(u8, path, "/");
-            const slash = std.mem.indexOfScalar(u8, trimmed, '/') orelse return .{ .bucket = trimmed };
+            const slash = std.mem.findScalar(u8, trimmed, '/') orelse return .{ .bucket = trimmed };
             return .{ .bucket = trimmed[0..slash], .key = trimmed[slash + 1 ..] };
         }
 
@@ -1150,7 +1150,7 @@ pub const Db = struct {
             if (key.len == 0 or std.mem.endsWith(u8, key, "/")) {
                 return key;
             }
-            return std.fmt.allocPrint(arena, "{s}/", .{key}) catch error.OutOfMemory;
+            return arena.print("{s}/", .{key}) catch error.OutOfMemory;
         }
 
         fn blame(self: Files, response: http.Response) db.store.Error {
@@ -1159,7 +1159,7 @@ pub const Db = struct {
         }
 
         pub fn list(self: Files, arena: std.mem.Allocator, path: []const u8) db.store.Error![]db.store.Entry {
-            var out: std.ArrayListUnmanaged(db.store.Entry) = .empty;
+            var out: std.ArrayList(db.store.Entry) = .empty;
             const where = partsOf(path);
             if (where.bucket.len == 0) {
                 const found = self.owner.buckets(arena) catch return error.Store;
@@ -1294,7 +1294,7 @@ pub const Db = struct {
         pub fn rename(self: Files, arena: std.mem.Allocator, from: []const u8, to: []const u8) db.store.Error!void {
             const source = partsOf(from);
             const target = partsOf(to);
-            const origin = std.fmt.allocPrint(arena, "/{s}/{s}", .{ source.bucket, source.key }) catch return error.OutOfMemory;
+            const origin = arena.print("/{s}/{s}", .{ source.bucket, source.key }) catch return error.OutOfMemory;
             const response = self.owner.call(arena, .{
                 .method = "PUT",
                 .bucket = target.bucket,
@@ -1342,7 +1342,7 @@ pub const Db = struct {
             const arena = self.scratch.?.allocator();
 
             const last = @min(self.at + RANGE, self.size) - 1;
-            const range = std.fmt.allocPrint(arena, "bytes={d}-{d}", .{ self.at, last }) catch return error.OutOfMemory;
+            const range = arena.print("bytes={d}-{d}", .{ self.at, last }) catch return error.OutOfMemory;
             const response = self.owner.call(arena, .{
                 .bucket = self.bucket,
                 .key = self.key,
@@ -1486,7 +1486,7 @@ const Pages = struct {
     bucket: []const u8 = "",
     prefix: []const u8 = "",
     size: usize = 0,
-    tokens: std.ArrayListUnmanaged([]const u8) = .empty,
+    tokens: std.ArrayList([]const u8) = .empty,
     /// Whether the listing was walked to its end, so a page beyond it is known to
     /// be empty without asking.
     ended: bool = false,
@@ -1522,8 +1522,8 @@ const Pages = struct {
 /// against what S3 actually sends, which is how the encoding of a key with a
 /// space in it stopped being a guess.
 pub fn parseListing(arena: std.mem.Allocator, body: []const u8) !Db.Listing {
-    var entries: std.ArrayListUnmanaged(Db.Entry) = .empty;
-    var folders: std.ArrayListUnmanaged([]const u8) = .empty;
+    var entries: std.ArrayList(Db.Entry) = .empty;
+    var folders: std.ArrayList([]const u8) = .empty;
     var next: ?[]const u8 = null;
     var truncated = false;
 
@@ -1618,7 +1618,7 @@ fn days(year: i64, month: i64, day: i64) i64 {
 /// back as `a b` until this told the two apart.
 fn unescapeKey(arena: std.mem.Allocator, text: []const u8) ![]const u8 {
     const entities = try xml.unescape(arena, text);
-    if (std.mem.indexOfAny(u8, entities, "%+") == null) {
+    if (std.mem.findAny(u8, entities, "%+") == null) {
         return entities;
     }
     var out: List = .empty;
@@ -1659,10 +1659,10 @@ fn trimQuotes(text: []const u8) []const u8 {
 /// knowing whether it is Amazon or MinIO explains half the surprises.
 fn serverName(header: ?[]const u8) []const u8 {
     const text = header orelse return "S3";
-    if (std.ascii.indexOfIgnoreCase(text, "minio") != null) {
+    if (std.ascii.findIgnoreCase(text, "minio") != null) {
         return "MinIO";
     }
-    if (std.ascii.indexOfIgnoreCase(text, "amazons3") != null) {
+    if (std.ascii.findIgnoreCase(text, "amazons3") != null) {
         return "Amazon S3";
     }
     return "S3";
@@ -1674,7 +1674,7 @@ fn masked(arena: std.mem.Allocator, key: []const u8) ![]const u8 {
     if (key.len <= 4) {
         return "****";
     }
-    return std.fmt.allocPrint(arena, "****{s}", .{key[key.len - 4 ..]});
+    return arena.print("****{s}", .{key[key.len - 4 ..]});
 }
 
 fn eql(left: []const u8, right: []const u8) bool {
@@ -1684,7 +1684,7 @@ fn eql(left: []const u8, right: []const u8) bool {
 /// A bucket name has no slash in it; a prefix nearly always does. Which is how
 /// `LS photos` and `LS 2015/august` tell themselves apart.
 fn looksLikeBucket(word: []const u8) bool {
-    return std.mem.indexOfScalar(u8, word, '/') == null and !std.mem.endsWith(u8, word, "%");
+    return std.mem.findScalar(u8, word, '/') == null and !std.mem.endsWith(u8, word, "%");
 }
 
 /// A cell of a change that was actually given a value.

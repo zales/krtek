@@ -85,11 +85,11 @@ pub fn parse(arena: std.mem.Allocator, target: []const u8) !Parts {
     }
 
     // The query first: a password may hold an @ or a /.
-    if (std.mem.indexOfScalar(u8, rest, '?')) |mark| {
+    if (std.mem.findScalar(u8, rest, '?')) |mark| {
         var options = std.mem.tokenizeScalar(u8, rest[mark + 1 ..], '&');
         rest = rest[0..mark];
         while (options.next()) |option| {
-            const equals = std.mem.indexOfScalar(u8, option, '=') orelse continue;
+            const equals = std.mem.findScalar(u8, option, '=') orelse continue;
             const name = option[0..equals];
             const value = try targets.unescape(arena, option[equals + 1 ..]);
             if (eql(name, "password")) {
@@ -112,14 +112,14 @@ pub fn parse(arena: std.mem.Allocator, target: []const u8) !Parts {
 
     var authority = rest;
     var path: []const u8 = "";
-    if (std.mem.indexOfScalar(u8, rest, '/')) |slash| {
+    if (std.mem.findScalar(u8, rest, '/')) |slash| {
         authority = rest[0..slash];
         path = rest[slash + 1 ..];
     }
-    if (std.mem.lastIndexOfScalar(u8, authority, '@')) |at| {
+    if (std.mem.findScalarLast(u8, authority, '@')) |at| {
         const userinfo = authority[0..at];
         authority = authority[at + 1 ..];
-        if (std.mem.indexOfScalar(u8, userinfo, ':')) |colon| {
+        if (std.mem.findScalar(u8, userinfo, ':')) |colon| {
             self.user = try targets.unescape(arena, userinfo[0..colon]);
             self.password = try targets.unescape(arena, userinfo[colon + 1 ..]);
         } else if (userinfo.len != 0) {
@@ -130,7 +130,7 @@ pub fn parse(arena: std.mem.Allocator, target: []const u8) !Parts {
     self.tls = scheme_tls orelse false;
     var port: ?u16 = null;
     var host = authority;
-    if (std.mem.lastIndexOfScalar(u8, authority, ':')) |colon| {
+    if (std.mem.findScalarLast(u8, authority, ':')) |colon| {
         if (std.fmt.parseInt(u16, authority[colon + 1 ..], 10)) |value| {
             host = authority[0..colon];
             port = value;

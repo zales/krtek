@@ -68,7 +68,7 @@ pub fn Built(comptime Owner: type, comptime Held: type) type {
         /// Which columns are numbers, for a grid that right-aligns them. Absent
         /// means none, which is what a driver with nothing to say leaves it as.
         numeric: []const bool = &.{},
-        rows: std.ArrayListUnmanaged([]const Held) = .empty,
+        rows: std.ArrayList([]const Held) = .empty,
         /// The table these came from, where they came from one. Empty means they
         /// are an answer rather than a table, and so cannot be edited.
         table: []const u8 = "",
@@ -505,7 +505,7 @@ pub const Db = union(enum) {
 
     /// Open whatever the target describes: a file path, or a URL like
     /// postgres://user:password@host:port/database.
-    pub fn open(allocator: std.mem.Allocator, target: []const u8, report: *std.ArrayListUnmanaged(u8)) !Db {
+    pub fn open(allocator: std.mem.Allocator, target: []const u8, report: *std.ArrayList(u8)) !Db {
         if (kafka.owns(target)) {
             return .{ .kafka = try kafka.Db.open(allocator, target, report) };
         }
@@ -1164,7 +1164,7 @@ test "a statement that only reads is the only one worth repeating" {
     }
 }
 
-pub const List = std.ArrayListUnmanaged(u8);
+pub const List = std.ArrayList(u8);
 
 // ---------------------------------------------------------------- quoting
 
@@ -1220,7 +1220,7 @@ pub const SplitOptions = struct {
 /// because a batch may create something and then use it, and such a statement
 /// cannot be parsed before the one before it has run.
 pub fn splitStatements(arena: std.mem.Allocator, sql: []const u8, options: SplitOptions) Error![]Statement {
-    var list: std.ArrayListUnmanaged(Statement) = .empty;
+    var list: std.ArrayList(Statement) = .empty;
     var start: usize = 0;
     var i: usize = 0;
     while (i < sql.len) {
@@ -1228,10 +1228,10 @@ pub fn splitStatements(arena: std.mem.Allocator, sql: []const u8, options: Split
         switch (char) {
             '\'', '"' => i = closing(sql, i, char),
             '`' => i = if (options.backticks) closing(sql, i, '`') else i + 1,
-            '[' => i = if (options.brackets) (std.mem.indexOfScalarPos(u8, sql, i, ']') orelse sql.len -| 1) + 1 else i + 1,
+            '[' => i = if (options.brackets) (std.mem.findScalarPos(u8, sql, i, ']') orelse sql.len -| 1) + 1 else i + 1,
             '-' => {
                 if (i + 1 < sql.len and sql[i + 1] == '-') {
-                    i = std.mem.indexOfScalarPos(u8, sql, i, '\n') orelse sql.len;
+                    i = std.mem.findScalarPos(u8, sql, i, '\n') orelse sql.len;
                 } else {
                     i += 1;
                 }
@@ -1264,7 +1264,7 @@ pub fn splitStatements(arena: std.mem.Allocator, sql: []const u8, options: Split
                 while (at < sql.len and (std.ascii.isAlphanumeric(sql[at]) or sql[at] == '_')) : (at += 1) {}
                 if (at < sql.len and sql[at] == '$') {
                     const tag = sql[i .. at + 1];
-                    const close = std.mem.indexOfPos(u8, sql, at + 1, tag);
+                    const close = std.mem.findPos(u8, sql, at + 1, tag);
                     i = if (close) |found| found + tag.len else sql.len;
                 } else {
                     i += 1;
@@ -1311,7 +1311,7 @@ fn isPostgresUrl(target: []const u8) bool {
         }
     }
     // A bare keyword string, the way psql accepts it.
-    return std.mem.indexOf(u8, target, "host=") != null or std.mem.indexOf(u8, target, "dbname=") != null;
+    return std.mem.find(u8, target, "host=") != null or std.mem.find(u8, target, "dbname=") != null;
 }
 
 test "a postgres target is told apart from a file" {
@@ -1345,7 +1345,7 @@ test "the splitter leaves semicolons inside strings, bodies and comments alone" 
 
     const dollar = try splitStatements(a, "CREATE FUNCTION f() RETURNS int AS $$ BEGIN; RETURN 1; END $$ LANGUAGE plpgsql; SELECT f()", pg);
     try std.testing.expectEqual(@as(usize, 2), dollar.len);
-    try std.testing.expect(std.mem.indexOf(u8, dollar[0].sql, "RETURN 1") != null);
+    try std.testing.expect(std.mem.find(u8, dollar[0].sql, "RETURN 1") != null);
 
     const comments = try splitStatements(a, "SELECT 1; -- ; not one\nSELECT 2; /* a ; /* nested */ */ SELECT 3", pg);
     try std.testing.expectEqual(@as(usize, 3), comments.len);

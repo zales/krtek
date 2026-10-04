@@ -13,7 +13,7 @@ const std = @import("std");
 const database = @import("db");
 const store = database.store;
 
-const List = std.ArrayListUnmanaged(u8);
+const List = std.ArrayList(u8);
 
 /// The name of the entry that means "the directory above". It is not something
 /// the places report - it is put in front of every listing that has somewhere
@@ -34,7 +34,7 @@ pub const Pane = struct {
     /// Which entries are marked, by index into `entries`. Cleared whenever the
     /// listing is read again, because an index into a listing that has changed
     /// underneath is a way to delete the wrong file.
-    marked: std.ArrayListUnmanaged(usize) = .empty,
+    marked: std.ArrayList(usize) = .empty,
     /// Why the last listing failed, or empty.
     trouble: List = .empty,
 
@@ -104,14 +104,14 @@ pub const Pane = struct {
     }
 
     pub fn isMarked(self: *Pane, at: usize) bool {
-        return std.mem.indexOfScalar(usize, self.marked.items, at) != null;
+        return std.mem.findScalar(usize, self.marked.items, at) != null;
     }
 
     pub fn toggleMark(self: *Pane, allocator: std.mem.Allocator, at: usize) !void {
         if (at >= self.entries.len or std.mem.eql(u8, self.entries[at].name, UP)) {
             return;
         }
-        if (std.mem.indexOfScalar(usize, self.marked.items, at)) |found| {
+        if (std.mem.findScalar(usize, self.marked.items, at)) |found| {
             _ = self.marked.orderedRemove(found);
         } else {
             try self.marked.append(allocator, at);
@@ -296,14 +296,14 @@ pub fn size(into: *[16]u8, bytes: u64) []const u8 {
         value /= 1024;
     }
     if (unit == 0) {
-        return std.fmt.bufPrint(into, "{d}", .{bytes}) catch "?";
+        return std.mem.print(into, "{d}", .{bytes}) catch "?";
     }
     // One decimal only while it buys something: 1.5G says more than 1G, and
     // 234.0M says nothing that 234M does not.
     if (value < 10) {
-        return std.fmt.bufPrint(into, "{d:.1}{s}", .{ value, units[unit] }) catch "?";
+        return std.mem.print(into, "{d:.1}{s}", .{ value, units[unit] }) catch "?";
     }
-    return std.fmt.bufPrint(into, "{d:.0}{s}", .{ value, units[unit] }) catch "?";
+    return std.mem.print(into, "{d:.0}{s}", .{ value, units[unit] }) catch "?";
 }
 
 /// A name cut to fit, with an ellipsis where the rest was. Cutting bytes would
@@ -328,7 +328,7 @@ pub fn when(into: *[20]u8, seconds: i64) []const u8 {
     const in_day = seconds - days_since * 86400;
     const civil = fromDays(days_since);
     // Unsigned, or the padding puts a sign where a zero belongs: `+1970-+1-+1`.
-    return std.fmt.bufPrint(into, "{d:0>4}-{d:0>2}-{d:0>2} {d:0>2}:{d:0>2}", .{
+    return std.mem.print(into, "{d:0>4}-{d:0>2}-{d:0>2} {d:0>2}:{d:0>2}", .{
         @as(u64, @intCast(@max(civil.year, 0))),
         @as(u64, @intCast(civil.month)),
         @as(u64, @intCast(civil.day)),
@@ -403,7 +403,7 @@ test "the panes walk a real tree and come back out where they went in" {
     defer scratch.deinit();
     const arena = scratch.allocator();
 
-    const root = try std.fmt.allocPrint(arena, "/tmp/krtek-files-test-{d}", .{database.clock.steadyNanos()});
+    const root = try arena.print("/tmp/krtek-files-test-{d}", .{database.clock.steadyNanos()});
 
     var disk = store.Local.init(testing.allocator);
     defer disk.deinit();

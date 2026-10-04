@@ -88,7 +88,7 @@ pub fn sign(
     service: []const u8,
     when: Stamp,
 ) !Signed {
-    var headers: std.ArrayListUnmanaged(Header) = .empty;
+    var headers: std.ArrayList(Header) = .empty;
     try headers.appendSlice(arena, request.headers);
     try headers.append(arena, .{ .name = "x-amz-date", .value = try arena.dupe(u8, when.full()) });
     try headers.append(arena, .{ .name = "x-amz-content-sha256", .value = request.payload });
@@ -109,10 +109,10 @@ pub fn sign(
         request.payload,
     });
 
-    const scope = try std.fmt.allocPrint(arena, "{s}/{s}/{s}/aws4_request", .{ when.date(), region, service });
+    const scope = try arena.print("{s}/{s}/{s}/aws4_request", .{ when.date(), region, service });
     var hashed: [64]u8 = undefined;
     hashHex(&hashed, canonical.items);
-    const to_sign = try std.fmt.allocPrint(arena, "{s}\n{s}\n{s}\n{s}", .{
+    const to_sign = try arena.print("{s}\n{s}\n{s}\n{s}", .{
         ALGORITHM,
         when.full(),
         scope,
@@ -128,8 +128,7 @@ pub fn sign(
     return .{
         .headers = headers.items,
         .query = query,
-        .authorization = try std.fmt.allocPrint(
-            arena,
+        .authorization = try arena.print(
             "{s} Credential={s}/{s}, SignedHeaders={s}, Signature={s}",
             .{ ALGORITHM, credentials.key, scope, sorted.names, signature },
         ),
@@ -154,20 +153,20 @@ pub fn presign(
     when: Stamp,
     seconds: u32,
 ) ![]const u8 {
-    const scope = try std.fmt.allocPrint(arena, "{s}/{s}/{s}/aws4_request", .{ when.date(), region, service });
+    const scope = try arena.print("{s}/{s}/{s}/aws4_request", .{ when.date(), region, service });
     const sorted = try canonicalHeaders(arena, request.headers);
 
-    var params: std.ArrayListUnmanaged(Param) = .empty;
+    var params: std.ArrayList(Param) = .empty;
     try params.appendSlice(arena, request.query);
     try params.append(arena, .{ .name = "X-Amz-Algorithm", .value = ALGORITHM });
     try params.append(arena, .{
         .name = "X-Amz-Credential",
-        .value = try std.fmt.allocPrint(arena, "{s}/{s}", .{ credentials.key, scope }),
+        .value = try arena.print("{s}/{s}", .{ credentials.key, scope }),
     });
     try params.append(arena, .{ .name = "X-Amz-Date", .value = try arena.dupe(u8, when.full()) });
     try params.append(arena, .{
         .name = "X-Amz-Expires",
-        .value = try std.fmt.allocPrint(arena, "{d}", .{seconds}),
+        .value = try arena.print("{d}", .{seconds}),
     });
     try params.append(arena, .{ .name = "X-Amz-SignedHeaders", .value = sorted.names });
     if (credentials.token.len != 0) {
@@ -186,14 +185,14 @@ pub fn presign(
     });
     var hashed: [64]u8 = undefined;
     hashHex(&hashed, canonical.items);
-    const to_sign = try std.fmt.allocPrint(arena, "{s}\n{s}\n{s}\n{s}", .{ ALGORITHM, when.full(), scope, &hashed });
+    const to_sign = try arena.print("{s}\n{s}\n{s}\n{s}", .{ ALGORITHM, when.full(), scope, &hashed });
 
     const key = try signingKey(credentials.secret, when.date(), region, service);
     var mac: [Hmac.mac_length]u8 = undefined;
     Hmac.create(&mac, to_sign, &key);
     var signature: [Hmac.mac_length * 2]u8 = undefined;
     hex(&signature, &mac);
-    return std.fmt.allocPrint(arena, "{s}&X-Amz-Signature={s}", .{ query, &signature });
+    return arena.print("{s}&X-Amz-Signature={s}", .{ query, &signature });
 }
 
 /// The key the signature is made with: the secret beaten through the date, the
@@ -201,7 +200,7 @@ pub fn presign(
 /// another day, another region or another service.
 fn signingKey(secret: []const u8, date: []const u8, region: []const u8, service: []const u8) ![Hmac.mac_length]u8 {
     var first: [4 + 128]u8 = undefined;
-    const seed = std.fmt.bufPrint(&first, "AWS4{s}", .{secret}) catch return error.SecretTooLong;
+    const seed = std.mem.print(&first, "AWS4{s}", .{secret}) catch return error.SecretTooLong;
     var key: [Hmac.mac_length]u8 = undefined;
     Hmac.create(&key, date, seed);
     Hmac.create(&key, region, &key);
@@ -340,7 +339,7 @@ pub fn stamp(seconds: i64) Stamp {
     const month_day = day.calculateMonthDay();
     const time_of_day = moment.getDaySeconds();
     var out: Stamp = .{ .text = undefined };
-    _ = std.fmt.bufPrint(&out.text, "{d:0>4}{d:0>2}{d:0>2}T{d:0>2}{d:0>2}{d:0>2}Z", .{
+    _ = std.mem.print(&out.text, "{d:0>4}{d:0>2}{d:0>2}T{d:0>2}{d:0>2}{d:0>2}Z", .{
         day.year,
         month_day.month.numeric(),
         month_day.day_index + 1,
@@ -571,7 +570,7 @@ test "a session token is signed along with everything else" {
     );
     // It is in the signed headers, so a proxy that drops it breaks the signature
     // instead of quietly sending an unauthenticated request.
-    try testing.expect(std.mem.indexOf(u8, signed.authorization, "x-amz-security-token") != null);
+    try testing.expect(std.mem.find(u8, signed.authorization, "x-amz-security-token") != null);
     var found = false;
     for (signed.headers) |header| {
         if (std.mem.eql(u8, header.name, "x-amz-security-token")) {

@@ -64,7 +64,7 @@ pub fn sign(
     request: Request,
     when: Stamp,
 ) !Signed {
-    var headers: std.ArrayListUnmanaged(Header) = .empty;
+    var headers: std.ArrayList(Header) = .empty;
     try headers.append(arena, .{ .name = "x-ms-date", .value = try arena.dupe(u8, when.text()) });
     try headers.append(arena, .{ .name = "x-ms-version", .value = VERSION });
     for (request.headers) |header| {
@@ -112,7 +112,7 @@ pub fn sign(
     _ = std.base64.standard.Encoder.encode(signature, &mac);
 
     return .{
-        .authorization = try std.fmt.allocPrint(arena, "SharedKey {s}:{s}", .{ account, signature }),
+        .authorization = try arena.print("SharedKey {s}:{s}", .{ account, signature }),
         .string_to_sign = to_sign.items,
         .signature = signature,
     };
@@ -184,7 +184,7 @@ pub fn stamp(seconds: i64) Stamp {
     // The epoch was a Thursday, which is where the day of the week comes from.
     const weekday = (day.day + 4) % 7;
     var out = Stamp{ .buffer = undefined, .length = 0 };
-    const written = std.fmt.bufPrint(&out.buffer, "{s}, {d:0>2} {s} {d:0>4} {d:0>2}:{d:0>2}:{d:0>2} GMT", .{
+    const written = std.mem.print(&out.buffer, "{s}, {d:0>2} {s} {d:0>4} {d:0>2}:{d:0>2}:{d:0>2} GMT", .{
         DAYS[@intCast(weekday)],
         month_day.day_index + 1,
         MONTHS[month_day.month.numeric() - 1],

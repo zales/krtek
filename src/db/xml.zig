@@ -39,7 +39,7 @@ pub const Reader = struct {
         }
         while (self.at < self.text.len) {
             if (self.text[self.at] != '<') {
-                const end = std.mem.indexOfScalarPos(u8, self.text, self.at, '<') orelse self.text.len;
+                const end = std.mem.findScalarPos(u8, self.text, self.at, '<') orelse self.text.len;
                 const chunk = self.text[self.at..end];
                 self.at = end;
                 if (std.mem.trim(u8, chunk, " \t\r\n").len == 0) {
@@ -51,14 +51,14 @@ pub const Reader = struct {
             // A comment, a declaration or a processing instruction: skipped whole,
             // because a `>` inside a comment is not the end of anything.
             if (std.mem.startsWith(u8, rest, "<!--")) {
-                self.at = if (std.mem.indexOfPos(u8, self.text, self.at, "-->")) |end| end + 3 else self.text.len;
+                self.at = if (std.mem.findPos(u8, self.text, self.at, "-->")) |end| end + 3 else self.text.len;
                 continue;
             }
             if (std.mem.startsWith(u8, rest, "<?")) {
-                self.at = if (std.mem.indexOfPos(u8, self.text, self.at, "?>")) |end| end + 2 else self.text.len;
+                self.at = if (std.mem.findPos(u8, self.text, self.at, "?>")) |end| end + 2 else self.text.len;
                 continue;
             }
-            const end = std.mem.indexOfScalarPos(u8, self.text, self.at, '>') orelse return null;
+            const end = std.mem.findScalarPos(u8, self.text, self.at, '>') orelse return null;
             const inner = self.text[self.at + 1 .. end];
             self.at = end + 1;
             if (inner.len == 0 or inner[0] == '!') {
@@ -83,7 +83,7 @@ fn nameOf(inner: []const u8) []const u8 {
     var end: usize = 0;
     while (end < inner.len and !std.ascii.isWhitespace(inner[end]) and inner[end] != '/') : (end += 1) {}
     const whole = inner[0..end];
-    if (std.mem.lastIndexOfScalar(u8, whole, ':')) |colon| {
+    if (std.mem.findScalarLast(u8, whole, ':')) |colon| {
         return whole[colon + 1 ..];
     }
     return whole;
@@ -114,7 +114,7 @@ pub fn find(text: []const u8, name: []const u8) ?[]const u8 {
 /// The five entities XML defines and the numeric ones, which is everything S3
 /// writes: a key may contain any byte, and `a&b` comes back as `a&amp;b`.
 pub fn unescape(arena: std.mem.Allocator, text: []const u8) ![]const u8 {
-    if (std.mem.indexOfScalar(u8, text, '&') == null) {
+    if (std.mem.findScalar(u8, text, '&') == null) {
         return text;
     }
     var out: List = .empty;
@@ -125,7 +125,7 @@ pub fn unescape(arena: std.mem.Allocator, text: []const u8) ![]const u8 {
             at += 1;
             continue;
         }
-        const end = std.mem.indexOfScalarPos(u8, text, at, ';') orelse {
+        const end = std.mem.findScalarPos(u8, text, at, ';') orelse {
             try out.append(arena, text[at]);
             at += 1;
             continue;

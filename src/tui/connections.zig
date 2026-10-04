@@ -123,8 +123,7 @@ pub const Engine = enum {
     }
 
     pub fn of(name: []const u8) Engine {
-        inline for (@typeInfo(Engine).@"enum".fields) |item| {
-            const value: Engine = @enumFromInt(item.value);
+        inline for (comptime std.enums.values(Engine)) |value| {
             if (std.ascii.eqlIgnoreCase(value.label(), name)) {
                 return value;
             }
@@ -142,8 +141,7 @@ pub const ENGINES = [_][]const u8{
 test "the engine list offers every engine there is" {
     // A member added to `Engine` and forgotten here is one nobody can pick in the
     // connection form, which is a thing that has happened.
-    inline for (@typeInfo(Engine).@"enum".fields) |item| {
-        const engine: Engine = @enumFromInt(item.value);
+    inline for (comptime std.enums.values(Engine)) |engine| {
         var found = false;
         for (ENGINES) |name| {
             if (std.mem.eql(u8, name, engine.label())) {
@@ -155,7 +153,7 @@ test "the engine list offers every engine there is" {
             return error.TestUnexpectedResult;
         }
     }
-    try std.testing.expectEqual(@typeInfo(Engine).@"enum".fields.len, ENGINES.len);
+    try std.testing.expectEqual(std.enums.values(Engine).len, ENGINES.len);
 }
 
 pub fn engineOf(target: []const u8) Engine {
@@ -180,8 +178,8 @@ pub fn engineOf(target: []const u8) Engine {
         }
     }
     // The connection string the Azure portal hands out, which is a target too.
-    if (std.mem.indexOf(u8, target, "AccountName=") != null and
-        std.mem.indexOf(u8, target, "AccountKey=") != null)
+    if (std.mem.find(u8, target, "AccountName=") != null and
+        std.mem.find(u8, target, "AccountKey=") != null)
     {
         return .azure;
     }
@@ -212,8 +210,8 @@ pub fn engineOf(target: []const u8) Engine {
     }
     if (std.ascii.startsWithIgnoreCase(target, "postgres://") or
         std.ascii.startsWithIgnoreCase(target, "postgresql://") or
-        std.mem.indexOf(u8, target, "dbname=") != null or
-        std.mem.indexOf(u8, target, "host=") != null)
+        std.mem.find(u8, target, "dbname=") != null or
+        std.mem.find(u8, target, "host=") != null)
     {
         return .postgres;
     }
@@ -249,7 +247,7 @@ pub fn compose(arena: std.mem.Allocator, shape: Shape) ![]const u8 {
         .sqlite, .other => return shape.path,
         else => {},
     }
-    var out: std.ArrayListUnmanaged(u8) = .empty;
+    var out: std.ArrayList(u8) = .empty;
     try out.appendSlice(arena, switch (shape.engine) {
         .postgres => "postgres://",
         .mysql => "mysql://",
@@ -342,7 +340,7 @@ pub fn decompose(arena: std.mem.Allocator, target: []const u8) ?Shape {
             if (url.query.len != 0) {
                 var options = std.mem.splitScalar(u8, url.query, '&');
                 while (options.next()) |option| {
-                    const equals = std.mem.indexOfScalar(u8, option, '=') orelse return null;
+                    const equals = std.mem.findScalar(u8, option, '=') orelse return null;
                     const key = option[0..equals];
                     const value = option[equals + 1 ..];
                     if (engine == .s3 and std.mem.eql(u8, key, "region")) {
@@ -385,25 +383,25 @@ const Url = struct {
 fn split(target: []const u8) Url {
     var out = Url{};
     var rest = target;
-    if (std.mem.indexOf(u8, rest, "://")) |at| {
+    if (std.mem.find(u8, rest, "://")) |at| {
         out.scheme = rest[0..at];
         rest = rest[at + 3 ..];
     }
-    if (std.mem.indexOfScalar(u8, rest, '?')) |at| {
+    if (std.mem.findScalar(u8, rest, '?')) |at| {
         out.query = rest[at + 1 ..];
         rest = rest[0..at];
     }
     var authority = rest;
-    if (std.mem.indexOfScalar(u8, rest, '/')) |at| {
+    if (std.mem.findScalar(u8, rest, '/')) |at| {
         authority = rest[0..at];
         out.path = rest[at + 1 ..];
     }
-    if (std.mem.lastIndexOfScalar(u8, authority, '@')) |at| {
+    if (std.mem.findScalarLast(u8, authority, '@')) |at| {
         out.user = authority[0..at];
         authority = authority[at + 1 ..];
     }
     out.host = authority;
-    if (std.mem.lastIndexOfScalar(u8, authority, ':')) |at| {
+    if (std.mem.findScalarLast(u8, authority, ':')) |at| {
         const digits = authority[at + 1 ..];
         if (digits.len != 0 and onlyDigits(digits)) {
             out.host = authority[0..at];
@@ -425,7 +423,7 @@ fn onlyDigits(text: []const u8) bool {
 pub const List = struct {
     allocator: std.mem.Allocator,
     arena: std.heap.ArenaAllocator,
-    items: std.ArrayListUnmanaged(Connection) = .empty,
+    items: std.ArrayList(Connection) = .empty,
     /// Set when the last save had to drop a password.
     stripped: bool = false,
 
@@ -557,11 +555,11 @@ pub const List = struct {
 pub fn path(buffer: []u8, env: *std.process.Environ.Map) ?[]const u8 {
     const dir = env.get("XDG_CONFIG_HOME") orelse blk: {
         const home = env.get("HOME") orelse return null;
-        break :blk std.fmt.bufPrint(buffer, "{s}/.config", .{home}) catch return null;
+        break :blk std.mem.print(buffer, "{s}/.config", .{home}) catch return null;
     };
     // The directory may be the same buffer, so the join is written elsewhere.
-    var tail: [std.fs.max_path_bytes]u8 = undefined;
-    const joined = std.fmt.bufPrint(&tail, "{s}/krtek/connections", .{dir}) catch return null;
+    var tail: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const joined = std.mem.print(&tail, "{s}/krtek/connections", .{dir}) catch return null;
     if (joined.len >= buffer.len) {
         return null;
     }
@@ -613,11 +611,11 @@ pub fn load(list: *List, file_path: []const u8) !void {
         if (line.len == 0 or line[0] == '#') {
             continue;
         }
-        const tab = std.mem.indexOfScalar(u8, line, '\t') orelse continue;
+        const tab = std.mem.findScalar(u8, line, '\t') orelse continue;
         const name = std.mem.trim(u8, line[0..tab], " \t");
         var rest = line[tab + 1 ..];
         var said = Flags{};
-        if (std.mem.indexOfScalar(u8, rest, '\t')) |second| {
+        if (std.mem.findScalar(u8, rest, '\t')) |second| {
             said = flagsOf(rest[second + 1 ..]);
             rest = rest[0..second];
         }
@@ -637,7 +635,7 @@ pub fn load(list: *List, file_path: []const u8) !void {
 
 /// Write the file, without any password.
 pub fn save(list: *List, file_path: []const u8) !void {
-    var out: std.ArrayListUnmanaged(u8) = .empty;
+    var out: std.ArrayList(u8) = .empty;
     defer out.deinit(list.allocator);
     try out.appendSlice(list.allocator, "# krtek connections: name<TAB>target[<TAB>flag]..., most recent first.\n" ++
         "# `password=` is plain text in this file, which is mode 0600; `keychain`\n" ++
@@ -683,14 +681,14 @@ pub fn save(list: *List, file_path: []const u8) !void {
 /// clearing the buffer the argument came from then quietly rewrites the answer.
 pub fn withoutPassword(arena: std.mem.Allocator, target: []const u8) ![]const u8 {
     // A URL: scheme://user:password@host/…?password=…
-    if (std.mem.indexOf(u8, target, "://")) |scheme_end| {
-        var out: std.ArrayListUnmanaged(u8) = .empty;
+    if (std.mem.find(u8, target, "://")) |scheme_end| {
+        var out: std.ArrayList(u8) = .empty;
         try out.appendSlice(arena, target[0 .. scheme_end + 3]);
         var rest = target[scheme_end + 3 ..];
         // The password in the userinfo, if it is there.
-        if (std.mem.indexOfScalar(u8, rest, '@')) |at| {
+        if (std.mem.findScalar(u8, rest, '@')) |at| {
             const credentials = rest[0..at];
-            if (std.mem.indexOfScalar(u8, credentials, ':')) |colon| {
+            if (std.mem.findScalar(u8, credentials, ':')) |colon| {
                 try out.appendSlice(arena, credentials[0..colon]);
             } else {
                 try out.appendSlice(arena, credentials);
@@ -699,7 +697,7 @@ pub fn withoutPassword(arena: std.mem.Allocator, target: []const u8) ![]const u8
             rest = rest[at + 1 ..];
         }
         // And the one in the query string, which is how this app passes it.
-        const query_at = std.mem.indexOfScalar(u8, rest, '?') orelse {
+        const query_at = std.mem.findScalar(u8, rest, '?') orelse {
             try out.appendSlice(arena, rest);
             return out.items;
         };
@@ -717,10 +715,10 @@ pub fn withoutPassword(arena: std.mem.Allocator, target: []const u8) ![]const u8
         return out.items;
     }
     // A keyword string: host=… password=… dbname=…
-    if (std.mem.indexOf(u8, target, "password=") == null) {
+    if (std.mem.find(u8, target, "password=") == null) {
         return arena.dupe(u8, target);
     }
-    var out: std.ArrayListUnmanaged(u8) = .empty;
+    var out: std.ArrayList(u8) = .empty;
     var parts = std.mem.tokenizeAny(u8, target, " \t");
     while (parts.next()) |part| {
         if (std.ascii.startsWithIgnoreCase(part, "password=")) {
@@ -746,10 +744,10 @@ pub fn withPassword(arena: std.mem.Allocator, target: []const u8, password: []co
     if (password.len == 0) {
         return arena.dupe(u8, target);
     }
-    var out: std.ArrayListUnmanaged(u8) = .empty;
+    var out: std.ArrayList(u8) = .empty;
     try out.appendSlice(arena, target);
-    if (std.mem.indexOf(u8, target, "://") != null) {
-        try out.appendSlice(arena, if (std.mem.indexOfScalar(u8, target, '?') == null) "?password=" else "&password=");
+    if (std.mem.find(u8, target, "://") != null) {
+        try out.appendSlice(arena, if (std.mem.findScalar(u8, target, '?') == null) "?password=" else "&password=");
         for (password) |char| {
             if (std.ascii.isAlphanumeric(char) or char == '-' or char == '.' or char == '_' or char == '~') {
                 try out.append(arena, char);
@@ -774,7 +772,7 @@ pub fn withPassword(arena: std.mem.Allocator, target: []const u8, password: []co
 
 /// A name suggestion, so adding a connection does not start empty.
 pub fn suggestName(arena: std.mem.Allocator, target: []const u8) ![]const u8 {
-    if (std.mem.lastIndexOfScalar(u8, target, '/')) |slash| {
+    if (std.mem.findScalarLast(u8, target, '/')) |slash| {
         const tail = target[slash + 1 ..];
         if (tail.len != 0) {
             return arena.dupe(u8, tail);
@@ -786,7 +784,7 @@ pub fn suggestName(arena: std.mem.Allocator, target: []const u8) ![]const u8 {
 // --- file helpers, through libc as elsewhere in this app ---
 
 fn read(arena: std.mem.Allocator, file_path: []const u8) ![]u8 {
-    var zero: [std.fs.max_path_bytes]u8 = undefined;
+    var zero: [std.Io.Dir.max_path_bytes]u8 = undefined;
     if (file_path.len >= zero.len) {
         return error.NameTooLong;
     }
@@ -794,7 +792,7 @@ fn read(arena: std.mem.Allocator, file_path: []const u8) ![]u8 {
     zero[file_path.len] = 0;
     const file = std.c.fopen(@ptrCast(&zero), "rb") orelse return error.CannotOpen;
     defer _ = std.c.fclose(file);
-    var out: std.ArrayListUnmanaged(u8) = .empty;
+    var out: std.ArrayList(u8) = .empty;
     var chunk: [4096]u8 = undefined;
     while (true) {
         const got = std.c.fread(&chunk, 1, chunk.len, file);
@@ -807,7 +805,7 @@ fn read(arena: std.mem.Allocator, file_path: []const u8) ![]u8 {
 }
 
 fn write(file_path: []const u8, bytes: []const u8) !void {
-    var zero: [std.fs.max_path_bytes]u8 = undefined;
+    var zero: [std.Io.Dir.max_path_bytes]u8 = undefined;
     if (file_path.len >= zero.len) {
         return error.NameTooLong;
     }
@@ -822,7 +820,7 @@ fn write(file_path: []const u8, bytes: []const u8) !void {
 
 /// `chmod 0600`, so a remembered password is at least not world readable.
 fn onlyOwner(file_path: []const u8) !void {
-    var zero: [std.fs.max_path_bytes]u8 = undefined;
+    var zero: [std.Io.Dir.max_path_bytes]u8 = undefined;
     if (file_path.len >= zero.len) {
         return error.NameTooLong;
     }
@@ -833,9 +831,9 @@ fn onlyOwner(file_path: []const u8) !void {
 
 /// Create the directories above `file_path`, ignoring the ones that exist.
 fn mkdirParents(file_path: []const u8) !void {
-    var zero: [std.fs.max_path_bytes]u8 = undefined;
+    var zero: [std.Io.Dir.max_path_bytes]u8 = undefined;
     var at: usize = 1;
-    while (std.mem.indexOfScalarPos(u8, file_path, at, '/')) |slash| {
+    while (std.mem.findScalarPos(u8, file_path, at, '/')) |slash| {
         at = slash + 1;
         if (slash >= zero.len) {
             return error.NameTooLong;
@@ -859,18 +857,18 @@ test "the file round trips, and the target never carries the password" {
     try save(&list, file);
 
     const written = try read(list.arena.allocator(), file);
-    try std.testing.expect(std.mem.indexOf(u8, written, "leaked") == null);
-    try std.testing.expect(std.mem.indexOf(u8, written, "password=hunter2") != null);
-    try std.testing.expect(std.mem.indexOf(u8, written, "asks\tpostgres://u@h/d\n") != null);
+    try std.testing.expect(std.mem.find(u8, written, "leaked") == null);
+    try std.testing.expect(std.mem.find(u8, written, "password=hunter2") != null);
+    try std.testing.expect(std.mem.find(u8, written, "asks\tpostgres://u@h/d\n") != null);
 
-    try std.testing.expect(std.mem.indexOf(u8, written, "by macos\tredis://h/0\tkeychain\n") != null);
+    try std.testing.expect(std.mem.find(u8, written, "by macos\tredis://h/0\tkeychain\n") != null);
 
     var again = List.init(std.testing.allocator);
     defer again.deinit();
     try load(&again, file);
     try std.testing.expectEqual(@as(usize, 4), again.items.items.len);
     for (again.items.items) |item| {
-        try std.testing.expect(std.mem.indexOf(u8, item.target, "leaked") == null);
+        try std.testing.expect(std.mem.find(u8, item.target, "leaked") == null);
         if (std.mem.eql(u8, item.name, "kept")) {
             try std.testing.expectEqualStrings("hunter2", item.secret);
         }
@@ -927,7 +925,7 @@ test "neither password function ever hands back what it was given" {
     //
     // So what is checked is not the text but the address: whatever comes back is
     // the arena's, and clearing anything the caller owns cannot reach it.
-    var held: std.ArrayListUnmanaged(u8) = .empty;
+    var held: std.ArrayList(u8) = .empty;
     defer held.deinit(std.testing.allocator);
     try held.appendSlice(std.testing.allocator, "sftp://foo@127.0.0.1:2222/upload?insecure=1");
 
@@ -1240,15 +1238,15 @@ test "saving writes the saved ones and leaves the found ones where they came fro
     try list.add("books", "/tmp/books.db", null, "");
     try list.offer("work", "k8s://work");
 
-    var buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const file = try std.fmt.bufPrint(&buffer, "/tmp/krtek-found-test-{d}", .{std.c.getpid()});
+    var buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const file = try std.mem.print(&buffer, "/tmp/krtek-found-test-{d}", .{std.c.getpid()});
     try save(&list, file);
 
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const text = try read(arena.allocator(), file);
-    try std.testing.expect(std.mem.indexOf(u8, text, "books") != null);
-    try std.testing.expect(std.mem.indexOf(u8, text, "k8s://work") == null);
+    try std.testing.expect(std.mem.find(u8, text, "books") != null);
+    try std.testing.expect(std.mem.find(u8, text, "k8s://work") == null);
 }
 
 test "a connection says whether anything may be written through it" {

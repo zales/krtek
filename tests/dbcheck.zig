@@ -19,7 +19,7 @@ pub fn main(init: std.process.Init) !void {
     // interesting one.
     const wanted_table: ?[]const u8 = if (args.len > 2) args[2] else null;
 
-    var report: std.ArrayListUnmanaged(u8) = .empty;
+    var report: std.ArrayList(u8) = .empty;
     const conn = db.Db.open(a, target, &report) catch {
         std.debug.print("open failed: {s}\n", .{report.items});
         return;
@@ -89,7 +89,7 @@ pub fn main(init: std.process.Init) !void {
         defer rows.close();
         var seen: usize = 0;
         while (try rows.next()) : (seen += 1) {
-            var line: std.ArrayListUnmanaged(u8) = .empty;
+            var line: std.ArrayList(u8) = .empty;
             for (0..rows.columnCount()) |i| {
                 try line.print(arena.allocator(), "{s}=", .{rows.name(i)});
                 switch (rows.value(i)) {
@@ -124,7 +124,7 @@ pub fn main(init: std.process.Init) !void {
     {
         const limit: usize = 4;
         const key_columns = key.columns;
-        var seen_keys: std.ArrayListUnmanaged([]const u8) = .empty;
+        var seen_keys: std.ArrayList([]const u8) = .empty;
         var page: usize = 0;
         while (page < 50) : (page += 1) {
             var cursor = (try conn.select(.{
@@ -136,7 +136,7 @@ pub fn main(init: std.process.Init) !void {
             var on_page: usize = 0;
             while (try cursor.next()) {
                 on_page += 1;
-                var identity: std.ArrayListUnmanaged(u8) = .empty;
+                var identity: std.ArrayList(u8) = .empty;
                 for (0..cursor.columnCount()) |i| {
                     // A hidden key - SQLite's rowid - is not among the columns, so the
                     // whole row stands in for it.

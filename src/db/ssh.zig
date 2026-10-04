@@ -306,7 +306,7 @@ pub fn hostKeyFingerprint(arena: std.mem.Allocator, session: *Session) ![]const 
     const hash = libssh2_hostkey_hash(session, HOSTKEY_HASH_SHA256) orelse return "";
     const encoder = std.base64.standard_no_pad.Encoder;
     const room = try arena.alloc(u8, encoder.calcSize(32));
-    return std.fmt.allocPrint(arena, "SHA256:{s}", .{encoder.encode(room, hash[0..32])});
+    return arena.print("SHA256:{s}", .{encoder.encode(room, hash[0..32])});
 }
 
 /// What libssh2 last complained about, which is worth far more than the number.
@@ -369,7 +369,7 @@ pub fn connect(allocator: std.mem.Allocator, options: Options, why: *List) Error
         // later shut a source out for several seconds after a failed password, and
         // drop what comes next before the banner - so the attempt right after a
         // mistyped one fails in a way that has nothing to do with the password.
-        if (std.mem.indexOf(u8, said, "banner") != null) {
+        if (std.mem.find(u8, said, "banner") != null) {
             try why.print(allocator, "the server took the connection and said nothing: either it does not speak SSH, or it is shutting this address out for a moment after a refused password", .{});
         } else {
             try why.print(allocator, "the SSH handshake failed: {s}", .{said});
@@ -419,7 +419,7 @@ fn checkHost(allocator: std.mem.Allocator, session: *Session, options: Options, 
         try why.appendSlice(allocator, "no HOME, so no known_hosts to check the server against - insecure=1 skips the check");
         return error.HostKey;
     };
-    const path = std.fmt.allocPrintSentinel(arena, "{s}/.ssh/known_hosts", .{std.mem.sliceTo(home, 0)}, 0) catch return error.OutOfMemory;
+    const path = arena.printSentinel("{s}/.ssh/known_hosts", .{std.mem.sliceTo(home, 0)}, 0) catch return error.OutOfMemory;
 
     const hosts = libssh2_knownhost_init(session) orelse return error.OutOfMemory;
     defer libssh2_knownhost_free(hosts);
@@ -427,7 +427,7 @@ fn checkHost(allocator: std.mem.Allocator, session: *Session, options: Options, 
     // check below says so in better words than a read failure would.
     _ = libssh2_knownhost_readfile(hosts, path.ptr, 1);
 
-    const zero_host = arena.dupeZ(u8, options.host) catch return error.OutOfMemory;
+    const zero_host = arena.dupeSentinel(u8, options.host, 0) catch return error.OutOfMemory;
     const typemask = KNOWNHOST_TYPE_PLAIN | KNOWNHOST_KEYENC_RAW | knownHostKind(kind);
     switch (libssh2_knownhost_checkp(hosts, zero_host.ptr, @intCast(options.port), key, length, typemask, null)) {
         KNOWNHOST_MATCH => return,
@@ -486,8 +486,8 @@ fn authenticate(allocator: std.mem.Allocator, session: *Session, options: Option
     // Nothing worked and the server takes a password. Its own error rather than a
     // sentence to be recognised later: the interface offers one because this says
     // so, not because the words happened to contain "password".
-    if (std.mem.indexOf(u8, methods, "password") != null or
-        std.mem.indexOf(u8, methods, "keyboard-interactive") != null)
+    if (std.mem.find(u8, methods, "password") != null or
+        std.mem.find(u8, methods, "keyboard-interactive") != null)
     {
         try why.print(allocator, "{s} needs a password, or a key the agent does not have", .{options.user});
         return error.NeedPassword;
@@ -512,7 +512,7 @@ fn byAgent(session: *Session, arena: std.mem.Allocator, user: []const u8) bool {
     if (libssh2_agent_list_identities(agent) != 0) {
         return false;
     }
-    const zero_user = arena.dupeZ(u8, user) catch return false;
+    const zero_user = arena.dupeSentinel(u8, user, 0) catch return false;
     var identity: ?*AgentKey = null;
     while (true) {
         const previous = identity;
@@ -527,14 +527,14 @@ fn byAgent(session: *Session, arena: std.mem.Allocator, user: []const u8) bool {
 }
 
 fn byKey(session: *Session, arena: std.mem.Allocator, options: Options) bool {
-    const zero_user = arena.dupeZ(u8, options.user) catch return false;
+    const zero_user = arena.dupeSentinel(u8, options.user, 0) catch return false;
     const passphrase = if (options.passphrase.len != 0)
-        (arena.dupeZ(u8, options.passphrase) catch return false).ptr
+        (arena.dupeSentinel(u8, options.passphrase, 0) catch return false).ptr
     else
         null;
 
     if (options.key.len != 0) {
-        const private = arena.dupeZ(u8, options.key) catch return false;
+        const private = arena.dupeSentinel(u8, options.key, 0) catch return false;
         return libssh2_userauth_publickey_fromfile_ex(
             session,
             zero_user.ptr,
@@ -547,7 +547,7 @@ fn byKey(session: *Session, arena: std.mem.Allocator, options: Options) bool {
 
     const home = std.c.getenv("HOME") orelse return false;
     for (DEFAULT_KEYS) |name| {
-        const private = std.fmt.allocPrintSentinel(arena, "{s}/.ssh/{s}", .{ std.mem.sliceTo(home, 0), name }, 0) catch continue;
+        const private = arena.printSentinel("{s}/.ssh/{s}", .{ std.mem.sliceTo(home, 0), name }, 0) catch continue;
         if (libssh2_userauth_publickey_fromfile_ex(
             session,
             zero_user.ptr,
@@ -567,7 +567,7 @@ fn byKey(session: *Session, arena: std.mem.Allocator, options: Options) bool {
 /// only if it is handed nothing here. Handing it a path that does not exist is
 /// simply an error, so the file has to be looked for first.
 fn publicBeside(arena: std.mem.Allocator, private: []const u8) ?[*:0]const u8 {
-    const public = std.fmt.allocPrintSentinel(arena, "{s}.pub", .{private}, 0) catch return null;
+    const public = arena.printSentinel("{s}.pub", .{private}, 0) catch return null;
     const file = std.c.fopen(public.ptr, "rb") orelse return null;
     _ = std.c.fclose(file);
     return public.ptr;
@@ -590,7 +590,7 @@ pub fn readDir(self: *Connection, arena: std.mem.Allocator, path: []const u8, li
     };
     defer _ = libssh2_sftp_close_handle(handle);
 
-    var out: std.ArrayListUnmanaged(Entry) = .empty;
+    var out: std.ArrayList(Entry) = .empty;
     var name: [512]u8 = undefined;
     while (out.items.len < limit) {
         var attributes = Attributes{};

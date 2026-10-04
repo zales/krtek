@@ -36,7 +36,7 @@
 const std = @import("std");
 const db = @import("db.zig");
 
-const List = std.ArrayListUnmanaged(u8);
+const List = std.ArrayList(u8);
 
 pub const Db = struct {
     allocator: std.mem.Allocator,
@@ -112,7 +112,7 @@ pub const Db = struct {
         });
         const server = span(mysql_get_server_info(conn));
         try self.version_text.print(allocator, "{s} {s}", .{
-            if (std.mem.indexOf(u8, server, "MariaDB") != null) "MariaDB" else "MySQL",
+            if (std.mem.find(u8, server, "MariaDB") != null) "MariaDB" else "MySQL",
             server,
         });
         return self;
@@ -161,7 +161,7 @@ pub const Db = struct {
         const other = Db.open(self.allocator, self.target.items, &report) catch return;
         defer other.close();
         var sql: [64]u8 = undefined;
-        const text = std.fmt.bufPrintZ(&sql, "KILL QUERY {d}", .{id}) catch return;
+        const text = std.mem.printSentinel(&sql, "KILL QUERY {d}", .{id}, 0) catch return;
         other.run(text) catch {};
     }
 
@@ -393,7 +393,7 @@ pub const Db = struct {
                 " ORDER BY SCHEMA_NAME",
         );
         defer self.freeResult(result);
-        var list: std.ArrayListUnmanaged([]const u8) = .empty;
+        var list: std.ArrayList([]const u8) = .empty;
         // The one in use first, the way the other drivers order theirs.
         if (current.len != 0) {
             try list.append(arena, current);
@@ -424,11 +424,11 @@ pub const Db = struct {
         const result = try self.ask(sql.items);
         defer self.freeResult(result);
 
-        var list: std.ArrayListUnmanaged(db.Object) = .empty;
+        var list: std.ArrayList(db.Object) = .empty;
         while (self.fetchRow(result)) |row| {
             const kind = cell(result, row, 2);
             const estimate = cell(result, row, 3);
-            const view = std.mem.indexOf(u8, kind, "VIEW") != null;
+            const view = std.mem.find(u8, kind, "VIEW") != null;
             try list.append(arena, .{
                 .schema = try arena.dupe(u8, cell(result, row, 0)),
                 .name = try arena.dupe(u8, cell(result, row, 1)),
@@ -453,7 +453,7 @@ pub const Db = struct {
         const result = try self.ask(sql.items);
         defer self.freeResult(result);
 
-        var list: std.ArrayListUnmanaged(db.Column) = .empty;
+        var list: std.ArrayList(db.Column) = .empty;
         while (self.fetchRow(result)) |row| {
             const name = try arena.dupe(u8, cell(result, row, 0));
             const key = cell(result, row, 4);
@@ -469,7 +469,7 @@ pub const Db = struct {
                     try db.quote(&text, arena, dflt);
                 }
                 kept = text.items;
-            } else if (std.mem.indexOf(u8, extra, "auto_increment") != null) {
+            } else if (std.mem.find(u8, extra, "auto_increment") != null) {
                 kept = "AUTO_INCREMENT";
             }
             try list.append(arena, .{
@@ -497,7 +497,7 @@ pub const Db = struct {
         const result = try self.ask(sql.items);
         defer self.freeResult(result);
 
-        var list: std.ArrayListUnmanaged(db.Index) = .empty;
+        var list: std.ArrayList(db.Index) = .empty;
         while (self.fetchRow(result)) |row| {
             const name = cell(result, row, 0);
             const unique = std.mem.eql(u8, cell(result, row, 1), "0");
@@ -526,7 +526,7 @@ pub const Db = struct {
         const result = try self.ask(sql.items);
         defer self.freeResult(result);
 
-        var list: std.ArrayListUnmanaged(db.ForeignKey) = .empty;
+        var list: std.ArrayList(db.ForeignKey) = .empty;
         while (self.fetchRow(result)) |row| {
             try list.append(arena, .{
                 .column = try arena.dupe(u8, cell(result, row, 0)),
@@ -575,7 +575,7 @@ pub const Db = struct {
     /// The primary key, or a unique index over columns that are all NOT NULL.
     pub fn rowKey(self: *Db, arena: std.mem.Allocator, table: db.Table) db.Error!db.RowKey {
         const cols = try self.columns(arena, table);
-        var list: std.ArrayListUnmanaged([]const u8) = .empty;
+        var list: std.ArrayList([]const u8) = .empty;
         for (cols) |column| {
             if (column.pk) {
                 try list.append(arena, column.name);
@@ -589,7 +589,7 @@ pub const Db = struct {
                 continue;
             }
             var usable = true;
-            var members: std.ArrayListUnmanaged([]const u8) = .empty;
+            var members: std.ArrayList([]const u8) = .empty;
             var names = std.mem.splitScalar(u8, index.columns, ',');
             while (names.next()) |name| {
                 const trimmed = std.mem.trim(u8, name, " ");
@@ -617,7 +617,7 @@ pub const Db = struct {
 
     pub fn settings(self: *Db, arena: std.mem.Allocator) db.Error![]db.Setting {
         // The connection and the version are already at the top of the page.
-        var list: std.ArrayListUnmanaged(db.Setting) = .empty;
+        var list: std.ArrayList(db.Setting) = .empty;
         // One query each, and a fact the server does not know about is left out
         // rather than taking the whole page down with it.
         const FACTS = [_][2][]const u8{
@@ -975,7 +975,7 @@ pub const Ddl = struct {
         if (column.len < 4 or column[column.len - 1] != ')') {
             return null;
         }
-        const open = std.mem.lastIndexOfScalar(u8, column, '(') orelse return null;
+        const open = std.mem.findScalarLast(u8, column, '(') orelse return null;
         if (open == 0) {
             return null;
         }
@@ -1077,10 +1077,10 @@ fn parse(allocator: std.mem.Allocator, target: []const u8) !Parts {
     }
     var user: []const u8 = "root";
     var password: []const u8 = "";
-    if (std.mem.lastIndexOfScalar(u8, rest, '@')) |at| {
+    if (std.mem.findScalarLast(u8, rest, '@')) |at| {
         const credentials = rest[0..at];
         rest = rest[at + 1 ..];
-        if (std.mem.indexOfScalar(u8, credentials, ':')) |colon| {
+        if (std.mem.findScalar(u8, credentials, ':')) |colon| {
             user = credentials[0..colon];
             password = credentials[colon + 1 ..];
         } else if (credentials.len != 0) {
@@ -1088,13 +1088,13 @@ fn parse(allocator: std.mem.Allocator, target: []const u8) !Parts {
         }
     }
     var database: []const u8 = "";
-    if (std.mem.indexOfScalar(u8, rest, '/')) |slash| {
+    if (std.mem.findScalar(u8, rest, '/')) |slash| {
         database = rest[slash + 1 ..];
         rest = rest[0..slash];
     }
     // A query string is where a password may also arrive, the way the app hands
     // one over for a single attempt.
-    if (std.mem.indexOfScalar(u8, database, '?')) |question| {
+    if (std.mem.findScalar(u8, database, '?')) |question| {
         var parameters = std.mem.tokenizeAny(u8, database[question + 1 ..], "&");
         while (parameters.next()) |parameter| {
             if (std.ascii.startsWithIgnoreCase(parameter, "password=")) {
@@ -1105,15 +1105,15 @@ fn parse(allocator: std.mem.Allocator, target: []const u8) !Parts {
     }
     var host: []const u8 = if (rest.len != 0) rest else "127.0.0.1";
     var port: c_uint = 3306;
-    if (std.mem.lastIndexOfScalar(u8, host, ':')) |colon| {
+    if (std.mem.findScalarLast(u8, host, ':')) |colon| {
         port = std.fmt.parseInt(c_uint, host[colon + 1 ..], 10) catch port;
         host = host[0..colon];
     }
     return .{
-        .host = try allocator.dupeZ(u8, host),
-        .user = try allocator.dupeZ(u8, user),
+        .host = try allocator.dupeSentinel(u8, host, 0),
+        .user = try allocator.dupeSentinel(u8, user, 0),
         .password = try unescape(allocator, password),
-        .database = try allocator.dupeZ(u8, database),
+        .database = try allocator.dupeSentinel(u8, database, 0),
         .port = port,
     };
 }
@@ -1133,7 +1133,7 @@ fn unescape(allocator: std.mem.Allocator, text: []const u8) ![:0]const u8 {
         }
         try out.append(allocator, text[i]);
     }
-    return allocator.dupeZ(u8, out.items);
+    return allocator.dupeSentinel(u8, out.items, 0);
 }
 
 /// Is this target for this driver?

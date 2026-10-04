@@ -8,7 +8,7 @@
 const std = @import("std");
 const sq = @import("sqlite");
 
-const List = std.ArrayListUnmanaged(u8);
+const List = std.ArrayList(u8);
 
 pub const Column = struct {
     name: []const u8,
@@ -326,8 +326,8 @@ test "two primary key columns become a table constraint" {
         .{ .name = "a", .pk = true },
         .{ .name = "b", .pk = true },
     }, &.{});
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "PRIMARY KEY (\"a\", \"b\")") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"a\" PRIMARY KEY") == null);
+    try std.testing.expect(std.mem.find(u8, out.items, "PRIMARY KEY (\"a\", \"b\")") != null);
+    try std.testing.expect(std.mem.find(u8, out.items, "\"a\" PRIMARY KEY") == null);
 }
 
 test "foreign keys are emitted with their actions" {
@@ -337,7 +337,7 @@ test "foreign keys are emitted with their actions" {
     try createTable(&out, a, "t", &.{.{ .name = "x" }}, &.{
         .{ .column = "x", .target_table = "other", .target_column = "id", .on_delete = "CASCADE" },
     });
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "FOREIGN KEY (\"x\") REFERENCES \"other\"(\"id\") ON DELETE CASCADE") != null);
+    try std.testing.expect(std.mem.find(u8, out.items, "FOREIGN KEY (\"x\") REFERENCES \"other\"(\"id\") ON DELETE CASCADE") != null);
 }
 
 test "rebuild copies only the columns that existed" {
@@ -349,12 +349,12 @@ test "rebuild copies only the columns that existed" {
         .{ .name = "renamed", .type = "TEXT", .original = "old_name" },
         .{ .name = "fresh", .type = "TEXT" },
     }, &.{}, &.{"CREATE INDEX i ON t (id)"});
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "INSERT INTO \"krtek_rebuild\" (\"id\", \"renamed\")") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "SELECT \"id\", \"old_name\" FROM \"t\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"fresh\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "DROP TABLE \"t\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "RENAME TO \"t\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "CREATE INDEX i ON t (id);") != null);
+    try std.testing.expect(std.mem.find(u8, out.items, "INSERT INTO \"krtek_rebuild\" (\"id\", \"renamed\")") != null);
+    try std.testing.expect(std.mem.find(u8, out.items, "SELECT \"id\", \"old_name\" FROM \"t\"") != null);
+    try std.testing.expect(std.mem.find(u8, out.items, "\"fresh\"") != null);
+    try std.testing.expect(std.mem.find(u8, out.items, "DROP TABLE \"t\"") != null);
+    try std.testing.expect(std.mem.find(u8, out.items, "RENAME TO \"t\"") != null);
+    try std.testing.expect(std.mem.find(u8, out.items, "CREATE INDEX i ON t (id);") != null);
     try std.testing.expect(std.mem.startsWith(u8, out.items, "PRAGMA foreign_keys = off;"));
 }
 
@@ -363,6 +363,6 @@ test "quoting survives a hostile name" {
     var out: List = .empty;
     defer out.deinit(a);
     try createTable(&out, a, "we\"ird", &.{.{ .name = "a\"b" }}, &.{});
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"we\"\"ird\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"a\"\"b\"") != null);
+    try std.testing.expect(std.mem.find(u8, out.items, "\"we\"\"ird\"") != null);
+    try std.testing.expect(std.mem.find(u8, out.items, "\"a\"\"b\"") != null);
 }

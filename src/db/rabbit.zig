@@ -127,7 +127,7 @@ pub const Db = struct {
         // The overview answers whatever the vhost is, so a vhost that is not there -
         // or that this user may not see - would only show up as an empty screen.
         const vhost = try self.call(arena, .{
-            .path = try std.fmt.allocPrint(arena, "/api/vhosts/{s}", .{try address.escaped(arena, self.vhost)}),
+            .path = try arena.print("/api/vhosts/{s}", .{try address.escaped(arena, self.vhost)}),
         });
         if (!vhost.ok()) {
             try report.print(allocator, "there is no vhost called {s} that {s} can see", .{ self.vhost, self.parts.user });
@@ -225,7 +225,7 @@ pub const Db = struct {
 
     fn call(self: *Db, arena: std.mem.Allocator, request: Call) db.Error!http.Response {
         const client = &(self.client orelse return error.Driver);
-        var headers: std.ArrayListUnmanaged(http.Header) = .empty;
+        var headers: std.ArrayList(http.Header) = .empty;
         try headers.append(arena, .{ .name = "Authorization", .value = self.authorization });
         // Anything at all: asking for JSON makes the endpoints that answer with no
         // content at all - purging a queue is one - refuse with a 406.
@@ -233,7 +233,7 @@ pub const Db = struct {
         if (request.body.len != 0) {
             try headers.append(arena, .{ .name = "Content-Type", .value = "application/json" });
         }
-        const target = try std.fmt.allocPrint(arena, "{s}{s}{s}{s}", .{
+        const target = try arena.print("{s}{s}{s}{s}", .{
             self.parts.prefix,
             request.path,
             if (request.query.len != 0) "?" else "",
@@ -298,8 +298,8 @@ pub const Db = struct {
     /// The path of a table's endpoint, with the vhost escaped into it.
     fn pathOf(self: *Db, arena: std.mem.Allocator, table: api.Table) db.Error![]const u8 {
         const mark = "{vhost}";
-        const at = std.mem.indexOf(u8, table.path, mark) orelse return table.path;
-        return std.fmt.allocPrint(arena, "{s}{s}{s}", .{
+        const at = std.mem.find(u8, table.path, mark) orelse return table.path;
+        return arena.print("{s}{s}{s}", .{
             table.path[0..at],
             try address.escaped(arena, self.vhost),
             table.path[at + mark.len ..],
@@ -308,7 +308,7 @@ pub const Db = struct {
 
     /// `/api/queues/%2F/orders`, and the same for anything else addressed by name.
     fn itemPath(self: *Db, arena: std.mem.Allocator, kind: []const u8, name: []const u8) db.Error![]const u8 {
-        return std.fmt.allocPrint(arena, "/api/{s}/{s}/{s}", .{
+        return arena.print("/api/{s}/{s}/{s}", .{
             kind,
             try address.escaped(arena, self.vhost),
             try address.escaped(arena, name),
@@ -443,7 +443,7 @@ pub const Db = struct {
                     // The API matches on what a name contains, so the wildcards around a
                     // pattern are what it does anyway; one in the middle is not.
                     const body = std.mem.trim(u8, filter.value, "%");
-                    if (std.mem.indexOfAny(u8, body, "%_") != null) {
+                    if (std.mem.findAny(u8, body, "%_") != null) {
                         self.remember("the broker matches what a name contains: LIKE '%orders%' works, a pattern inside one does not");
                         return error.Driver;
                     }
@@ -533,7 +533,7 @@ pub const Db = struct {
                 };
                 const path = if (std.mem.eql(u8, table.name, "connections"))
                     // A connection belongs to the broker, not to a vhost.
-                    try std.fmt.allocPrint(arena, "/api/connections/{s}", .{try address.escaped(arena, name)})
+                    try arena.print("/api/connections/{s}", .{try address.escaped(arena, name)})
                 else
                     try self.itemPath(arena, table.name, name);
                 const response = try self.call(arena, .{ .method = "DELETE", .path = path });
@@ -592,7 +592,7 @@ pub const Db = struct {
         try body.appendSlice(arena, "{\"routing_key\":");
         try quote(&body, arena, routing_key);
         try body.appendSlice(arena, ",\"arguments\":{}}");
-        const path = try std.fmt.allocPrint(arena, "/api/bindings/{s}/e/{s}/{s}/{s}", .{
+        const path = try arena.print("/api/bindings/{s}/e/{s}/{s}/{s}", .{
             try address.escaped(arena, self.vhost),
             try address.escaped(arena, source),
             if (std.mem.startsWith(u8, kind, "e")) "e" else "q",
@@ -615,7 +615,7 @@ pub const Db = struct {
             return error.Driver;
         }
         const kind = db.ask.only(where, "destination_type") orelse "queue";
-        const path = try std.fmt.allocPrint(arena, "/api/bindings/{s}/e/{s}/{s}/{s}/{s}", .{
+        const path = try arena.print("/api/bindings/{s}/e/{s}/{s}/{s}/{s}", .{
             try address.escaped(arena, self.vhost),
             try address.escaped(arena, source),
             if (std.mem.startsWith(u8, kind, "e")) "e" else "q",
@@ -744,7 +744,7 @@ pub const Db = struct {
 
     /// The vhosts, the one in use first.
     pub fn schemas(self: *Db, arena: std.mem.Allocator) db.Error![][]const u8 {
-        var out: std.ArrayListUnmanaged([]const u8) = .empty;
+        var out: std.ArrayList([]const u8) = .empty;
         const response = try self.call(arena, .{ .path = "/api/vhosts" });
         if (!response.ok()) {
             // A user who may see one vhost and not the list still has that one.
@@ -771,7 +771,7 @@ pub const Db = struct {
             self.vhost = try self.home.allocator().dupe(u8, schema);
             self.relabel();
         }
-        var out: std.ArrayListUnmanaged(db.Object) = .empty;
+        var out: std.ArrayList(db.Object) = .empty;
         for (api.TABLES) |table| {
             try out.append(arena, .{
                 .schema = self.vhost,
@@ -784,7 +784,7 @@ pub const Db = struct {
     }
 
     pub fn columns(_: *Db, arena: std.mem.Allocator, table: db.Table) db.Error![]db.Column {
-        var out: std.ArrayListUnmanaged(db.Column) = .empty;
+        var out: std.ArrayList(db.Column) = .empty;
         const found = api.find(table.name) orelse return out.items;
         for (found.columns) |column| {
             var key = false;
@@ -802,7 +802,7 @@ pub const Db = struct {
     }
 
     pub fn indexes(_: *Db, arena: std.mem.Allocator, table: db.Table) db.Error![]db.Index {
-        var out: std.ArrayListUnmanaged(db.Index) = .empty;
+        var out: std.ArrayList(db.Index) = .empty;
         const found = api.find(table.name) orelse return out.items;
         var columns_text: List = .empty;
         for (found.key, 0..) |name, i| {
@@ -845,7 +845,7 @@ pub const Db = struct {
 
     pub fn rowKey(_: *Db, arena: std.mem.Allocator, table: db.Table) db.Error!db.RowKey {
         const found = api.find(table.name) orelse return .{};
-        var out: std.ArrayListUnmanaged([]const u8) = .empty;
+        var out: std.ArrayList([]const u8) = .empty;
         for (found.key) |name| {
             try out.append(arena, name);
         }
@@ -857,7 +857,7 @@ pub const Db = struct {
     }
 
     pub fn settings(self: *Db, arena: std.mem.Allocator) db.Error![]db.Setting {
-        var out: std.ArrayListUnmanaged(db.Setting) = .empty;
+        var out: std.ArrayList(db.Setting) = .empty;
         const response = self.call(arena, .{ .path = "/api/overview" }) catch null;
         if (response) |answer| {
             if (answer.ok()) {
@@ -892,7 +892,7 @@ pub const Db = struct {
         try out.append(arena, .{ .label = "user", .value = self.parts.user });
         try out.append(arena, .{
             .label = "management API",
-            .value = try std.fmt.allocPrint(arena, "{s}://{s}:{d}{s}", .{
+            .value = try arena.print("{s}://{s}:{d}{s}", .{
                 if (self.parts.tls) "https" else "http",
                 self.parts.host,
                 self.parts.port,
@@ -907,13 +907,13 @@ pub const Db = struct {
         }
         try out.append(arena, .{
             .label = "requests made",
-            .value = try std.fmt.allocPrint(arena, "{d}", .{self.requests}),
+            .value = try arena.print("{d}", .{self.requests}),
         });
         return out.items;
     }
 
     pub fn split(_: *Db, arena: std.mem.Allocator, sql: []const u8) db.Error![]db.Statement {
-        var out: std.ArrayListUnmanaged(db.Statement) = .empty;
+        var out: std.ArrayList(db.Statement) = .empty;
         var lines = std.mem.splitScalar(u8, sql, '\n');
         while (lines.next()) |raw| {
             const line = std.mem.trim(u8, raw, " \t\r");
@@ -964,7 +964,7 @@ pub const Db = struct {
         }
         if (eql(command, "DEFINITIONS")) {
             const response = try self.call(self.replies.allocator(), .{
-                .path = try std.fmt.allocPrint(arena, "/api/definitions/{s}", .{try address.escaped(arena, self.vhost)}),
+                .path = try arena.print("/api/definitions/{s}", .{try address.escaped(arena, self.vhost)}),
             });
             if (!response.ok()) {
                 return self.fail(response);
@@ -982,7 +982,7 @@ pub const Db = struct {
             return self.messages(arena, args[1], count, eql(command, "DRAIN"));
         }
         if (eql(command, "PURGE")) {
-            const path = try std.fmt.allocPrint(arena, "{s}/contents", .{try self.itemPath(arena, "queues", args[1])});
+            const path = try arena.print("{s}/contents", .{try self.itemPath(arena, "queues", args[1])});
             const response = try self.call(arena, .{ .method = "DELETE", .path = path });
             if (!response.ok()) {
                 return self.fail(response);
@@ -1072,7 +1072,7 @@ pub const Db = struct {
         if (eql(command, "CLOSE")) {
             const response = try self.call(arena, .{
                 .method = "DELETE",
-                .path = try std.fmt.allocPrint(arena, "/api/connections/{s}", .{try address.escaped(arena, args[1])}),
+                .path = try arena.print("/api/connections/{s}", .{try address.escaped(arena, args[1])}),
             });
             if (!response.ok()) {
                 return self.fail(response);
@@ -1093,7 +1093,7 @@ pub const Db = struct {
             if (drain) "ack_requeue_false" else "reject_requeue_true",
             TRUNCATE,
         });
-        const path = try std.fmt.allocPrint(arena, "{s}/get", .{try self.itemPath(arena, "queues", queue)});
+        const path = try arena.print("{s}/get", .{try self.itemPath(arena, "queues", queue)});
         const replies = self.replies.allocator();
         const response = try self.call(replies, .{ .method = "POST", .path = path, .body = body.items });
         if (!response.ok()) {
@@ -1129,7 +1129,7 @@ pub const Db = struct {
         try body.appendSlice(arena, ",\"payload_encoding\":\"string\"}");
         // The default exchange has no name, and routes by the queue's own name.
         const named = if (std.mem.eql(u8, exchange, "\"\"") or std.mem.eql(u8, exchange, "-")) "" else exchange;
-        const path = try std.fmt.allocPrint(arena, "{s}/publish", .{try self.itemPath(arena, "exchanges", named)});
+        const path = try arena.print("{s}/publish", .{try self.itemPath(arena, "exchanges", named)});
         const response = try self.call(arena, .{ .method = "POST", .path = path, .body = body.items });
         if (!response.ok()) {
             return self.fail(response);
@@ -1187,8 +1187,8 @@ pub const Db = struct {
     // ----------------------------------------------------------------- rows
 
     fn newRows(self: *Db, table: api.Table) Rows {
-        var names: std.ArrayListUnmanaged([]const u8) = .empty;
-        var numeric: std.ArrayListUnmanaged(bool) = .empty;
+        var names: std.ArrayList([]const u8) = .empty;
+        var numeric: std.ArrayList(bool) = .empty;
         const arena = self.replies.allocator();
         for (table.columns) |column| {
             names.append(arena, column.name) catch {};
@@ -1232,10 +1232,10 @@ pub const Db = struct {
 
 /// `Basic dXNlcjpwYXNz`, which is all the authentication the management API has.
 fn basic(arena: std.mem.Allocator, user: []const u8, password: []const u8) ![]const u8 {
-    const pair = try std.fmt.allocPrint(arena, "{s}:{s}", .{ user, password });
+    const pair = try arena.print("{s}:{s}", .{ user, password });
     const encoder = std.base64.standard.Encoder;
     const room = try arena.alloc(u8, encoder.calcSize(pair.len));
-    return std.fmt.allocPrint(arena, "Basic {s}", .{encoder.encode(room, pair)});
+    return arena.print("Basic {s}", .{encoder.encode(room, pair)});
 }
 
 /// A JSON string, escaped as JSON wants it.
@@ -1327,7 +1327,7 @@ pub const Rows = db.Built(Db, Value);
 /// API document turns into is this driver's business alone.
 fn addJson(rows: *Rows, table: api.Table, item: Json) db.Error!void {
     const arena = rows.owner.replies.allocator();
-    var values: std.ArrayListUnmanaged(Value) = .empty;
+    var values: std.ArrayList(Value) = .empty;
     for (table.columns) |column| {
         const found = api.pick(item, column.from) orelse {
             try values.append(arena, .{ .nil = {} });

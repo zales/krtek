@@ -60,7 +60,7 @@ pub const Ready = struct {
 /// The names of every context in the file, in the order they are written - what
 /// to offer when the one asked for is not there.
 pub fn contexts(arena: std.mem.Allocator, doc: yaml.Value) Error![][]const u8 {
-    var names: std.ArrayListUnmanaged([]const u8) = .empty;
+    var names: std.ArrayList([]const u8) = .empty;
     for ((doc.get("contexts") orelse return &.{}).items()) |entry| {
         const name = (entry.get("name") orelse continue).text();
         if (name.len != 0) {
@@ -125,12 +125,12 @@ pub fn pick(arena: std.mem.Allocator, doc: yaml.Value, want: []const u8, why: *L
         chosen.token_file = (account.get("tokenFile") orelse yaml.Value{ .scalar = "" }).text();
         if (account.get("exec")) |credential_plugin| {
             chosen.command = (credential_plugin.get("command") orelse yaml.Value{ .scalar = "" }).text();
-            var args: std.ArrayListUnmanaged([]const u8) = .empty;
+            var args: std.ArrayList([]const u8) = .empty;
             for ((credential_plugin.get("args") orelse yaml.Value{ .list = &.{} }).items()) |arg| {
                 try args.append(arena, arg.text());
             }
             chosen.args = args.items;
-            var env: std.ArrayListUnmanaged(exec.Variable) = .empty;
+            var env: std.ArrayList(exec.Variable) = .empty;
             for ((credential_plugin.get("env") orelse yaml.Value{ .list = &.{} }).items()) |entry| {
                 const name = (entry.get("name") orelse continue).text();
                 if (name.len != 0) {
@@ -281,7 +281,7 @@ fn plugin(arena: std.mem.Allocator, chosen: Chosen, why: *List) Error!Credential
 }
 
 fn firstLine(text: []const u8) []const u8 {
-    const end = std.mem.indexOfScalar(u8, text, '\n') orelse text.len;
+    const end = std.mem.findScalar(u8, text, '\n') orelse text.len;
     return text[0..end];
 }
 
@@ -303,7 +303,7 @@ pub fn find(arena: std.mem.Allocator, named: []const u8) Error!?[]const u8 {
         }
     }
     const home = std.c.getenv("HOME") orelse return null;
-    return try std.fmt.allocPrint(arena, "{s}/.kube/config", .{std.mem.sliceTo(home, 0)});
+    return try arena.print("{s}/.kube/config", .{std.mem.sliceTo(home, 0)});
 }
 
 // ------------------------------------------------------------------- tests
@@ -389,8 +389,8 @@ test "a context asked for by name, and one that is not there" {
     why.clearRetainingCapacity();
     try testing.expectError(error.Config, pick(a, try document(a, SAMPLE), "staging", &why));
     // It says what there is instead, because a typo is the usual reason.
-    try testing.expect(std.mem.indexOf(u8, why.items, "no context called staging") != null);
-    try testing.expect(std.mem.indexOf(u8, why.items, "work and proxy") != null);
+    try testing.expect(std.mem.find(u8, why.items, "no context called staging") != null);
+    try testing.expect(std.mem.find(u8, why.items, "work and proxy") != null);
 }
 
 test "what is missing is named, rather than left to fail later" {
@@ -417,7 +417,7 @@ test "what is missing is named, rather than left to fail later" {
     for (cases) |case| {
         var why: List = .empty;
         try testing.expectError(error.Config, pick(a, try document(a, case.text), "", &why));
-        try testing.expect(std.mem.indexOf(u8, why.items, case.says) != null);
+        try testing.expect(std.mem.find(u8, why.items, case.says) != null);
     }
 }
 
@@ -442,12 +442,12 @@ test "resolving decodes what the file carries and fills in the default namespace
     // OpenSSL would later call a certificate problem.
     why.clearRetainingCapacity();
     try testing.expectError(error.Config, resolve(a, .{ .ca_data = "not base64!!" }, &why));
-    try testing.expect(std.mem.indexOf(u8, why.items, "not base64") != null);
+    try testing.expect(std.mem.find(u8, why.items, "not base64") != null);
 
     // A file that is not there is named.
     why.clearRetainingCapacity();
     try testing.expectError(error.Config, resolve(a, .{ .ca_file = "/no/such/authority.pem" }, &why));
-    try testing.expect(std.mem.indexOf(u8, why.items, "/no/such/authority.pem") != null);
+    try testing.expect(std.mem.find(u8, why.items, "/no/such/authority.pem") != null);
 }
 
 test "the credential plugin's answer, and every way it can fail to be one" {
@@ -482,7 +482,7 @@ test "the credential plugin's answer, and every way it can fail to be one" {
             .command = "sh",
             .args = &.{ "-c", case.script },
         }, &why));
-        try testing.expect(std.mem.indexOf(u8, why.items, case.says) != null);
+        try testing.expect(std.mem.find(u8, why.items, case.says) != null);
     }
 
     // A plugin that fails says what it printed, because that is the reason.
@@ -491,5 +491,5 @@ test "the credential plugin's answer, and every way it can fail to be one" {
         .command = "sh",
         .args = &.{ "-c", "echo 'the profile expired'; exit 1" },
     }, &why));
-    try testing.expect(std.mem.indexOf(u8, why.items, "the profile expired") != null);
+    try testing.expect(std.mem.find(u8, why.items, "the profile expired") != null);
 }

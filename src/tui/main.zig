@@ -21,9 +21,10 @@ const biometry = @import("biometry.zig");
 /// and writes its message underneath a drawing nobody can scroll away from, which
 /// is the same as not saying anything at all.
 ///
-/// libvaxis carries a handler of its own, but its signature is one Zig ago -
-/// three parameters where 0.16 passes two - so what is used here is the part of
-/// it that matters, which is the sequence that puts the terminal back.
+/// libvaxis carries a handler of its own, but it is still written for an older
+/// Zig - three parameters where `std.debug.FullPanic` passes two - so what is
+/// used here is the part of it that matters, which is the sequence that puts the
+/// terminal back.
 pub const panic = std.debug.FullPanic(atPanic);
 
 fn atPanic(message: []const u8, first_trace_address: ?usize) noreturn {
@@ -66,7 +67,7 @@ pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
     if (args.len > 1 and (std.mem.eql(u8, args[1], "-v") or std.mem.eql(u8, args[1], "--version"))) {
         var line: [64]u8 = undefined;
-        const text = std.fmt.bufPrint(&line, "krtek {s}\n", .{build.version}) catch "krtek\n";
+        const text = std.mem.print(&line, "krtek {s}\n", .{build.version}) catch "krtek\n";
         std.Io.File.stdout().writeStreamingAll(init.io, text) catch {};
         return;
     }
@@ -91,7 +92,7 @@ pub fn main(init: std.process.Init) !void {
     // while a statement runs.
     app.watchStatements();
 
-    var keys: std.ArrayListUnmanaged(term.Key) = .empty;
+    var keys: std.ArrayList(term.Key) = .empty;
     defer keys.deinit(allocator);
 
     try draw.frame(&app, app.screen.size());

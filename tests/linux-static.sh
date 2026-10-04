@@ -37,7 +37,7 @@ PC
 fi
 
 export PKG_CONFIG_PATH="$PREFIX/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
-zig build "-Doptimize=${OPTIMIZE:-ReleaseSafe}" -Dstatic -Dmariadb="$PREFIX" "$@"
+zig build "-Doptimize=${OPTIMIZE:-safe}" -Dstatic -Dmariadb="$PREFIX" "$@"
 file zig-out/bin/krtek
 
 # The tests link the same libraries, so they need the same two flags - there is no
@@ -45,5 +45,5 @@ file zig-out/bin/krtek
 if [ "${TEST:-0}" = "1" ]; then
 	zig build test -Dstatic -Dmariadb="$PREFIX"
 	# And malformed bytes at the protocol parsers, from a fixed seed.
-	zig build fuzz -Doptimize=ReleaseSafe -Dstatic -Dmariadb="$PREFIX" -- 150000
+	zig build fuzz -Doptimize=safe -Dstatic -Dmariadb="$PREFIX" -- 150000
 fi

@@ -86,7 +86,7 @@ const Line = struct {
 /// Read `text` as the one document a kubeconfig is. On failure `why` says what
 /// was not understood and on which line; both it and the result are in `arena`.
 pub fn parse(arena: std.mem.Allocator, text: []const u8, why: *List) Error!Value {
-    var lines: std.ArrayListUnmanaged(Line) = .empty;
+    var lines: std.ArrayList(Line) = .empty;
     var walk = std.mem.splitScalar(u8, text, '\n');
     var number: usize = 0;
     var started = false;
@@ -112,7 +112,7 @@ pub fn parse(arena: std.mem.Allocator, text: []const u8, why: *List) Error!Value
             break;
         }
         const indent = line.len - body.len;
-        if (std.mem.indexOfScalar(u8, line[0..indent], '\t') != null) {
+        if (std.mem.findScalar(u8, line[0..indent], '\t') != null) {
             try complain(arena, why, number, "indented with a tab, which YAML does not allow");
             return error.Yaml;
         }
@@ -167,7 +167,7 @@ const Reader = struct {
     }
 
     fn map(self: *Reader, indent: usize) Error!Value {
-        var pairs: std.ArrayListUnmanaged(Pair) = .empty;
+        var pairs: std.ArrayList(Pair) = .empty;
         while (self.peek()) |line| {
             if (line.indent < indent) {
                 break;
@@ -189,7 +189,7 @@ const Reader = struct {
     }
 
     fn list(self: *Reader, indent: usize) Error!Value {
-        var values: std.ArrayListUnmanaged(Value) = .empty;
+        var values: std.ArrayList(Value) = .empty;
         while (self.peek()) |line| {
             if (line.indent != indent or !isItem(line.text)) {
                 break;
@@ -254,8 +254,8 @@ const Reader = struct {
         const opener = text[at.*];
         const closer: u8 = if (opener == '{') '}' else ']';
         at.* += 1;
-        var pairs: std.ArrayListUnmanaged(Pair) = .empty;
-        var values: std.ArrayListUnmanaged(Value) = .empty;
+        var pairs: std.ArrayList(Pair) = .empty;
+        var values: std.ArrayList(Value) = .empty;
         while (true) {
             skipSpace(text, at);
             if (at.* >= text.len) {
@@ -580,7 +580,7 @@ test "what it does not understand it names, rather than reading it wrong" {
     for (cases) |case| {
         var why: List = .empty;
         try testing.expectError(error.Yaml, parse(arena.allocator(), case.text, &why));
-        try testing.expect(std.mem.indexOf(u8, why.items, case.says) != null);
+        try testing.expect(std.mem.find(u8, why.items, case.says) != null);
         // And it says where, so the file can be looked at.
         try testing.expect(std.mem.startsWith(u8, why.items, "line "));
     }
@@ -641,5 +641,5 @@ test "a flow collection that runs off the end of its line says so" {
     // would be a context pointing at a cluster nobody named.
     var why: List = .empty;
     try testing.expectError(error.Yaml, parse(arena.allocator(), "a: {b: 1,\n     c: 2}\n", &why));
-    try testing.expect(std.mem.indexOf(u8, why.items, "never closes on this line") != null);
+    try testing.expect(std.mem.find(u8, why.items, "never closes on this line") != null);
 }

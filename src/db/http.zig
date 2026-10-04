@@ -350,7 +350,7 @@ const Incoming = struct {
     /// send them and refusing would help nobody.
     fn line(self: *Incoming, limit: usize) ![]const u8 {
         while (true) {
-            if (std.mem.indexOfScalar(u8, self.pending(), '\n')) |end| {
+            if (std.mem.findScalar(u8, self.pending(), '\n')) |end| {
                 const raw = self.pending()[0..end];
                 self.at += end + 1;
                 return self.arena.dupe(u8, std.mem.trimEnd(u8, raw, "\r"));
@@ -396,13 +396,13 @@ pub fn readResponse(arena: std.mem.Allocator, source: Source, method: []const u8
     const status_line = try incoming.line(HEAD_LIMIT);
     var response = try parseStatus(status_line);
 
-    var headers: std.ArrayListUnmanaged(Header) = .empty;
+    var headers: std.ArrayList(Header) = .empty;
     while (true) {
         const text = try incoming.line(HEAD_LIMIT);
         if (text.len == 0) {
             break;
         }
-        const colon = std.mem.indexOfScalar(u8, text, ':') orelse return error.Malformed;
+        const colon = std.mem.findScalar(u8, text, ':') orelse return error.Malformed;
         try headers.append(arena, .{
             .name = text[0..colon],
             .value = std.mem.trim(u8, text[colon + 1 ..], " \t"),
@@ -420,7 +420,7 @@ pub fn readResponse(arena: std.mem.Allocator, source: Source, method: []const u8
     }
 
     const chunked = if (response.get("transfer-encoding")) |value|
-        std.ascii.indexOfIgnoreCase(value, "chunked") != null
+        std.ascii.findIgnoreCase(value, "chunked") != null
     else
         false;
 
@@ -444,7 +444,7 @@ fn parseStatus(line: []const u8) !Response {
     if (!std.mem.startsWith(u8, line, "HTTP/")) {
         return error.Malformed;
     }
-    const space = std.mem.indexOfScalar(u8, line, ' ') orelse return error.Malformed;
+    const space = std.mem.findScalar(u8, line, ' ') orelse return error.Malformed;
     const rest = line[space + 1 ..];
     if (rest.len < 3) {
         return error.Malformed;
@@ -462,7 +462,7 @@ fn readChunked(arena: std.mem.Allocator, incoming: *Incoming, limit: usize) ![]c
         const header = try incoming.line(HEAD_LIMIT);
         // A chunk size may carry extensions after a semicolon, which nothing here
         // wants; the size is what comes before it, in hex.
-        const digits = std.mem.trim(u8, header[0 .. std.mem.indexOfScalar(u8, header, ';') orelse header.len], " \t");
+        const digits = std.mem.trim(u8, header[0 .. std.mem.findScalar(u8, header, ';') orelse header.len], " \t");
         const size = std.fmt.parseInt(usize, digits, 16) catch return error.Malformed;
         if (size == 0) {
             break;

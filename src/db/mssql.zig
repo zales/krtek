@@ -48,10 +48,10 @@ pub fn parse(arena: std.mem.Allocator, target: []const u8) !Parts {
         }
     }
     var out = Parts{};
-    if (std.mem.indexOfScalar(u8, rest, '?')) |question| {
+    if (std.mem.findScalar(u8, rest, '?')) |question| {
         var parameters = std.mem.tokenizeScalar(u8, rest[question + 1 ..], '&');
         while (parameters.next()) |parameter| {
-            const equals = std.mem.indexOfScalar(u8, parameter, '=') orelse continue;
+            const equals = std.mem.findScalar(u8, parameter, '=') orelse continue;
             const name = parameter[0..equals];
             const value = parameter[equals + 1 ..];
             if (std.ascii.eqlIgnoreCase(name, "database") or std.ascii.eqlIgnoreCase(name, "db")) {
@@ -67,17 +67,17 @@ pub fn parse(arena: std.mem.Allocator, target: []const u8) !Parts {
         rest = rest[0..question];
     }
     // The last `@` divides them: a password may hold one, a host may not.
-    if (std.mem.lastIndexOfScalar(u8, rest, '@')) |at| {
+    if (std.mem.findScalarLast(u8, rest, '@')) |at| {
         const credentials = rest[0..at];
         rest = rest[at + 1 ..];
-        if (std.mem.indexOfScalar(u8, credentials, ':')) |colon| {
+        if (std.mem.findScalar(u8, credentials, ':')) |colon| {
             out.user = try targets.unescape(arena, credentials[0..colon]);
             out.password = try targets.unescape(arena, credentials[colon + 1 ..]);
         } else {
             out.user = try targets.unescape(arena, credentials);
         }
     }
-    if (std.mem.indexOfScalar(u8, rest, '/')) |slash| {
+    if (std.mem.findScalar(u8, rest, '/')) |slash| {
         if (rest.len > slash + 1) {
             out.database = try targets.unescape(arena, rest[slash + 1 ..]);
         }
@@ -86,7 +86,7 @@ pub fn parse(arena: std.mem.Allocator, target: []const u8) !Parts {
     if (rest.len != 0) {
         out.host = rest;
     }
-    if (std.mem.lastIndexOfScalar(u8, out.host, ':')) |colon| {
+    if (std.mem.findScalarLast(u8, out.host, ':')) |colon| {
         out.port = std.fmt.parseInt(u16, out.host[colon + 1 ..], 10) catch out.port;
         out.host = out.host[0..colon];
     }
@@ -141,7 +141,7 @@ pub const Db = struct {
         }, report) catch |e| {
             // A refused login is a wrong password, and asking for it again is
             // the useful answer.
-            if (report.items.len != 0 and std.mem.indexOf(u8, report.items, "Login failed") != null) {
+            if (report.items.len != 0 and std.mem.find(u8, report.items, "Login failed") != null) {
                 return error.NeedPassword;
             }
             return e;
@@ -154,7 +154,7 @@ pub const Db = struct {
         // what freed the connection twice.
         const reply = tds.read(self.replies.allocator(), welcome, &trouble, allocator) catch {
             try report.appendSlice(allocator, if (trouble.items.len != 0) trouble.items else "the server would not let this connection in");
-            return if (std.mem.indexOf(u8, report.items, "Login failed") != null)
+            return if (std.mem.find(u8, report.items, "Login failed") != null)
                 error.NeedPassword
             else
                 error.Driver;
@@ -182,7 +182,7 @@ pub const Db = struct {
         const edition = text(reply.rows[0], 1);
         // "Developer Edition (64-bit)" is the interesting half of what the
         // server calls itself; the header has no room for the rest.
-        const short = if (std.mem.indexOfScalar(u8, edition, ' ')) |space| edition[0..space] else edition;
+        const short = if (std.mem.findScalar(u8, edition, ' ')) |space| edition[0..space] else edition;
         self.version_text.print(self.allocator, "SQL Server {s}{s}{s}", .{
             product,
             if (short.len != 0) " " else "",
@@ -341,7 +341,7 @@ pub const Db = struct {
             names[i] = if (column.name.len != 0)
                 column.name
             else
-                try std.fmt.allocPrint(arena, "column{d}", .{i + 1});
+                try arena.print("column{d}", .{i + 1});
             numeric[i] = column.numeric();
         }
         var out = Rows{ .owner = self, .names = names, .numeric = numeric, .table = table, .changed = reply.affected };
@@ -393,7 +393,7 @@ pub const Db = struct {
             \\   AND s.name NOT LIKE 'db[_]%'
             \\ ORDER BY s.name
         );
-        var list: std.ArrayListUnmanaged([]const u8) = .empty;
+        var list: std.ArrayList([]const u8) = .empty;
         for (reply.rows) |row| {
             try list.append(arena, text(row, 0));
         }
@@ -416,7 +416,7 @@ pub const Db = struct {
         try sql.appendSlice(arena, " ORDER BY o.name");
         const reply = try self.ask(arena, sql.items);
 
-        var list: std.ArrayListUnmanaged(db.Object) = .empty;
+        var list: std.ArrayList(db.Object) = .empty;
         for (reply.rows) |row| {
             const kind = text(row, 1);
             try list.append(arena, .{
@@ -462,7 +462,7 @@ pub const Db = struct {
         try sql.appendSlice(arena, " ORDER BY c.column_id");
         const reply = try self.ask(arena, sql.items);
 
-        var list: std.ArrayListUnmanaged(db.Column) = .empty;
+        var list: std.ArrayList(db.Column) = .empty;
         for (reply.rows) |row| {
             const name = text(row, 0);
             const dflt = text(row, 3);
@@ -504,7 +504,7 @@ pub const Db = struct {
         try sql.appendSlice(arena, " ORDER BY i.is_primary_key DESC, i.name");
         const reply = try self.ask(arena, sql.items);
 
-        var list: std.ArrayListUnmanaged(db.Index) = .empty;
+        var list: std.ArrayList(db.Index) = .empty;
         for (reply.rows) |row| {
             try list.append(arena, .{
                 .name = text(row, 0),
@@ -533,7 +533,7 @@ pub const Db = struct {
         try sql.appendSlice(arena, " ORDER BY f.name, k.constraint_column_id");
         const reply = try self.ask(arena, sql.items);
 
-        var list: std.ArrayListUnmanaged(db.ForeignKey) = .empty;
+        var list: std.ArrayList(db.ForeignKey) = .empty;
         for (reply.rows) |row| {
             try list.append(arena, .{
                 .column = text(row, 0),
@@ -615,7 +615,7 @@ pub const Db = struct {
         if (joined.len == 0) {
             return .{};
         }
-        var list: std.ArrayListUnmanaged([]const u8) = .empty;
+        var list: std.ArrayList([]const u8) = .empty;
         var parts = std.mem.tokenizeScalar(u8, joined, ',');
         while (parts.next()) |part| {
             try list.append(arena, part);
@@ -640,7 +640,7 @@ pub const Db = struct {
     };
 
     pub fn settings(self: *Db, arena: std.mem.Allocator) db.Error![]db.Setting {
-        var list: std.ArrayListUnmanaged(db.Setting) = .empty;
+        var list: std.ArrayList(db.Setting) = .empty;
         for (FACTS) |fact| {
             const reply = self.ask(arena, fact[1]) catch continue;
             if (reply.rows.len == 0) {
@@ -648,7 +648,7 @@ pub const Db = struct {
             }
             var value = text(reply.rows[0], 0);
             // @@VERSION is four lines of copyright with the useful part first.
-            if (std.mem.indexOfAny(u8, value, "\r\n")) |end| {
+            if (std.mem.findAny(u8, value, "\r\n")) |end| {
                 value = value[0..end];
             }
             try list.append(arena, .{ .label = fact[0], .value = value });
@@ -674,11 +674,11 @@ pub const Db = struct {
     /// what it has - so it is cut on here before the statements are, and it is
     /// the reason a `CREATE VIEW` in a script works at all.
     pub fn split(_: *Db, arena: std.mem.Allocator, sql: []const u8) db.Error![]db.Statement {
-        var list: std.ArrayListUnmanaged(db.Statement) = .empty;
+        var list: std.ArrayList(db.Statement) = .empty;
         var start: usize = 0;
         var at: usize = 0;
         while (at <= sql.len) {
-            const end = std.mem.indexOfScalarPos(u8, sql, at, '\n') orelse sql.len;
+            const end = std.mem.findScalarPos(u8, sql, at, '\n') orelse sql.len;
             if (isGo(sql[at..end])) {
                 for (try db.splitStatements(arena, sql[start..at], .{ .brackets = true })) |one| {
                     try list.append(arena, one);
@@ -1116,10 +1116,10 @@ test "an identity column says so where the form asks for it" {
     }, &.{});
     // IDENTITY goes with the type and not where a default would, and a column
     // that numbers itself has no default besides.
-    try testing.expect(std.mem.indexOf(u8, out.items, "\"id\" int IDENTITY(1,1) NOT NULL") != null);
-    try testing.expect(std.mem.indexOf(u8, out.items, "DEFAULT IDENTITY") == null);
-    try testing.expect(std.mem.indexOf(u8, out.items, "\"cena\" decimal(10,2) NULL DEFAULT 0") != null);
-    try testing.expect(std.mem.indexOf(u8, out.items, "PRIMARY KEY (\"id\")") != null);
+    try testing.expect(std.mem.find(u8, out.items, "\"id\" int IDENTITY(1,1) NOT NULL") != null);
+    try testing.expect(std.mem.find(u8, out.items, "DEFAULT IDENTITY") == null);
+    try testing.expect(std.mem.find(u8, out.items, "\"cena\" decimal(10,2) NULL DEFAULT 0") != null);
+    try testing.expect(std.mem.find(u8, out.items, "PRIMARY KEY (\"id\")") != null);
 }
 
 test "a key column is not nullable, whether or not the form said so" {
@@ -1133,8 +1133,8 @@ test "a key column is not nullable, whether or not the form said so" {
         .{ .name = "id", .type = "int", .pk = true },
         .{ .name = "column", .type = "int" },
     }, &.{});
-    try testing.expect(std.mem.indexOf(u8, out.items, "\"id\" int NOT NULL") != null);
-    try testing.expect(std.mem.indexOf(u8, out.items, "\"column\" int NULL") != null);
+    try testing.expect(std.mem.find(u8, out.items, "\"id\" int NOT NULL") != null);
+    try testing.expect(std.mem.find(u8, out.items, "\"column\" int NULL") != null);
 }
 
 test "a renamed column is a procedure call, and the rest is an alter" {
@@ -1146,10 +1146,10 @@ test "a renamed column is a procedure call, and the rest is an alter" {
         .{ .name = "novy", .original = "stary", .type = "int", .notnull = true },
         .{ .name = "pridany", .original = "", .type = "bit" },
     }, .{});
-    try testing.expect(std.mem.indexOf(u8, out.items, "EXEC sp_rename '\"dbo\".\"t\".\"stary\"', 'novy', 'COLUMN';") != null);
-    try testing.expect(std.mem.indexOf(u8, out.items, "ALTER COLUMN \"novy\" int NOT NULL") != null);
-    try testing.expect(std.mem.indexOf(u8, out.items, "ADD \"pridany\" bit NULL") != null);
-    try testing.expect(std.mem.indexOf(u8, out.items, "EXEC sp_rename '\"dbo\".\"t\"', 'u';") != null);
+    try testing.expect(std.mem.find(u8, out.items, "EXEC sp_rename '\"dbo\".\"t\".\"stary\"', 'novy', 'COLUMN';") != null);
+    try testing.expect(std.mem.find(u8, out.items, "ALTER COLUMN \"novy\" int NOT NULL") != null);
+    try testing.expect(std.mem.find(u8, out.items, "ADD \"pridany\" bit NULL") != null);
+    try testing.expect(std.mem.find(u8, out.items, "EXEC sp_rename '\"dbo\".\"t\"', 'u';") != null);
 }
 
 // Against a real server, and only where one is offered: `KRTEK_MSSQL` holds
@@ -1166,7 +1166,7 @@ test "every schema statement this writes is one the server takes" {
     const port = parts.next() orelse "1433";
     const user = parts.next() orelse "sa";
     const password = parts.rest();
-    const target = try std.fmt.allocPrint(arena, "mssql://{s}:{s}@{s}:{s}/tempdb", .{ user, password, host, port });
+    const target = try arena.print("mssql://{s}:{s}@{s}:{s}/tempdb", .{ user, password, host, port });
 
     var report: List = .empty;
     defer report.deinit(testing.allocator);
@@ -1287,7 +1287,7 @@ test "every schema statement this writes is one the server takes" {
 
     const body = try self.definition(arena, .{ .schema = "dbo", .name = "krtek_pohled" });
     try testing.expect(body != null);
-    try testing.expect(std.mem.indexOf(u8, body.?, "jmeno") != null);
+    try testing.expect(std.mem.find(u8, body.?, "jmeno") != null);
 
     // And a rename, last, because everything above named the table.
     out.clearRetainingCapacity();

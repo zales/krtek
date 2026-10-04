@@ -32,7 +32,7 @@ jobs:
           ref: ${{ inputs.tag || github.ref }}
       - uses: mlugg/setup-zig@v2
         with:
-          version: 0.16.0
+          version: 0.17.0
 
       - run: brew install pkgconf libpq mariadb-connector-c openssl@3 libssh2
       - run: ./fetch-sqlite.sh
@@ -42,12 +42,12 @@ jobs:
       # Apple silicon, and the x86 ones are no better. A release has to run on
       # everybody's processor, not on the one that compiled it.
       #
-      # ReleaseSafe rather than ReleaseFast, and the difference is not speed.
+      # `safe` rather than `fast`, and the difference is not speed.
       # Half a dozen parsers here read a length off a socket and then believe it:
       # TDS says how long a column is, Kafka how long a record batch is, S3 how
       # long a listing is. With the checks on, a wrong number is a panic that
       # names the line; without them it is a read past the end of a buffer that
-      # says nothing. The fuzzer already runs ReleaseSafe, so this is also what
+      # says nothing. The fuzzer already runs `safe`, so this is also what
       # makes what is fuzzed and what is shipped the same program.
       #
       # It costs 239 kB of the four megabytes and nothing anybody can feel: this
@@ -58,7 +58,7 @@ jobs:
       # function it is written in.
       - name: build
         run: |
-          zig build -Doptimize=ReleaseSafe -Dstatic -Dstrip -Dcpu=baseline \
+          zig build -Doptimize=safe -Dstatic -Dstrip -Dcpu=baseline \
             -Dversion="${{ inputs.tag || github.ref_name }}" \
             -Dlibpq="$(brew --prefix libpq)" -Dmariadb="$(brew --prefix mariadb-connector-c)"
 
@@ -106,11 +106,11 @@ jobs:
             apk add --no-cache build-base cmake pkgconf python3 curl tar xz \
               postgresql-dev openssl-dev openssl-libs-static zlib-static \
               libssh2-dev libssh2-static >/dev/null
-            curl -fsSL "https://ziglang.org/download/0.16.0/zig-$(uname -m)-linux-0.16.0.tar.xz" -o /tmp/zig.tar.xz
+            curl -fsSL "https://ziglang.org/download/0.17.0/zig-$(uname -m)-linux-0.17.0.tar.xz" -o /tmp/zig.tar.xz
             mkdir -p /opt/zig && tar xJf /tmp/zig.tar.xz -C /opt/zig --strip-components=1
             export PATH=/opt/zig:$PATH ZIG_GLOBAL_CACHE_DIR=/tmp/zig-cache
             ./fetch-sqlite.sh
-            OPTIMIZE=ReleaseSafe ./tests/linux-static.sh -Dstrip -Dcpu=baseline -Dversion=${{ inputs.tag || github.ref_name }}
+            OPTIMIZE=safe ./tests/linux-static.sh -Dstrip -Dcpu=baseline -Dversion=${{ inputs.tag || github.ref_name }}
             ./tests/smoke.sh
           '
 

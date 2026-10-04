@@ -51,23 +51,23 @@ pub fn join(arena: std.mem.Allocator, base: []const u8, name: []const u8) ![]con
         return name;
     }
     if (base.len == 0) {
-        return std.fmt.allocPrint(arena, "/{s}", .{name});
+        return arena.print("/{s}", .{name});
     }
     const trimmed = if (base.len > 1) std.mem.trimEnd(u8, base, "/") else base;
     if (name.len == 0) {
         return trimmed;
     }
     if (std.mem.eql(u8, trimmed, "/")) {
-        return std.fmt.allocPrint(arena, "/{s}", .{name});
+        return arena.print("/{s}", .{name});
     }
-    return std.fmt.allocPrint(arena, "{s}/{s}", .{ trimmed, name });
+    return arena.print("{s}/{s}", .{ trimmed, name });
 }
 
 /// The directory above this one. The root is its own parent, which is what stops
 /// `..` from walking off the top.
 pub fn parent(path: []const u8) []const u8 {
     const trimmed = if (path.len > 1) std.mem.trimEnd(u8, path, "/") else path;
-    const slash = std.mem.lastIndexOfScalar(u8, trimmed, '/') orelse return "/";
+    const slash = std.mem.findScalarLast(u8, trimmed, '/') orelse return "/";
     if (slash == 0) {
         return "/";
     }
@@ -80,7 +80,7 @@ pub fn basename(path: []const u8) []const u8 {
     if (std.mem.eql(u8, trimmed, "/") or trimmed.len == 0) {
         return "/";
     }
-    const slash = std.mem.lastIndexOfScalar(u8, trimmed, '/') orelse return trimmed;
+    const slash = std.mem.findScalarLast(u8, trimmed, '/') orelse return trimmed;
     return trimmed[slash + 1 ..];
 }
 
@@ -147,7 +147,7 @@ pub fn expand(arena: std.mem.Allocator, path: []const u8) ![]const u8 {
         return path;
     }
     const home = std.c.getenv("HOME") orelse return path;
-    return std.fmt.allocPrint(arena, "{s}{s}", .{ std.mem.sliceTo(home, 0), path[1..] });
+    return arena.print("{s}{s}", .{ std.mem.sliceTo(home, 0), path[1..] });
 }
 
 // ------------------------------------------------------------- the local disk
@@ -191,7 +191,7 @@ pub const Local = struct {
         const dir = std.c.opendir(zero) orelse return self.blame("cannot open {s}", .{path});
         defer _ = std.c.closedir(dir);
 
-        var out: std.ArrayListUnmanaged(Entry) = .empty;
+        var out: std.ArrayList(Entry) = .empty;
         while (std.c.readdir(dir)) |found| {
             const name = std.mem.sliceTo(@as([*:0]const u8, @ptrCast(&found.name)), 0);
             if (std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, "..")) {
@@ -241,7 +241,7 @@ pub const Local = struct {
         const zero = zeroed(arena, path) catch return error.OutOfMemory;
         if (std.c.mkdir(zero, 0o755) != 0) {
             // Already being there is what was wanted, not a failure.
-            if (std.c._errno().* == @intFromEnum(std.c.E.EXIST)) {
+            if (std.c._errno().* == @backingInt(std.c.E.EXIST)) {
                 return;
             }
             return self.blame("cannot create {s}", .{path});
@@ -318,7 +318,7 @@ pub const Local = struct {
 /// path cannot be looked at, which a listing survives - a dangling link or a
 /// directory being emptied underneath is still worth showing.
 fn look(path: [*:0]const u8) ?Entry {
-    if (builtin.os.tag == .linux) {
+    if (builtin.target.os.tag == .linux) {
         const linux = std.os.linux;
         var facts: linux.Statx = undefined;
         // The syscall rather than the libc wrapper: musl grew one late and a static
@@ -352,7 +352,7 @@ fn look(path: [*:0]const u8) ?Entry {
 }
 
 fn zeroed(arena: std.mem.Allocator, path: []const u8) ![:0]const u8 {
-    return arena.dupeZ(u8, path);
+    return arena.dupeSentinel(u8, path, 0);
 }
 
 /// What the system last complained about, in its own words. Declared here
@@ -797,7 +797,7 @@ test "a tree is copied whole, and then removed whole" {
 
     // Somewhere of this test's own, so a machine running it twice at once does
     // not have the two of them treading on each other.
-    const root = try std.fmt.allocPrint(arena, "/tmp/krtek-store-test-{d}", .{clock.steadyNanos()});
+    const root = try arena.print("/tmp/krtek-store-test-{d}", .{clock.steadyNanos()});
     removeAll(arena, place, root, 0) catch {};
     try place.makeDir(arena, root);
     defer removeAll(arena, place, root, 0) catch {};
@@ -858,7 +858,7 @@ test "a file that is not there says which one" {
     const place = Store{ .local = &disk };
 
     try testing.expectError(error.Store, place.list(arena, "/tmp/krtek-nothing-here-at-all"));
-    try testing.expect(std.mem.indexOf(u8, place.message(), "krtek-nothing-here-at-all") != null);
+    try testing.expect(std.mem.find(u8, place.message(), "krtek-nothing-here-at-all") != null);
     // And in the system's own words, so the reason is there too.
-    try testing.expect(std.mem.indexOf(u8, place.message(), " - ") != null);
+    try testing.expect(std.mem.find(u8, place.message(), " - ") != null);
 }

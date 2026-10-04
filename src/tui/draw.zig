@@ -228,7 +228,7 @@ fn connections(app: *App, size: Size, rows: usize) void {
             screen.moveTo(line, left);
             screen.style(.{ .fg = C.faint });
             var strip: [64]u8 = undefined;
-            const text = std.fmt.bufPrint(&strip, "    {d}-{d} of {d}", .{
+            const text = std.mem.print(&strip, "    {d}-{d} of {d}", .{
                 scroll + 1,
                 @min(scroll + page, count),
                 count,
@@ -282,7 +282,7 @@ fn connections(app: *App, size: Size, rows: usize) void {
     // closed nothing else on the screen says why two thirds of the list is gone.
     var narrowed: [64]u8 = undefined;
     const hint = if (app.saved.filter.items.len != 0)
-        std.fmt.bufPrint(&narrowed, "/{s}   esc clears it", .{app.saved.filter.items}) catch ""
+        std.mem.print(&narrowed, "/{s}   esc clears it", .{app.saved.filter.items}) catch ""
     else
         "";
     box(app, top, left, width, bottom + 1 - top, "connect to a database", hint, C.accent);
@@ -321,7 +321,7 @@ fn header(app: *App, size: Size) void {
     screen.style(.{ .bg = C.bar, .fg = C.dim });
     var buf: [96]u8 = undefined;
     const right = if (app.connected)
-        std.fmt.bufPrint(&buf, "{s}  {d} objects ", .{ app.conn.version(), app.sidebar.objects.items.len }) catch ""
+        std.mem.print(&buf, "{s}  {d} objects ", .{ app.conn.version(), app.sidebar.objects.items.len }) catch ""
     else
         "no connection ";
     const right_width = term.width(right);
@@ -388,7 +388,7 @@ pub const TabStrip = struct {
     pub fn next(self: *TabStrip) ?Piece {
         if (self.index < self.last) {
             const title = term.fit(self.app.tabTitle(self.index), self.room).text;
-            const text = std.fmt.bufPrint(&self.text, " {d}: {s} ", .{ self.index + 1, title }) catch " ? ";
+            const text = std.mem.print(&self.text, " {d}: {s} ", .{ self.index + 1, title }) catch " ? ";
             const piece = Piece{ .tab = self.index, .text = text, .from = self.x, .width = term.width(text) };
             self.index += 1;
             self.x += piece.width;
@@ -525,7 +525,7 @@ fn sidebar(app: *App, width: usize, rows: usize) void {
         used += writeMatched(app, object.name, app.filterHit(object.name), width - used - 8, base);
         var buf: [24]u8 = undefined;
         const count = if (object.rows) |value|
-            std.fmt.bufPrint(&buf, "{d} ", .{value}) catch " "
+            std.mem.print(&buf, "{d} ", .{value}) catch " "
         else
             "? ";
         const count_width = term.width(count);
@@ -641,10 +641,10 @@ fn grid(app: *App, size: Size, side: usize, rows: usize) void {
     const first: usize = if (app.grid.rows.items.len == 0) 0 else app.firstRow();
     var counted: [24]u8 = undefined;
     const total = if (app.grid.counted)
-        std.fmt.bufPrint(&counted, "{d}", .{app.grid.total}) catch "?"
+        std.mem.print(&counted, "{d}", .{app.grid.total}) catch "?"
     else
         "?";
-    const summary = std.fmt.bufPrint(&buf, "  {d}-{d} of {s}   page {d}/{d}{s}{s}{s}", .{
+    const summary = std.mem.print(&buf, "  {d}-{d} of {s}   page {d}/{d}{s}{s}{s}", .{
         first,
         app.firstRow() - 1 + app.grid.rows.items.len,
         total,
@@ -661,7 +661,7 @@ fn grid(app: *App, size: Size, side: usize, rows: usize) void {
         // read.
         screen.style(.{ .fg = C.ok, .bold = true });
         var every: [24]u8 = undefined;
-        const text = std.fmt.bufPrint(&every, "   following {d:.1}s", .{
+        const text = std.mem.print(&every, "   following {d:.1}s", .{
             @as(f64, @floatFromInt(app.follow.ms)) / 1000.0,
         }) catch "   following";
         used += write(app, text, width - used);
@@ -966,7 +966,7 @@ fn pane(app: *App, one: *Files.Pane, left: usize, width: usize, rows: usize, act
     screen.moveTo(1, left);
     screen.style(.{ .bg = if (active) C.accent else C.bar, .fg = if (active) C.bar else C.dim, .bold = true });
     var head: [512]u8 = undefined;
-    const title = std.fmt.bufPrint(&head, " {s}:{s}", .{
+    const title = std.mem.print(&head, " {s}:{s}", .{
         one.place.label(),
         one.where(),
     }) catch " ";
@@ -1024,11 +1024,11 @@ fn pane(app: *App, one: *Files.Pane, left: usize, width: usize, rows: usize, act
     screen.style(.{ .bg = C.bar, .fg = if (one.trouble.items.len != 0) C.danger else C.faint });
     var foot: [256]u8 = undefined;
     const summary = if (one.trouble.items.len != 0)
-        std.fmt.bufPrint(&foot, " {s}", .{one.trouble.items}) catch " "
+        std.mem.print(&foot, " {s}", .{one.trouble.items}) catch " "
     else if (one.marked.items.len != 0)
-        std.fmt.bufPrint(&foot, " {d} marked of {d}", .{ one.marked.items.len, one.entries.len }) catch " "
+        std.mem.print(&foot, " {d} marked of {d}", .{ one.marked.items.len, one.entries.len }) catch " "
     else
-        std.fmt.bufPrint(&foot, " {d} items", .{one.entries.len}) catch " ";
+        std.mem.print(&foot, " {d} items", .{one.entries.len}) catch " ";
     pad(app, endOf(summary, width), width, false);
     screen.reset();
 }
@@ -1061,7 +1061,7 @@ fn messages(app: *App, size: Size, side: usize, rows: usize) void {
         screen.moveTo(line, left);
         screen.style(.{ .fg = if (report.failure != null) C.danger else C.dim });
         var buf: [32]u8 = undefined;
-        var used: usize = write(app, std.fmt.bufPrint(&buf, " {d} ", .{n + 1}) catch " ", width);
+        var used: usize = write(app, std.mem.print(&buf, " {d} ", .{n + 1}) catch " ", width);
         screen.style(.{ .fg = C.text });
         used += write(app, report.sql, width - used - 22);
         screen.style(.{ .fg = C.faint });
@@ -1069,7 +1069,7 @@ fn messages(app: *App, size: Size, side: usize, rows: usize) void {
         const stats = if (report.result_set)
             "  result set, shown in the grid"
         else
-            std.fmt.bufPrint(&right, "  {d} rows, {d} chg, {d:.1} ms", .{ report.rows, report.changes, report.ms }) catch "";
+            std.mem.print(&right, "  {d} rows, {d} chg, {d:.1} ms", .{ report.rows, report.changes, report.ms }) catch "";
         used += write(app, stats, if (width > used) width - used else 0);
         screen.clearToEol();
         line += 1;
@@ -1241,7 +1241,7 @@ fn help(app: *App, size: Size, side: usize, rows: usize) void {
     } else {
         var strip: [96]u8 = undefined;
         const shown = @min(page, half - scroll);
-        const text = std.fmt.bufPrint(&strip, "  lines {d}-{d} of {d}   j k scroll, n p page, g G ends", .{
+        const text = std.mem.print(&strip, "  lines {d}-{d} of {d}   j k scroll, n p page, g G ends", .{
             scroll + 1,
             scroll + shown,
             half,
@@ -1334,7 +1334,7 @@ fn looksLikeImage(app: *App, bytes: []const u8) bool {
         }
     }
     // WebP, which is a RIFF container.
-    return std.mem.startsWith(u8, bytes, "RIFF") and std.mem.indexOf(u8, bytes[0..12], "WEBP") != null;
+    return std.mem.startsWith(u8, bytes, "RIFF") and std.mem.find(u8, bytes[0..12], "WEBP") != null;
 }
 
 /// Did the database call the cell under the cursor a BLOB?
@@ -1386,7 +1386,7 @@ fn detail(app: *App, size: Size, side: usize, rows: usize) !void {
         if (screen.image(text, top + 1, left + 1, @intCast(tall -| 2), @intCast(width -| 2))) |_| {
             screen.reset();
             var label: [64]u8 = undefined;
-            box(app, top, left, width, tall, column, std.fmt.bufPrint(&label, "{d} bytes, enter/esc closes", .{text.len}) catch "", C.accent);
+            box(app, top, left, width, tall, column, std.mem.print(&label, "{d} bytes, enter/esc closes", .{text.len}) catch "", C.accent);
             return;
         } else |_| {
             // Not a picture after all: fall through to the bytes.
@@ -1410,10 +1410,10 @@ fn detail(app: *App, size: Size, side: usize, rows: usize) !void {
                 const chunk = text[at..@min(text.len, at + per_line)];
                 var buf: [8]u8 = undefined;
                 screen.style(.{ .bg = C.selected, .fg = C.faint });
-                used += write(app, std.fmt.bufPrint(&buf, "{x:0>6}  ", .{at}) catch "", width -| 2 -| used);
+                used += write(app, std.mem.print(&buf, "{x:0>6}  ", .{at}) catch "", width -| 2 -| used);
                 screen.style(.{ .bg = C.selected, .fg = C.number });
                 for (chunk) |byte| {
-                    used += write(app, std.fmt.bufPrint(&buf, "{x:0>2} ", .{byte}) catch "", width -| 2 -| used);
+                    used += write(app, std.mem.print(&buf, "{x:0>2} ", .{byte}) catch "", width -| 2 -| used);
                 }
                 // Line the printable part up even on a short last line.
                 var missing = per_line - chunk.len;
@@ -1434,7 +1434,7 @@ fn detail(app: *App, size: Size, side: usize, rows: usize) !void {
         }
         screen.reset();
         var label: [64]u8 = undefined;
-        box(app, top, left, width, tall, column, std.fmt.bufPrint(&label, "{d} bytes, enter/esc closes", .{text.len}) catch "", C.accent);
+        box(app, top, left, width, tall, column, std.mem.print(&label, "{d} bytes, enter/esc closes", .{text.len}) catch "", C.accent);
         return;
     }
 
@@ -1446,7 +1446,7 @@ fn detail(app: *App, size: Size, side: usize, rows: usize) !void {
     // lines would jump over the wrapped part of one.
     var skipped: usize = 0;
     while (skipped < app.detail_at and rest.len != 0) : (skipped += 1) {
-        const newline = std.mem.indexOfScalar(u8, rest, '\n');
+        const newline = std.mem.findScalar(u8, rest, '\n');
         const chunk = if (newline) |at| rest[0..at] else rest;
         const piece = term.fit(chunk, width - 4);
         if (piece.text.len < chunk.len) {
@@ -1463,7 +1463,7 @@ fn detail(app: *App, size: Size, side: usize, rows: usize) !void {
             fill(app, ' ', width - 3);
             continue;
         }
-        const newline = std.mem.indexOfScalar(u8, rest, '\n');
+        const newline = std.mem.findScalar(u8, rest, '\n');
         const chunk = if (newline) |at| rest[0..at] else rest;
         const piece = term.fit(chunk, width - 4);
         screen.put(piece.text);
@@ -1478,7 +1478,7 @@ fn detail(app: *App, size: Size, side: usize, rows: usize) !void {
     // Where in the value this is, when there is more of it than fits.
     var strip: [64]u8 = undefined;
     const hint = if (app.detail_lines > page)
-        std.fmt.bufPrint(&strip, "{d}-{d} of {d}   up down scroll   esc closes", .{
+        std.mem.print(&strip, "{d}-{d} of {d}   up down scroll   esc closes", .{
             app.detail_at + 1,
             @min(app.detail_at + page, app.detail_lines),
             app.detail_lines,
@@ -1573,7 +1573,7 @@ fn palettePanel(app: *App, size: Size, rows: usize) void {
     var footer: usize = write(app, "   up down choose   enter run   esc close", width - 2);
     if (count > shown) {
         var buf: [32]u8 = undefined;
-        footer += write(app, std.fmt.bufPrint(&buf, "   {d} more", .{count - shown}) catch "", width -| footer -| 2);
+        footer += write(app, std.mem.print(&buf, "   {d} more", .{count - shown}) catch "", width -| footer -| 2);
     }
     if (width > footer + 2) {
         fill(app, ' ', width - footer - 2);
@@ -1690,7 +1690,7 @@ fn footerHints(app: *App) []const u8 {
     // On an object screen the keys are the engine's own, so the footer is built
     // from what it said can be done rather than from anything known here.
     if (app.view == .object) {
-        var out: std.ArrayListUnmanaged(u8) = .empty;
+        var out: std.ArrayList(u8) = .empty;
         const arena = app.screen.frame.allocator();
         for (app.object.actions) |action| {
             var key: [8]u8 = undefined;
@@ -1705,7 +1705,7 @@ fn footerHints(app: *App) []const u8 {
     }
     if (app.view == .grid and app.focus == .sidebar) {
         const caps = app.caps();
-        var out: std.ArrayListUnmanaged(u8) = .empty;
+        var out: std.ArrayList(u8) = .empty;
         const arena = app.screen.frame.allocator();
         out.appendSlice(arena, " enter opens   / filter") catch return " enter opens   / filter";
         if (caps.schemas or caps.databases) {
@@ -1756,7 +1756,7 @@ fn rowHints(app: *App) []const u8 {
     if (caps.no_insert.len == 0 and caps.no_update.len == 0 and caps.no_delete.len == 0 and app.files == null) {
         return " i insert   e edit   x delete   o sort   gv value   space mark   ctrl+k commands";
     }
-    var out: std.ArrayListUnmanaged(u8) = .empty;
+    var out: std.ArrayList(u8) = .empty;
     const arena = app.screen.frame.allocator();
     const fallback = " o sort   gv value   space mark   ctrl+k commands";
     // One space in front, three between, however many of them there turn out to be.
@@ -1779,7 +1779,7 @@ fn rowHints(app: *App) []const u8 {
     return if (out.items.len == 0) fallback else out.items;
 }
 
-fn addHint(arena: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), text: []const u8) void {
+fn addHint(arena: std.mem.Allocator, out: *std.ArrayList(u8), text: []const u8) void {
     out.appendSlice(arena, if (out.items.len == 0) " " else "   ") catch return;
     out.appendSlice(arena, text) catch {};
 }
@@ -1833,7 +1833,7 @@ fn editorPanel(app: *App, size: Size, side: usize, rows: usize) void {
         }
         var label: [8]u8 = undefined;
         screen.style(.{ .bg = C.selected, .fg = if (number == at.line) C.accent else C.faint });
-        pad(app, std.fmt.bufPrint(&label, "{d}", .{number + 1}) catch "", gutter - 1, true);
+        pad(app, std.mem.print(&label, "{d}", .{number + 1}) catch "", gutter - 1, true);
         _ = write(app, " ", width);
 
         const text = editor.lineAt(number);
@@ -1873,13 +1873,13 @@ fn editorPanel(app: *App, size: Size, side: usize, rows: usize) void {
         .insert => " [INSERT]",
     };
     const title = if (container.len != 0)
-        (std.fmt.bufPrint(&named, "sh in {s} - EXIT closes it", .{container}) catch "sh")
+        (std.mem.print(&named, "sh in {s} - EXIT closes it", .{container}) catch "sh")
     else if (caps.speaks_sql)
-        (std.fmt.bufPrint(&named, "SQL{s}", .{mode_label}) catch "SQL")
+        (std.mem.print(&named, "SQL{s}", .{mode_label}) catch "SQL")
     else if (caps.label.len != 0)
-        (std.fmt.bufPrint(&named, "{s}{s}", .{ caps.label, mode_label }) catch caps.label)
+        (std.mem.print(&named, "{s}{s}", .{ caps.label, mode_label }) catch caps.label)
     else
-        (std.fmt.bufPrint(&named, "command{s}", .{mode_label}) catch "command");
+        (std.mem.print(&named, "command{s}", .{mode_label}) catch "command");
     box(app, top, outer_left, outer_width, height, title, "", C.accent);
 
     // The cursor is where the typing happens, inside the panel - wherever the
@@ -1916,7 +1916,7 @@ fn editorPanel(app: *App, size: Size, side: usize, rows: usize) void {
         }
         var more: [24]u8 = undefined;
         const label = if (editor.candidates.items.len > count)
-            std.fmt.bufPrint(&more, "{d} more", .{editor.candidates.items.len - count}) catch ""
+            std.mem.print(&more, "{d} more", .{editor.candidates.items.len - count}) catch ""
         else
             "";
         const list_width: usize = @min(widest + 2, size.cols -| list_left);
@@ -2389,7 +2389,7 @@ fn info(app: *App, size: Size, side: usize, rows: usize) void {
 
 /// Replace tabs with two spaces so indentation survives inside a panel.
 fn expandTabs(scratch: std.mem.Allocator, line: []const u8) ![]const u8 {
-    var out: std.ArrayListUnmanaged(u8) = .empty;
+    var out: std.ArrayList(u8) = .empty;
     for (line) |char| {
         if (char == '\t') {
             try out.appendSlice(scratch, "  ");
@@ -2514,5 +2514,5 @@ test "a password is dots, and as many of them as it has characters" {
     var tiny: [6]u8 = undefined;
     try testing.expect(mask(&tiny, "velmi dlouhe heslo", 40).len <= tiny.len);
     // And nothing of the password itself comes back.
-    try testing.expect(std.mem.indexOf(u8, mask(&buffer, "hunter2", 20), "hunter2") == null);
+    try testing.expect(std.mem.find(u8, mask(&buffer, "hunter2", 20), "hunter2") == null);
 }

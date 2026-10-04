@@ -16,9 +16,9 @@ const List = db.List;
 pub const Db = struct {
     allocator: std.mem.Allocator,
     conn: *PGconn,
-    label: std.ArrayListUnmanaged(u8) = .empty,
-    version_text: std.ArrayListUnmanaged(u8) = .empty,
-    last_error: std.ArrayListUnmanaged(u8) = .empty,
+    label: std.ArrayList(u8) = .empty,
+    version_text: std.ArrayList(u8) = .empty,
+    last_error: std.ArrayList(u8) = .empty,
     /// Table oid to name, so a cursor can say where a column came from without
     /// sending a query while results are still pending.
     tables: std.AutoHashMapUnmanaged(c_uint, []const u8) = .empty,
@@ -28,8 +28,8 @@ pub const Db = struct {
 
     /// `target` is a URL or a libpq keyword string. The password is never kept:
     /// libpq holds the connection, and nothing here writes it down.
-    pub fn open(allocator: std.mem.Allocator, target: []const u8, report: *std.ArrayListUnmanaged(u8)) !*Db {
-        const zero = try allocator.dupeZ(u8, target);
+    pub fn open(allocator: std.mem.Allocator, target: []const u8, report: *std.ArrayList(u8)) !*Db {
+        const zero = try allocator.dupeSentinel(u8, target, 0);
         defer allocator.free(zero);
         const conn = PQconnectdb(zero.ptr) orelse {
             try report.appendSlice(allocator, "cannot reach the server");
@@ -158,7 +158,7 @@ pub const Db = struct {
 
     pub fn exec(self: *Db, sql: []const u8) db.Error!void {
         self.starting();
-        const zero = try self.allocator.dupeZ(u8, sql);
+        const zero = try self.allocator.dupeSentinel(u8, sql, 0);
         defer self.allocator.free(zero);
         const result = PQexec(self.conn, zero.ptr) orelse return error.Driver;
         defer PQclear(result);
@@ -181,7 +181,7 @@ pub const Db = struct {
             return null;
         }
         self.starting();
-        const zero = try self.allocator.dupeZ(u8, trimmed);
+        const zero = try self.allocator.dupeSentinel(u8, trimmed, 0);
         defer self.allocator.free(zero);
         if (PQsendQuery(self.conn, zero.ptr) != 1) {
             self.remember(span(PQerrorMessage(self.conn)));
@@ -204,7 +204,7 @@ pub const Db = struct {
 
     /// Run an internal query and hand back the whole result.
     fn ask(self: *Db, sql: []const u8) db.Error!*PGresult {
-        const zero = try self.allocator.dupeZ(u8, sql);
+        const zero = try self.allocator.dupeSentinel(u8, sql, 0);
         defer self.allocator.free(zero);
         const result = PQexec(self.conn, zero.ptr) orelse return error.Driver;
         if (PQresultStatus(result) != PGRES_TUPLES_OK) {
@@ -231,7 +231,7 @@ pub const Db = struct {
                 " ORDER BY nspname = current_schema() DESC, nspname",
         );
         defer PQclear(result);
-        var list: std.ArrayListUnmanaged([]const u8) = .empty;
+        var list: std.ArrayList([]const u8) = .empty;
         var row: c_int = 0;
         while (row < PQntuples(result)) : (row += 1) {
             try list.append(arena, try arena.dupe(u8, cell(result, row, 0)));
@@ -252,7 +252,7 @@ pub const Db = struct {
         const result = try self.ask(sql.items);
         defer PQclear(result);
 
-        var list: std.ArrayListUnmanaged(db.Object) = .empty;
+        var list: std.ArrayList(db.Object) = .empty;
         var row: c_int = 0;
         while (row < PQntuples(result)) : (row += 1) {
             const kind = cell(result, row, 2);
@@ -292,7 +292,7 @@ pub const Db = struct {
         const result = try self.ask(sql.items);
         defer PQclear(result);
 
-        var list: std.ArrayListUnmanaged(db.Column) = .empty;
+        var list: std.ArrayList(db.Column) = .empty;
         var row: c_int = 0;
         while (row < PQntuples(result)) : (row += 1) {
             const name = try arena.dupe(u8, cell(result, row, 0));
@@ -328,7 +328,7 @@ pub const Db = struct {
         const result = try self.ask(sql.items);
         defer PQclear(result);
 
-        var list: std.ArrayListUnmanaged(db.Index) = .empty;
+        var list: std.ArrayList(db.Index) = .empty;
         var row: c_int = 0;
         while (row < PQntuples(result)) : (row += 1) {
             const members = cell(result, row, 4);
@@ -363,7 +363,7 @@ pub const Db = struct {
         const result = try self.ask(sql.items);
         defer PQclear(result);
 
-        var list: std.ArrayListUnmanaged(db.ForeignKey) = .empty;
+        var list: std.ArrayList(db.ForeignKey) = .empty;
         var row: c_int = 0;
         while (row < PQntuples(result)) : (row += 1) {
             try list.append(arena, .{
@@ -443,7 +443,7 @@ pub const Db = struct {
         if (joined.len == 0) {
             return .{};
         }
-        var list: std.ArrayListUnmanaged([]const u8) = .empty;
+        var list: std.ArrayList([]const u8) = .empty;
         var parts = std.mem.tokenizeScalar(u8, joined, ',');
         while (parts.next()) |part| {
             try list.append(arena, try arena.dupe(u8, part));
@@ -470,7 +470,7 @@ pub const Db = struct {
     };
 
     pub fn settings(self: *Db, arena: std.mem.Allocator) db.Error![]db.Setting {
-        var list: std.ArrayListUnmanaged(db.Setting) = .empty;
+        var list: std.ArrayList(db.Setting) = .empty;
         for (FACTS) |fact| {
             const result = self.ask(fact[1]) catch continue;
             defer PQclear(result);

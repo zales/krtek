@@ -83,9 +83,9 @@ pub fn run(
         return error.Exec;
     };
     const argv = try arena.allocSentinel(?[*:0]const u8, args.len + 1, null);
-    argv[0] = (try arena.dupeZ(u8, command)).ptr;
+    argv[0] = (try arena.dupeSentinel(u8, command, 0)).ptr;
     for (args, 0..) |arg, i| {
-        argv[i + 1] = (try arena.dupeZ(u8, arg)).ptr;
+        argv[i + 1] = (try arena.dupeSentinel(u8, arg, 0)).ptr;
     }
     const envp = try environment(arena, extra);
 
@@ -185,11 +185,11 @@ fn readUntil(arena: std.mem.Allocator, fd: c_int, pid: c_int, why: *List) Error!
 /// This program's environment with `extra` laid over it: a name given twice is
 /// the plugin's, because that is what the kubeconfig asked for.
 fn environment(arena: std.mem.Allocator, extra: []const Variable) Error![:null]?[*:0]const u8 {
-    var list: std.ArrayListUnmanaged(?[*:0]const u8) = .empty;
+    var list: std.ArrayList(?[*:0]const u8) = .empty;
     var i: usize = 0;
     while (c.environ[i]) |entry| : (i += 1) {
         const text = std.mem.sliceTo(entry, 0);
-        const cut = std.mem.indexOfScalar(u8, text, '=') orelse text.len;
+        const cut = std.mem.findScalar(u8, text, '=') orelse text.len;
         var replaced = false;
         for (extra) |variable| {
             if (std.mem.eql(u8, text[0..cut], variable.name)) {
@@ -201,7 +201,7 @@ fn environment(arena: std.mem.Allocator, extra: []const Variable) Error![:null]?
         }
     }
     for (extra) |variable| {
-        const entry = try std.fmt.allocPrintSentinel(arena, "{s}={s}", .{ variable.name, variable.value }, 0);
+        const entry = try arena.printSentinel("{s}={s}", .{ variable.name, variable.value }, 0);
         try list.append(arena, entry.ptr);
     }
     return try list.toOwnedSliceSentinel(arena, null);
@@ -214,8 +214,8 @@ pub fn which(arena: std.mem.Allocator, command: []const u8) Error!?[:0]const u8 
     if (command.len == 0) {
         return null;
     }
-    if (std.mem.indexOfScalar(u8, command, '/') != null) {
-        const path = try arena.dupeZ(u8, command);
+    if (std.mem.findScalar(u8, command, '/') != null) {
+        const path = try arena.dupeSentinel(u8, command, 0);
         return if (c.access(path.ptr, c.X_OK) == 0) path else null;
     }
     const search = std.mem.sliceTo(std.c.getenv("PATH") orelse return null, 0);
@@ -224,7 +224,7 @@ pub fn which(arena: std.mem.Allocator, command: []const u8) Error!?[:0]const u8 
         if (place.len == 0) {
             continue;
         }
-        const path = try std.fmt.allocPrintSentinel(arena, "{s}/{s}", .{ place, command }, 0);
+        const path = try arena.printSentinel("{s}/{s}", .{ place, command }, 0);
         if (c.access(path.ptr, c.X_OK) == 0) {
             return path;
         }
@@ -282,7 +282,7 @@ test "a failure is a status and a sentence, not a hang" {
 
     // Something that is not there at all.
     try testing.expectError(error.Exec, run(arena.allocator(), "krtek-no-such-plugin", &.{}, &.{}, &why));
-    try testing.expect(std.mem.indexOf(u8, why.items, "not on the PATH") != null);
+    try testing.expect(std.mem.find(u8, why.items, "not on the PATH") != null);
 
     // Something that runs and fails: the status comes back rather than an error,
     // because what it printed is what says why.

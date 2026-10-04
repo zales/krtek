@@ -447,15 +447,15 @@ pub fn guessPlural(arena: std.mem.Allocator, kind: []const u8) ![]const u8 {
     const last = lower[lower.len - 1];
     // ...y after a consonant becomes ...ies: NetworkPolicy, Gateway is not one.
     if (last == 'y' and lower.len > 1 and !isVowel(lower[lower.len - 2])) {
-        return std.fmt.allocPrint(arena, "{s}ies", .{lower[0 .. lower.len - 1]});
+        return arena.print("{s}ies", .{lower[0 .. lower.len - 1]});
     }
     // ...s, ...x, ...ch and ...sh take es: Ingress becomes ingresses.
     if (last == 's' or last == 'x' or
         (lower.len > 1 and (std.mem.endsWith(u8, lower, "ch") or std.mem.endsWith(u8, lower, "sh"))))
     {
-        return std.fmt.allocPrint(arena, "{s}es", .{lower});
+        return arena.print("{s}es", .{lower});
     }
-    return std.fmt.allocPrint(arena, "{s}s", .{lower});
+    return arena.print("{s}s", .{lower});
 }
 
 fn isVowel(char: u8) bool {
@@ -465,10 +465,10 @@ fn isVowel(char: u8) bool {
 /// Where an `apiVersion:` lives. The core group is `v1` and is under `/api`;
 /// everything else is `group/version` and is under `/apis`.
 pub fn rootOf(arena: std.mem.Allocator, api_version: []const u8) ![]const u8 {
-    if (std.mem.indexOfScalar(u8, api_version, '/') == null) {
-        return std.fmt.allocPrint(arena, "/api/{s}", .{api_version});
+    if (std.mem.findScalar(u8, api_version, '/') == null) {
+        return arena.print("/api/{s}", .{api_version});
     }
-    return std.fmt.allocPrint(arena, "/apis/{s}", .{api_version});
+    return arena.print("/apis/{s}", .{api_version});
 }
 
 pub fn find(name: []const u8) ?Resource {
@@ -560,18 +560,18 @@ pub fn bytesText(arena: std.mem.Allocator, bytes: i64) ![]const u8 {
         value /= 1024;
     }
     if (unit == 0) {
-        return std.fmt.allocPrint(arena, "{d}B", .{bytes});
+        return arena.print("{d}B", .{bytes});
     }
-    return std.fmt.allocPrint(arena, "{d:.1}{s}", .{ value, units[unit] });
+    return arena.print("{d:.1}{s}", .{ value, units[unit] });
 }
 
 /// Millicores as somebody reads them: whole cores where it divides, and the
 /// thousandths kubectl uses where it does not.
 pub fn coresText(arena: std.mem.Allocator, milli: i64) ![]const u8 {
     if (milli != 0 and @rem(milli, 1000) == 0) {
-        return std.fmt.allocPrint(arena, "{d}", .{@divExact(milli, 1000)});
+        return arena.print("{d}", .{@divExact(milli, 1000)});
     }
-    return std.fmt.allocPrint(arena, "{d}m", .{milli});
+    return arena.print("{d}m", .{milli});
 }
 
 /// One of the two, told apart by what the number counts. A path that names a
@@ -580,13 +580,13 @@ fn readable(arena: std.mem.Allocator, found: ?Json) ![]const u8 {
     const value = found orelse return "";
     const text = switch (value) {
         .string => |t| t,
-        .integer => |n| return std.fmt.allocPrint(arena, "{d}", .{n}),
+        .integer => |n| return arena.print("{d}", .{n}),
         else => return "",
     };
     const amount = quantityOf(text) orelse return arena.dupe(u8, text);
     // A CPU is the only thing written in thousandths, and `m` is how it says so;
     // a memory figure never carries that suffix.
-    if (std.mem.endsWith(u8, text, "m") or std.mem.indexOfAny(u8, text, "KMGTi") == null) {
+    if (std.mem.endsWith(u8, text, "m") or std.mem.findAny(u8, text, "KMGTi") == null) {
         return coresText(arena, amount);
     }
     return bytesText(arena, amount);
@@ -650,12 +650,12 @@ fn flatten(arena: std.mem.Allocator, value: ?Json) ![]const u8 {
     const found = value orelse return "";
     return switch (found) {
         .string => |text| text,
-        .integer => |number| try std.fmt.allocPrint(arena, "{d}", .{number}),
-        .float => |number| try std.fmt.allocPrint(arena, "{d}", .{number}),
+        .integer => |number| try arena.print("{d}", .{number}),
+        .float => |number| try arena.print("{d}", .{number}),
         .bool => |yes| if (yes) "true" else "false",
         .null => "",
         .number_string => |text| text,
-        .array => |items| try std.fmt.allocPrint(arena, "[{d}]", .{items.items.len}),
+        .array => |items| try arena.print("[{d}]", .{items.items.len}),
         .object => "{…}",
     };
 }
@@ -677,21 +677,21 @@ fn age(arena: std.mem.Allocator, object: Json, now: i64) ![]const u8 {
     const minutes = @divTrunc(@mod(left, 3600), 60);
     const seconds = @mod(left, 60);
     if (days >= 365) {
-        return std.fmt.allocPrint(arena, "{d}y{d}d", .{ @divTrunc(days, 365), @mod(days, 365) });
+        return arena.print("{d}y{d}d", .{ @divTrunc(days, 365), @mod(days, 365) });
     }
     if (days > 0) {
         return if (days >= 8)
-            std.fmt.allocPrint(arena, "{d}d", .{days})
+            arena.print("{d}d", .{days})
         else
-            std.fmt.allocPrint(arena, "{d}d{d}h", .{ days, hours });
+            arena.print("{d}d{d}h", .{ days, hours });
     }
     if (hours > 0) {
-        return std.fmt.allocPrint(arena, "{d}h{d}m", .{ hours, minutes });
+        return arena.print("{d}h{d}m", .{ hours, minutes });
     }
     if (minutes > 0) {
-        return std.fmt.allocPrint(arena, "{d}m", .{minutes});
+        return arena.print("{d}m", .{minutes});
     }
-    return std.fmt.allocPrint(arena, "{d}s", .{seconds});
+    return arena.print("{d}s", .{seconds});
 }
 
 /// RFC 3339 as Kubernetes writes it, which is always `2006-01-02T15:04:05Z`.
@@ -739,7 +739,7 @@ fn readyContainers(arena: std.mem.Allocator, object: Json) ![]const u8 {
             }
         }
     }
-    return std.fmt.allocPrint(arena, "{d}/{d}", .{ ready, wanted.?.array.items.len });
+    return arena.print("{d}/{d}", .{ ready, wanted.?.array.items.len });
 }
 
 /// What kubectl prints under STATUS, which is not the phase.
@@ -805,7 +805,7 @@ fn restarts(arena: std.mem.Allocator, object: Json) ![]const u8 {
             total += count.integer;
         }
     }
-    return std.fmt.allocPrint(arena, "{d}", .{total});
+    return arena.print("{d}", .{total});
 }
 
 /// `2/3`: replicas ready out of replicas wanted. A workload that has never been
@@ -816,7 +816,7 @@ fn replicaCount(arena: std.mem.Allocator, object: Json) ![]const u8 {
     if (wanted == null) {
         return "";
     }
-    return std.fmt.allocPrint(arena, "{d}/{d}", .{
+    return arena.print("{d}/{d}", .{
         if (ready) |value| (if (value == .integer) value.integer else 0) else 0,
         if (wanted.? == .integer) wanted.?.integer else 0,
     });
@@ -1068,7 +1068,7 @@ test "how old a thing is, the way kubectl says it" {
         .{ .made = "2027-01-01T00:00:00Z", .says = "0s" },
     };
     for (cases) |case| {
-        const made = try parsed(a, try std.fmt.allocPrint(a, "{{\"metadata\": {{\"creationTimestamp\": \"{s}\"}}}}", .{case.made}));
+        const made = try parsed(a, try a.print("{{\"metadata\": {{\"creationTimestamp\": \"{s}\"}}}}", .{case.made}));
         try testing.expectEqualStrings(case.says, try cell(a, made, .{ .name = "age", .from = .age }, now));
     }
     // A timestamp that is not one gives nothing rather than a wrong age.

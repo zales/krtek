@@ -45,7 +45,7 @@ test "cells are flattened to one line" {
 }
 
 test "delimited output quotes only when it has to" {
-    var out: std.ArrayListUnmanaged(u8) = .empty;
+    var out: std.ArrayList(u8) = .empty;
     defer out.deinit(std.testing.allocator);
     try app.writeDelimited(&out, std.testing.allocator, "plain", ',');
     try out.append(std.testing.allocator, '|');
@@ -351,7 +351,7 @@ test "every action has one line, one key and one way of being asked for" {
         // table is asked first, so the action would win and the movement would
         // quietly stop working.
         if (action.keys.len == 1) {
-            try std.testing.expect(std.mem.indexOfScalar(u8, input.MOVING, action.keys[0]) == null);
+            try std.testing.expect(std.mem.findScalar(u8, input.MOVING, action.keys[0]) == null);
         }
     }
 }
@@ -377,7 +377,7 @@ test "what a key did before vi took it is behind g and that key" {
     // And the second key of `g` is not one `g` already has a use for.
     for (input.actions) |action| {
         if (action.keys.len == 2 and action.keys[0] == 'g') {
-            try std.testing.expect(std.mem.indexOfScalar(u8, "gtT123456789", action.keys[1]) == null);
+            try std.testing.expect(std.mem.findScalar(u8, "gtT123456789", action.keys[1]) == null);
         }
     }
 }

@@ -3,13 +3,13 @@
 
 const std = @import("std");
 
-const List = std.ArrayListUnmanaged(u8);
+const List = std.ArrayList(u8);
 
 /// Split one CSV line into fields, honouring quotes and doubled quotes. Returns
 /// null when the line ends inside a quoted field, so the caller can join it
 /// with the next one.
 pub fn splitLine(arena: std.mem.Allocator, line: []const u8, separator: u8) !?[][]const u8 {
-    var fields: std.ArrayListUnmanaged([]const u8) = .empty;
+    var fields: std.ArrayList([]const u8) = .empty;
     var current: List = .empty;
     var quoted = false;
     var i: usize = 0;
@@ -46,7 +46,7 @@ pub fn splitLine(arena: std.mem.Allocator, line: []const u8, separator: u8) !?[]
 
 /// Write one value, quoting it only when it has to be quoted.
 pub fn writeField(out: *List, allocator: std.mem.Allocator, text: []const u8, separator: u8) !void {
-    if (std.mem.indexOfAny(u8, text, &[_]u8{ '"', '\n', '\r', separator }) == null) {
+    if (std.mem.findAny(u8, text, &[_]u8{ '"', '\n', '\r', separator }) == null) {
         try out.appendSlice(allocator, text);
         return;
     }
@@ -62,7 +62,7 @@ pub fn writeField(out: *List, allocator: std.mem.Allocator, text: []const u8, se
 
 /// Read a whole file through libc, since std.fs is mid-rework in this Zig.
 pub fn readFile(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
-    var buffer: [std.fs.max_path_bytes]u8 = undefined;
+    var buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     if (path.len >= buffer.len) {
         return error.NameTooLong;
     }

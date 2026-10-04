@@ -13,13 +13,13 @@ const List = db.List;
 pub const Db = struct {
     allocator: std.mem.Allocator,
     handle: ?*c.Db,
-    path: std.ArrayListUnmanaged(u8) = .empty,
-    version_text: std.ArrayListUnmanaged(u8) = .empty,
+    path: std.ArrayList(u8) = .empty,
+    version_text: std.ArrayList(u8) = .empty,
     /// Asked every so often whether the statement running now should go on.
     progress: ?db.Progress = null,
 
-    pub fn open(allocator: std.mem.Allocator, target: []const u8, report: *std.ArrayListUnmanaged(u8)) !*Db {
-        const zero = try allocator.dupeZ(u8, target);
+    pub fn open(allocator: std.mem.Allocator, target: []const u8, report: *std.ArrayList(u8)) !*Db {
+        const zero = try allocator.dupeSentinel(u8, target, 0);
         defer allocator.free(zero);
         var handle: ?*c.Db = null;
         if (c.sqlite3_open_v2(zero.ptr, &handle, c.OPEN_READWRITE | c.OPEN_CREATE, null) != c.OK) {
@@ -101,7 +101,7 @@ pub const Db = struct {
 
     pub fn exec(self: *Db, sql: []const u8) db.Error!void {
         self.starting();
-        const zero = try self.allocator.dupeZ(u8, sql);
+        const zero = try self.allocator.dupeSentinel(u8, sql, 0);
         defer self.allocator.free(zero);
         if (c.sqlite3_exec(self.handle, zero.ptr, null, null, null) != c.OK) {
             return error.Driver;
@@ -148,8 +148,8 @@ pub const Db = struct {
         return switch (value) {
             .null => "",
             .text, .blob => |bytes| try arena.dupe(u8, bytes),
-            .int => |v| try std.fmt.allocPrint(arena, "{d}", .{v}),
-            .float => |v| try std.fmt.allocPrint(arena, "{d}", .{v}),
+            .int => |v| try arena.print("{d}", .{v}),
+            .float => |v| try arena.print("{d}", .{v}),
         };
     }
 
@@ -158,7 +158,7 @@ pub const Db = struct {
     }
 
     pub fn objects(self: *Db, arena: std.mem.Allocator, _: []const u8) db.Error![]db.Object {
-        var list: std.ArrayListUnmanaged(db.Object) = .empty;
+        var list: std.ArrayList(db.Object) = .empty;
         var rows = (try self.ask(
             "SELECT name, type FROM sqlite_master WHERE type IN ('table', 'view')" ++
                 " AND name NOT LIKE 'sqlite~_%' ESCAPE '~' ORDER BY name COLLATE NOCASE",
@@ -180,7 +180,7 @@ pub const Db = struct {
         try sql.appendSlice(arena, "SELECT name, type, \"notnull\", dflt_value, pk FROM pragma_table_info(");
         try db.quote(&sql, arena, table.name);
         try sql.append(arena, ')');
-        var list: std.ArrayListUnmanaged(db.Column) = .empty;
+        var list: std.ArrayList(db.Column) = .empty;
         {
             var rows = (try self.ask(sql.items)) orelse return &.{};
             defer rows.close();
@@ -233,7 +233,7 @@ pub const Db = struct {
         );
         try db.quote(&sql, arena, table.name);
         try sql.appendSlice(arena, ") i");
-        var list: std.ArrayListUnmanaged(db.Index) = .empty;
+        var list: std.ArrayList(db.Index) = .empty;
         var rows = (try self.ask(sql.items)) orelse return &.{};
         defer rows.close();
         while (try rows.next()) {
@@ -256,7 +256,7 @@ pub const Db = struct {
         try sql.appendSlice(arena, "SELECT \"from\", \"table\", \"to\", on_update, on_delete FROM pragma_foreign_key_list(");
         try db.quote(&sql, arena, table.name);
         try sql.appendSlice(arena, ") ORDER BY id, seq");
-        var list: std.ArrayListUnmanaged(db.ForeignKey) = .empty;
+        var list: std.ArrayList(db.ForeignKey) = .empty;
         var rows = (try self.ask(sql.items)) orelse return &.{};
         defer rows.close();
         while (try rows.next()) {
@@ -314,7 +314,7 @@ pub const Db = struct {
             if (maybe) |cursor| {
                 var probe_rows = cursor;
                 probe_rows.close();
-                var list: std.ArrayListUnmanaged([]const u8) = .empty;
+                var list: std.ArrayList([]const u8) = .empty;
                 try list.append(arena, "rowid");
                 return .{ .columns = list.items, .hidden = true, .expression = "rowid" };
             }
@@ -324,7 +324,7 @@ pub const Db = struct {
         try sql.appendSlice(arena, "SELECT name FROM pragma_table_info(");
         try db.quote(&sql, arena, table.name);
         try sql.appendSlice(arena, ") WHERE pk > 0 ORDER BY pk");
-        var list: std.ArrayListUnmanaged([]const u8) = .empty;
+        var list: std.ArrayList([]const u8) = .empty;
         var rows = (try self.ask(sql.items)) orelse return .{};
         defer rows.close();
         while (try rows.next()) {
@@ -339,7 +339,7 @@ pub const Db = struct {
     /// index, an index on an expression and a trigger carry SQL that cannot be
     /// rewritten safely, so their text is replayed as it is.
     pub fn alterContext(self: *Db, arena: std.mem.Allocator, table: db.Table, cols: []const db.Column) db.Error!db.AlterContext {
-        var replay: std.ArrayListUnmanaged([]const u8) = .empty;
+        var replay: std.ArrayList([]const u8) = .empty;
         const renamed = struct {
             fn map(all: []const db.Column, old: []const u8) []const u8 {
                 for (all) |column| {
@@ -356,7 +356,7 @@ pub const Db = struct {
         try db.quote(&listing, arena, table.name);
         try listing.appendSlice(arena, ") i WHERE i.origin = 'c'");
         const Found = struct { name: []const u8, unique: bool, partial: bool };
-        var found: std.ArrayListUnmanaged(Found) = .empty;
+        var found: std.ArrayList(Found) = .empty;
         {
             var rows = (try self.ask(listing.items)) orelse return .{ .columns = cols };
             defer rows.close();
@@ -375,7 +375,7 @@ pub const Db = struct {
             }
         }
         for (found.items) |index| {
-            var members: std.ArrayListUnmanaged([]const u8) = .empty;
+            var members: std.ArrayList([]const u8) = .empty;
             var expression = false;
             if (!index.partial) {
                 var info: List = .empty;
@@ -449,14 +449,14 @@ pub const Db = struct {
     };
 
     pub fn settings(self: *Db, arena: std.mem.Allocator) db.Error![]db.Setting {
-        var list: std.ArrayListUnmanaged(db.Setting) = .empty;
+        var list: std.ArrayList(db.Setting) = .empty;
         try list.append(arena, .{ .label = "file", .value = self.path.items });
         {
             const size = self.oneNumber("PRAGMA page_size") orelse 0;
             const count = self.oneNumber("PRAGMA page_count") orelse 0;
             try list.append(arena, .{
                 .label = "size",
-                .value = try std.fmt.allocPrint(arena, "{d} bytes ({d} pages)", .{ size * count, count }),
+                .value = try arena.print("{d} bytes ({d} pages)", .{ size * count, count }),
             });
         }
         for (PRAGMAS) |pragma| {
@@ -559,7 +559,7 @@ pub const Rows = struct {
         const declared = c.sqlite3_column_decltype(self.stmt, @intCast(at)) orelse return false;
         const text_type = std.mem.span(declared);
         for ([_][]const u8{ "INT", "REAL", "FLOA", "DOUB", "NUM", "DEC" }) |needle| {
-            if (std.ascii.indexOfIgnoreCase(text_type, needle) != null) {
+            if (std.ascii.findIgnoreCase(text_type, needle) != null) {
                 return true;
             }
         }
@@ -727,7 +727,7 @@ pub const Ddl = struct {
 
     /// Adding a key means the same rebuild, with the key in the new definition.
     pub fn addForeignKey(self: Ddl, out: *List, a: std.mem.Allocator, table: db.Table, key: db.ForeignKey, context: db.AlterContext) !void {
-        var keys: std.ArrayListUnmanaged(db.ForeignKey) = .empty;
+        var keys: std.ArrayList(db.ForeignKey) = .empty;
         try keys.appendSlice(a, context.keys);
         try keys.append(a, key);
         try self.alterTable(out, a, table, "", context.columns, .{

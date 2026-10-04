@@ -186,7 +186,7 @@ pub const Db = struct {
     stream: Stream,
     /// One connection per broker, opened when a partition it leads is read from.
     leaders: std.AutoHashMapUnmanaged(i32, Stream) = .empty,
-    brokers: std.ArrayListUnmanaged(Broker) = .empty,
+    brokers: std.ArrayList(Broker) = .empty,
     /// Everything the brokers said about this statement, until the next one.
     replies: std.heap.ArenaAllocator,
     /// And what they said about the cluster, which outlives a statement: the
@@ -424,7 +424,7 @@ pub const Db = struct {
         var head: List = .empty;
         defer head.deinit(self.allocator);
         const write = Encoder{ .out = &head, .a = self.allocator };
-        try write.int16(@intFromEnum(api));
+        try write.int16(@backingInt(api));
         try write.int16(versionOf(api));
         try write.int32(self.correlation);
         try write.string("krtek");
@@ -675,8 +675,8 @@ pub const Db = struct {
         const nonce = base64.Encoder.encode(&nonce_buffer, &raw_nonce);
 
         const user = try escapeName(arena, self.user.items);
-        const bare = try std.fmt.allocPrint(arena, "n={s},r={s}", .{ user, nonce });
-        const first = try std.fmt.allocPrint(arena, "n,,{s}", .{bare});
+        const bare = try arena.print("n={s},r={s}", .{ user, nonce });
+        const first = try arena.print("n,,{s}", .{bare});
         const server_first = try arena.dupe(u8, try self.saslToken(stream, first));
 
         const salt_text = fieldOf(server_first, 's') orelse {
@@ -711,8 +711,8 @@ pub const Db = struct {
         var stored_key: [Hash.digest_length]u8 = undefined;
         Hash.hash(&client_key, &stored_key, .{});
 
-        const without_proof = try std.fmt.allocPrint(arena, "c=biws,r={s}", .{combined});
-        const auth_message = try std.fmt.allocPrint(arena, "{s},{s},{s}", .{ bare, server_first, without_proof });
+        const without_proof = try arena.print("c=biws,r={s}", .{combined});
+        const auth_message = try arena.print("{s},{s},{s}", .{ bare, server_first, without_proof });
 
         var client_signature: [Hmac.mac_length]u8 = undefined;
         Hmac.create(&client_signature, auth_message, &stored_key);
@@ -721,7 +721,7 @@ pub const Db = struct {
             proof[i] = key_byte ^ signature_byte;
         }
         var proof_buffer: [base64.Encoder.calcSize(Hmac.mac_length)]u8 = undefined;
-        const final = try std.fmt.allocPrint(arena, "{s},p={s}", .{
+        const final = try arena.print("{s},p={s}", .{
             without_proof,
             base64.Encoder.encode(&proof_buffer, &proof),
         });
@@ -766,7 +766,7 @@ pub const Db = struct {
             const key = try read.int16();
             _ = try read.int16(); // lowest
             const max = try read.int16();
-            if (key == @intFromEnum(Api.metadata)) {
+            if (key == @backingInt(Api.metadata)) {
                 highest_metadata = max;
             }
         }
@@ -810,13 +810,13 @@ pub const Db = struct {
         try self.cluster_id.appendSlice(self.allocator, cluster);
         _ = try read.int32(); // controller
 
-        var topics: std.ArrayListUnmanaged(Topic) = .empty;
+        var topics: std.ArrayList(Topic) = .empty;
         var count = try read.arrayLength();
         while (count > 0) : (count -= 1) {
             const code = try read.int16();
             const name = try arena.dupe(u8, try read.string());
             const internal = (try read.int8()) != 0;
-            var partitions: std.ArrayListUnmanaged(Partition) = .empty;
+            var partitions: std.ArrayList(Partition) = .empty;
             var parts = try read.arrayLength();
             while (parts > 0) : (parts -= 1) {
                 const part_code = try read.int16();
@@ -900,7 +900,7 @@ pub const Db = struct {
     /// broker now, whatever the cluster's size.
     fn readOffsetsOf(self: *Db, topics: []const *Topic) db.Error!void {
         const now = wallMs();
-        var wanted: std.ArrayListUnmanaged(*Topic) = .empty;
+        var wanted: std.ArrayList(*Topic) = .empty;
         defer wanted.deinit(self.allocator);
         for (topics) |topic| {
             const fresh = self.offsets_at != 0 and now - self.offsets_at < META_MS and topic.offsets_read;
@@ -913,11 +913,11 @@ pub const Db = struct {
         }
 
         // Which brokers lead any of it.
-        var brokers: std.ArrayListUnmanaged(i32) = .empty;
+        var brokers: std.ArrayList(i32) = .empty;
         defer brokers.deinit(self.allocator);
         for (wanted.items) |topic| {
             for (topic.partitions) |partition| {
-                if (std.mem.indexOfScalar(i32, brokers.items, partition.leader) == null) {
+                if (std.mem.findScalar(i32, brokers.items, partition.leader) == null) {
                     try brokers.append(self.allocator, partition.leader);
                 }
             }
@@ -946,7 +946,7 @@ pub const Db = struct {
         try write.int8(1); // isolation level: read committed
 
         // Only the topics that have a partition this broker leads.
-        var mine: std.ArrayListUnmanaged(*Topic) = .empty;
+        var mine: std.ArrayList(*Topic) = .empty;
         defer mine.deinit(self.allocator);
         for (topics) |topic| {
             for (topic.partitions) |partition| {
@@ -1379,7 +1379,7 @@ pub const Db = struct {
         _ = try read.int32(); // base sequence
         const count = try read.int32();
 
-        const codec: Codec = @enumFromInt(@as(u3, @truncate(@as(u16, @bitCast(attributes)) & 0x7)));
+        const codec: Codec = @fromBackingInt(@as(u3, @truncate(@as(u16, @bitCast(attributes)) & 0x7)));
         const control = (attributes & 0x20) != 0;
         const packed_records = read.rest();
         if (control) {
@@ -1797,10 +1797,10 @@ pub const Db = struct {
     pub fn objects(self: *Db, arena: std.mem.Allocator, _: []const u8) db.Error![]db.Object {
         self.begin();
         try self.refresh();
-        var list: std.ArrayListUnmanaged(db.Object) = .empty;
+        var list: std.ArrayList(db.Object) = .empty;
         // Every topic in one go: two requests per broker rather than two per
         // partition.
-        var all: std.ArrayListUnmanaged(*Topic) = .empty;
+        var all: std.ArrayList(*Topic) = .empty;
         defer all.deinit(self.allocator);
         for (self.topics) |*topic| {
             try all.append(self.allocator, topic);
@@ -1848,12 +1848,12 @@ pub const Db = struct {
         try self.refresh();
         const topic = self.topicOf(table.name) orelse return arena.alloc(db.Index, 0);
         try self.readOffsets(topic);
-        var list: std.ArrayListUnmanaged(db.Index) = .empty;
+        var list: std.ArrayList(db.Index) = .empty;
         for (topic.partitions) |partition| {
             try list.append(arena, .{
-                .name = try std.fmt.allocPrint(arena, "partition {d}", .{partition.id}),
+                .name = try arena.print("partition {d}", .{partition.id}),
                 .kind = if (partition.id == 0) "PRIMARY" else "INDEX",
-                .columns = try std.fmt.allocPrint(arena, "leader {d}, replicas {d}, in sync {d}, offsets {d}..{d}, {d} record(s)", .{
+                .columns = try arena.print("leader {d}, replicas {d}, in sync {d}, offsets {d}..{d}, {d} record(s)", .{
                     partition.leader,
                     partition.replicas,
                     partition.in_sync,
@@ -1973,22 +1973,22 @@ pub const Db = struct {
     pub fn settings(self: *Db, arena: std.mem.Allocator) db.Error![]db.Setting {
         self.begin();
         try self.refresh();
-        var list: std.ArrayListUnmanaged(db.Setting) = .empty;
+        var list: std.ArrayList(db.Setting) = .empty;
         try list.append(arena, .{ .label = "cluster", .value = try arena.dupe(u8, self.cluster_id.items) });
-        try list.append(arena, .{ .label = "brokers", .value = try std.fmt.allocPrint(arena, "{d}", .{self.brokers.items.len}) });
+        try list.append(arena, .{ .label = "brokers", .value = try arena.print("{d}", .{self.brokers.items.len}) });
         for (self.brokers.items) |broker| {
             try list.append(arena, .{
-                .label = try std.fmt.allocPrint(arena, "broker {d}", .{broker.node}),
-                .value = try std.fmt.allocPrint(arena, "{s}:{d}", .{ broker.host, broker.port }),
+                .label = try arena.print("broker {d}", .{broker.node}),
+                .value = try arena.print("{s}:{d}", .{ broker.host, broker.port }),
             });
         }
         var partitions: usize = 0;
         for (self.topics) |topic| {
             partitions += topic.partitions.len;
         }
-        try list.append(arena, .{ .label = "topics", .value = try std.fmt.allocPrint(arena, "{d}", .{self.topics.len}) });
-        try list.append(arena, .{ .label = "requests", .value = try std.fmt.allocPrint(arena, "{d}", .{self.requests}) });
-        try list.append(arena, .{ .label = "partitions", .value = try std.fmt.allocPrint(arena, "{d}", .{partitions}) });
+        try list.append(arena, .{ .label = "topics", .value = try arena.print("{d}", .{self.topics.len}) });
+        try list.append(arena, .{ .label = "requests", .value = try arena.print("{d}", .{self.requests}) });
+        try list.append(arena, .{ .label = "partitions", .value = try arena.print("{d}", .{partitions}) });
         return list.items;
     }
 
@@ -1999,7 +1999,7 @@ pub const Db = struct {
     /// commands. A comment is not a command either, which is what makes a dump this
     /// driver wrote replayable.
     pub fn split(_: *Db, arena: std.mem.Allocator, sql: []const u8) db.Error![]db.Statement {
-        var list: std.ArrayListUnmanaged(db.Statement) = .empty;
+        var list: std.ArrayList(db.Statement) = .empty;
         var lines = std.mem.splitScalar(u8, sql, '\n');
         while (lines.next()) |raw| {
             const line = std.mem.trim(u8, raw, " \t\r;");
@@ -2362,7 +2362,7 @@ pub const Db = struct {
         // One word then the rest is a key and a value; a single word is a value.
         var key: ?[]const u8 = null;
         var value = rest_of_line;
-        if (std.mem.indexOfAny(u8, rest_of_line, " \t")) |space| {
+        if (std.mem.findAny(u8, rest_of_line, " \t")) |space| {
             key = rest_of_line[0..space];
             value = std.mem.trim(u8, rest_of_line[space..], " \t");
         }
@@ -2591,7 +2591,7 @@ pub fn stamp(arena: std.mem.Allocator, millis: i64) ![]const u8 {
     // before it arrives. A record whose timestamp says the year 291 million is
     // corrupt, and saying so beats both a wrong date and a crash.
     if (millis > LAST_DATE_MS) {
-        return std.fmt.allocPrint(arena, "{d} (not a date)", .{millis});
+        return arena.print("{d} (not a date)", .{millis});
     }
     const seconds: u64 = @intCast(@divFloor(millis, 1000));
     const ms: u64 = @intCast(@mod(millis, 1000));
@@ -2600,7 +2600,7 @@ pub fn stamp(arena: std.mem.Allocator, millis: i64) ![]const u8 {
     const year_day = day.calculateYearDay();
     const month_day = year_day.calculateMonthDay();
     const time = epoch.getDaySeconds();
-    return std.fmt.allocPrint(arena, "{d}-{d:0>2}-{d:0>2} {d:0>2}:{d:0>2}:{d:0>2}.{d:0>3}", .{
+    return arena.print("{d}-{d:0>2}-{d:0>2} {d:0>2}:{d:0>2}:{d:0>2}.{d:0>3}", .{
         year_day.year,
         month_day.month.numeric(),
         month_day.day_index + 1,
@@ -2763,7 +2763,7 @@ test "a page is a window over the topic, so pages do not overlap" {
     // this test was written for.
     const Step = struct { partition: i32, offset: i64 };
     const walk = struct {
-        fn of(list: []const Partition, match: Match, skip_in: i64, wanted: usize, out: *std.ArrayListUnmanaged(Step), a: std.mem.Allocator) !void {
+        fn of(list: []const Partition, match: Match, skip_in: i64, wanted: usize, out: *std.ArrayList(Step), a: std.mem.Allocator) !void {
             var skip = skip_in;
             var taken: usize = 0;
             for (list) |*partition| {
@@ -2790,11 +2790,11 @@ test "a page is a window over the topic, so pages do not overlap" {
     defer arena.deinit();
     const a = arena.allocator();
 
-    var first: std.ArrayListUnmanaged(Step) = .empty;
+    var first: std.ArrayList(Step) = .empty;
     try walk(&partitions, filter, 0, 4, &first, a);
-    var second: std.ArrayListUnmanaged(Step) = .empty;
+    var second: std.ArrayList(Step) = .empty;
     try walk(&partitions, filter, 4, 4, &second, a);
-    var third: std.ArrayListUnmanaged(Step) = .empty;
+    var third: std.ArrayList(Step) = .empty;
     try walk(&partitions, filter, 8, 4, &third, a);
 
     try testing.expectEqualSlices(Step, &[_]Step{
@@ -3026,10 +3026,10 @@ test "fuzz: record batches" {
                 0,
             },
             // A batch that says magic 1, which is the old format.
-            &([_]u8{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 49, 0, 0, 0, 0, 1 } ++ [_]u8{0} ** 48),
+            &([_]u8{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 49, 0, 0, 0, 0, 1 } ++ @as([48]u8, @splat(0))),
             // A batch whose length runs past the buffer, and one that claims a record
             // count of two billion.
-            &([_]u8{ 0, 0, 0, 0, 0, 0, 0, 0, 0x7f, 0xff, 0xff, 0xff, 0, 0, 0, 0, 2 } ++ [_]u8{0} ** 44),
+            &([_]u8{ 0, 0, 0, 0, 0, 0, 0, 0, 0x7f, 0xff, 0xff, 0xff, 0, 0, 0, 0, 2 } ++ @as([44]u8, @splat(0))),
             &.{
                 0, 0, 0,    0,    0,    0,    0, 0, 0, 0, 0, 49, 0, 0, 0, 0, 2,
                 0, 0, 0,    0,    0,    0,    0, 0, 0, 0, 0, 0,  0, 0, 0, 0, 0,
@@ -3038,8 +3038,8 @@ test "fuzz: record batches" {
             },
             // A batch that says it is compressed with snappy but holds nothing of the
             // kind, and a control batch, which carries no records anybody wrote.
-            &([_]u8{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 49, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 2 } ++ [_]u8{0} ** 41),
-            &([_]u8{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 49, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0x20 } ++ [_]u8{0} ** 41),
+            &([_]u8{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 49, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 2 } ++ @as([41]u8, @splat(0))),
+            &([_]u8{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 49, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0x20 } ++ @as([41]u8, @splat(0))),
             "",
         },
     });
