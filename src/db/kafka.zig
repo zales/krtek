@@ -268,6 +268,9 @@ pub const Db = struct {
                 return error.Driver;
             };
         }
+        if (self.mechanism != .none) {
+            db.tell("logging in as {s}", .{parts.user});
+        }
         self.authenticate(&self.stream) catch {
             try report.appendSlice(allocator, if (self.last_error.items.len != 0)
                 self.last_error.items
@@ -275,6 +278,7 @@ pub const Db = struct {
                 "kafka refused the authentication");
             return error.Driver;
         };
+        db.tell("asking {s} what the cluster holds", .{parts.host});
 
         // What the broker can do, which is also the check that this is Kafka at all.
         self.readVersions() catch {

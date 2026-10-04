@@ -134,6 +134,7 @@ pub const Db = struct {
         };
         errdefer self.replies.deinit();
 
+        db.tell("logging in as {s}", .{parts.user});
         const welcome = connection.login(self.replies.allocator(), .{
             .user = parts.user,
             .password = parts.password,

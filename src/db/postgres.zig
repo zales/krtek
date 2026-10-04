@@ -31,7 +31,7 @@ pub const Db = struct {
     pub fn open(allocator: std.mem.Allocator, target: []const u8, report: *std.ArrayList(u8)) !*Db {
         const zero = try allocator.dupeSentinel(u8, target, 0);
         defer allocator.free(zero);
-        const conn = PQconnectdb(zero.ptr) orelse {
+        const conn = connect(zero.ptr) orelse {
             try report.appendSlice(allocator, "cannot reach the server");
             return error.Driver;
         };
@@ -64,6 +64,75 @@ pub const Db = struct {
         const raw = PQserverVersion(conn);
         try self.version_text.print(allocator, "PostgreSQL {d}.{d}", .{ @divTrunc(raw, 10000), @mod(@divTrunc(raw, 100), 100) });
         return self;
+    }
+
+    /// `PQconnectdb`, taken apart so that each step of it can be named to
+    /// whoever is waiting: libpq makes a connection in one call that says
+    /// nothing until it is over, and the same call made in pieces says which
+    /// state it is in between them. It is the loop libpq runs itself, minus the
+    /// one thing that cannot be done from outside it.
+    ///
+    /// That thing is `connect_timeout`. When the time runs out libpq moves on to
+    /// the next address of the host, or the next host of several, by setting a
+    /// field nobody else can reach - so a target that carries a limit, from the
+    /// URL, from `PGCONNECT_TIMEOUT` or from a service file, is left to
+    /// `PQconnectdb` whole, and gets one sentence instead of five.
+    fn connect(conninfo: [*:0]const u8) ?*PGconn {
+        const plan = Plan.of(conninfo);
+        if (plan.limited) {
+            db.tell("connecting to {s}", .{plan.host()});
+            return PQconnectdb(conninfo);
+        }
+        // The name is looked up inside `PQconnectStart`, which is the one part
+        // of this that still cannot be watched.
+        db.tell("looking up {s}", .{plan.host()});
+        const conn = PQconnectStart(conninfo) orelse return null;
+        var wanted: c_int = POLLING_WRITING;
+        while (PQstatus(conn) != CONNECTION_BAD and (wanted == POLLING_READING or wanted == POLLING_WRITING)) {
+            narrate(conn);
+            // Asked for again every time round: it is a different socket for
+            // every address tried.
+            const socket = PQsocket(conn);
+            if (socket < 0) {
+                break;
+            }
+            var fds = [1]std.c.pollfd{.{
+                .fd = socket,
+                .events = if (wanted == POLLING_READING) std.c.POLL.IN else std.c.POLL.OUT,
+                .revents = 0,
+            }};
+            if (std.c.poll(&fds, 1, -1) < 0) {
+                if (std.c._errno().* == @backingInt(std.c.E.INTR)) {
+                    continue;
+                }
+                break;
+            }
+            wanted = PQconnectPoll(conn);
+        }
+        return conn;
+    }
+
+    /// The state a connection in the making is in, as a sentence.
+    fn narrate(conn: *PGconn) void {
+        const host = span(PQhost(conn));
+        switch (PQstatus(conn)) {
+            CONNECTION_STARTED => {
+                const address = span(PQhostaddr(conn));
+                if (address.len == 0 or std.mem.eql(u8, address, host)) {
+                    db.tell("connecting to {s}:{s}", .{ host, span(PQport(conn)) });
+                } else {
+                    db.tell("connecting to {s}:{s} at {s}", .{ host, span(PQport(conn)), address });
+                }
+            },
+            CONNECTION_SSL_STARTUP => db.tell("TLS handshake with {s}", .{host}),
+            CONNECTION_GSS_STARTUP => db.tell("GSSAPI handshake with {s}", .{host}),
+            // The startup packet has gone and what comes back is the server
+            // asking who this is: the password, or the rounds of SCRAM.
+            CONNECTION_MADE, CONNECTION_AWAITING_RESPONSE, CONNECTION_AUTHENTICATING => db.tell("logging in as {s}", .{span(PQuser(conn))}),
+            CONNECTION_AUTH_OK => db.tell("logged in, waiting for the session to start", .{}),
+            CONNECTION_CHECK_WRITABLE, CONNECTION_CHECK_STANDBY, CONNECTION_CHECK_TARGET, CONNECTION_CONSUME => db.tell("asking {s} what kind of server it is", .{host}),
+            else => {},
+        }
     }
 
     pub fn watch(self: *Db, progress: ?db.Progress) void {
@@ -913,6 +982,24 @@ const PGresult = opaque {};
 const PGcancel = opaque {};
 
 const CONNECTION_OK: c_int = 0;
+const CONNECTION_BAD: c_int = 1;
+// The states of a connection that is still being made, as `ConnStatusType`
+// numbers them. The last two are newer than some of the libpq this is built
+// against, which simply never reports them.
+const CONNECTION_STARTED: c_int = 2;
+const CONNECTION_MADE: c_int = 3;
+const CONNECTION_AWAITING_RESPONSE: c_int = 4;
+const CONNECTION_AUTH_OK: c_int = 5;
+const CONNECTION_SSL_STARTUP: c_int = 7;
+const CONNECTION_CHECK_WRITABLE: c_int = 9;
+const CONNECTION_CONSUME: c_int = 10;
+const CONNECTION_GSS_STARTUP: c_int = 11;
+const CONNECTION_CHECK_TARGET: c_int = 12;
+const CONNECTION_CHECK_STANDBY: c_int = 13;
+const CONNECTION_AUTHENTICATING: c_int = 15;
+/// What `PQconnectPoll` wants waited for before it is called again.
+const POLLING_READING: c_int = 1;
+const POLLING_WRITING: c_int = 2;
 
 const PGRES_EMPTY_QUERY: c_int = 0;
 const PGRES_COMMAND_OK: c_int = 1;
@@ -932,7 +1019,78 @@ const OID_FLOAT4 = 700;
 const OID_FLOAT8 = 701;
 const OID_NUMERIC = 1700;
 
+/// What libpq makes of a target before anything is sent: whether it has been
+/// given a limit on how long connecting may take, and which host it means.
+const Plan = struct {
+    limited: bool = false,
+    name: [96]u8 = undefined,
+    len: usize = 0,
+
+    fn of(conninfo: [*:0]const u8) Plan {
+        var plan = Plan{};
+        // What the environment says first, then what the target says outright,
+        // so the second wins, as it does for libpq.
+        const lists = [_]?[*]PQconninfoOption{ PQconndefaults(), PQconninfoParse(conninfo, null) };
+        defer for (lists) |list| {
+            if (list) |options| {
+                PQconninfoFree(options);
+            }
+        };
+        // Not a target libpq can read at all. It has a sentence of its own
+        // about that, and the way to hear it is to let it try.
+        if (lists[1] == null) {
+            plan.limited = true;
+        }
+        var service = false;
+        var timeout = false;
+        for (lists) |list| {
+            var option = list orelse continue;
+            while (option[0].keyword) |keyword| : (option += 1) {
+                const value = span(option[0].val);
+                if (value.len == 0) {
+                    continue;
+                }
+                const name = std.mem.span(keyword);
+                if (std.mem.eql(u8, name, "connect_timeout")) {
+                    // Anything that is not a number is libpq's to complain about.
+                    timeout = (std.fmt.parseInt(i64, std.mem.trim(u8, value, " "), 10) catch 1) > 0;
+                } else if (std.mem.eql(u8, name, "service")) {
+                    // A service file may set a limit of its own, and it is read
+                    // only once the connection is being made.
+                    service = true;
+                } else if (std.mem.eql(u8, name, "host")) {
+                    plan.len = @min(value.len, plan.name.len);
+                    @memcpy(plan.name[0..plan.len], value[0..plan.len]);
+                }
+            }
+        }
+        plan.limited = plan.limited or service or timeout;
+        return plan;
+    }
+
+    fn host(self: *const Plan) []const u8 {
+        return if (self.len != 0) self.name[0..self.len] else "the server";
+    }
+};
+
+/// `PQconninfoOption`, of which only the first two fields are read.
+const PQconninfoOption = extern struct {
+    keyword: ?[*:0]const u8,
+    envvar: ?[*:0]const u8,
+    compiled: ?[*:0]const u8,
+    val: ?[*:0]const u8,
+    label: ?[*:0]const u8,
+    dispchar: ?[*:0]const u8,
+    dispsize: c_int,
+};
+
 extern fn PQconnectdb(conninfo: [*:0]const u8) ?*PGconn;
+extern fn PQconnectStart(conninfo: [*:0]const u8) ?*PGconn;
+extern fn PQconnectPoll(conn: *PGconn) c_int;
+extern fn PQhostaddr(conn: *PGconn) ?[*:0]const u8;
+extern fn PQconndefaults() ?[*]PQconninfoOption;
+extern fn PQconninfoParse(conninfo: [*:0]const u8, errmsg: ?*?[*:0]u8) ?[*]PQconninfoOption;
+extern fn PQconninfoFree(options: [*]PQconninfoOption) void;
 extern fn PQstatus(conn: *PGconn) c_int;
 extern fn PQconnectionNeedsPassword(conn: *PGconn) c_int;
 extern fn PQfinish(conn: *PGconn) void;
@@ -966,3 +1124,21 @@ extern fn PQgetvalue(result: *PGresult, row: c_int, column: c_int) ?[*]const u8;
 extern fn PQgetisnull(result: *PGresult, row: c_int, column: c_int) c_int;
 extern fn PQgetlength(result: *PGresult, row: c_int, column: c_int) c_int;
 extern fn PQcmdTuples(result: *PGresult) ?[*:0]const u8;
+
+// ------------------------------------------------------------------- tests
+
+test "a target with a time limit of its own is left to libpq whole" {
+    const plain = Plan.of("postgres://app@db.example:5432/shop");
+    try std.testing.expect(!plain.limited);
+    try std.testing.expectEqualStrings("db.example", plain.host());
+
+    try std.testing.expect(Plan.of("postgres://app@db.example/shop?connect_timeout=5").limited);
+    try std.testing.expect(Plan.of("host=db.example dbname=shop connect_timeout=3").limited);
+    // Nought is libpq's word for no limit at all.
+    try std.testing.expect(!Plan.of("postgres://app@db.example/shop?connect_timeout=0").limited);
+    // A service file is read only when the connection is made, and may hold one.
+    try std.testing.expect(Plan.of("service=shop").limited);
+    // And what libpq cannot read is libpq's to refuse, in its own words.
+    try std.testing.expect(Plan.of("postgres://app@db.example/shop?no_such_option=1").limited);
+    try std.testing.expectEqualStrings("db.example", Plan.of("host=db.example dbname=shop").host());
+}

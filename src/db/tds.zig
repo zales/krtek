@@ -159,6 +159,7 @@ pub const Connection = struct {
         errdefer self.close();
         self.stream.setTimeout(net.READ_TIMEOUT_MS);
 
+        db.tell("waiting for {s} to answer", .{host});
         try self.prelogin(why);
         try self.startTls(host, options, why);
         return self;
@@ -234,6 +235,7 @@ pub const Connection = struct {
 
     /// The handshake, one record at a time, each inside a packet of its own.
     fn startTls(self: *Connection, host: []const u8, options: Options, why: *db.List) !void {
+        db.tell("TLS handshake with {s}", .{host});
         _ = ssl.OPENSSL_init_ssl(0, null);
         self.ctx = ssl.SSL_CTX_new(ssl.TLS_client_method()) orelse {
             try why.appendSlice(self.allocator, "no TLS on this machine");

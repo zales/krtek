@@ -1551,6 +1551,66 @@ fn palettePanel(app: *App, size: Size, rows: usize) void {
     box(app, 1, left, width, line + 1, "commands", "", C.accent);
 }
 
+/// The panel in the middle of the screen while a connection is being opened:
+/// what is being opened, what is being waited for, and for how long.
+///
+/// Drawn over the frame that is already there, the way the spinner is - vaxis
+/// writes only the cells that changed - because whoever drew that frame is in
+/// the middle of a call and has nothing new to draw. The next whole frame takes
+/// it away again.
+pub fn connecting(app: *App) void {
+    if (app.connecting == null) {
+        return;
+    }
+    const state = &app.connecting.?;
+    const given_up = state.given_up.load(.acquire);
+    var sentence: [database.Stage.SIZE]u8 = undefined;
+    const doing = if (given_up) "giving up" else state.stage.read(&sentence);
+    const screen = app.screen;
+    const size = screen.size();
+    const width: usize = @min(size.cols -| 4, 64);
+    const height: usize = 6;
+    if (size.rows < height) {
+        return;
+    }
+    const left = (size.cols - width) / 2;
+    const top = (size.rows - height) / 2;
+    const inner = width - 2;
+
+    var line = top + 1;
+    while (line < top + height - 1) : (line += 1) {
+        screen.moveTo(line, left + 1);
+        screen.style(.{ .bg = C.bar });
+        fill(app, ' ', inner);
+    }
+
+    screen.moveTo(top + 2, left + 1);
+    screen.style(.{ .bg = C.bar, .fg = if (given_up) C.warn else C.accent, .bold = true });
+    var used = write(app, "  ", inner);
+    used += write(app, app_mod.SPINNER[state.frame % app_mod.SPINNER.len], inner -| used);
+    used += write(app, " ", inner -| used);
+    screen.style(.{ .bg = C.bar, .fg = C.text });
+    _ = write(app, state.what, inner -| used -| 2);
+
+    // The step on the left and the clock on the right. The clock keeps its
+    // place whatever the sentence does, so the eye finds it where it left it.
+    var buffer: [16]u8 = undefined;
+    const clock = std.mem.print(&buffer, "{d:.1}s", .{(app_mod.monotonicMs() - state.started) / 1000.0}) catch "";
+    screen.moveTo(top + 3, left + 1);
+    screen.style(.{ .bg = C.bar, .fg = if (given_up) C.warn else C.dim });
+    used = write(app, "    ", inner);
+    const room = inner -| used -| term.width(clock) -| 4;
+    const said = write(app, doing, room);
+    fill(app, ' ', room - said + 2);
+    screen.style(.{ .bg = C.bar, .fg = C.faint });
+    _ = write(app, clock, inner -| used -| room -| 2);
+
+    screen.reset();
+    box(app, top, left, width, height, "connecting", "esc gives up", C.accent);
+    screen.cursorOff();
+    screen.flush() catch {};
+}
+
 /// Write `text`, marking the letters a fuzzy match landed on, so it is visible
 /// why this line is in the list at all.
 fn writeMatched(app: *App, text: []const u8, hit: fuzzy.Hit, max: usize, base: term.Style) usize {

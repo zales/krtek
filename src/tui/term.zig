@@ -197,6 +197,14 @@ pub const Term = struct {
     read_fd: std.c.fd_t = -1,
     write_fd: std.c.fd_t = -1,
     opened_fd: std.c.fd_t = -1,
+    /// What arrived while a connection was being opened and all that was being
+    /// listened for was esc: kept, in the order it came, and read by `keys`
+    /// before anything newer. A connect used to block with the keys queuing up
+    /// behind it, so somebody who chose a connection and went straight on typing
+    /// had it all happen once the connection was there - and so did every test
+    /// that sends its keys without waiting to see the first screen.
+    held: std.ArrayList(Event) = .empty,
+    held_at: usize = 0,
 
     pub fn init(allocator: std.mem.Allocator, io: std.Io, env: *std.process.Environ.Map) !*Term {
         const self = try allocator.create(Term);
@@ -238,6 +246,7 @@ pub const Term = struct {
     pub fn deinit(self: *Term) void {
         self.follow(0);
         self.forgetImage();
+        self.held.deinit(self.allocator);
         self.frame.deinit();
         self.loop.stop();
         self.vx.deinit(self.allocator, self.tty.writer());
@@ -524,7 +533,14 @@ pub const Term = struct {
         // behind. One request to look again is the same as five.
         var ticked = false;
         while (true) {
-            const event = if (first) try self.loop.nextEvent() else (try self.loop.tryEvent()) orelse break;
+            // What was held back comes first, being older than anything still in
+            // the queue - and having it is a reason not to wait for more.
+            const event = if (self.nextHeld()) |kept|
+                kept
+            else if (first)
+                try self.loop.nextEvent()
+            else
+                (try self.loop.tryEvent()) orelse break;
             first = false;
             switch (event) {
                 .key_press => |key| {
@@ -594,16 +610,69 @@ pub const Term = struct {
     /// being waited on, and acting on them in the middle of it would be worse
     /// than losing them.
     pub fn interrupted(self: *Term) bool {
+        return self.asked(.statement);
+    }
+
+    /// The same look, for a connection that is being opened. Two things differ.
+    /// Esc ends the wait as well: there is a panel on the screen, and esc is
+    /// what closes a panel. And what else arrives is held rather than dropped,
+    /// for `keys` to hand out afterwards - see `held`. Giving up lets go of what
+    /// was held: keys typed at a connection are not meant for the list that
+    /// comes back in its place.
+    pub fn dismissed(self: *Term) bool {
+        return self.asked(.connection);
+    }
+
+    /// The oldest event still held back, if any is.
+    fn nextHeld(self: *Term) ?Event {
+        if (self.held_at < self.held.items.len) {
+            defer self.held_at += 1;
+            return self.held.items[self.held_at];
+        }
+        self.held.clearRetainingCapacity();
+        self.held_at = 0;
+        return null;
+    }
+
+    /// Kept for later, up to a point: somebody leaning on a key for a minute is
+    /// not typing ahead.
+    fn hold(self: *Term, event: Event) void {
+        if (self.held.items.len < 256) {
+            self.held.append(self.allocator, event) catch {};
+        }
+    }
+
+    fn asked(self: *Term, wait: enum { statement, connection }) bool {
         var found = false;
         while (self.loop.tryEvent() catch null) |event| {
             switch (event) {
                 .key_press => |key| {
-                    if (key.mods.ctrl and (key.codepoint == 'c' or key.codepoint == 'C')) {
+                    const ctrl_c = key.mods.ctrl and (key.codepoint == 'c' or key.codepoint == 'C');
+                    if (ctrl_c or (wait == .connection and key.codepoint == vaxis.Key.escape)) {
                         found = true;
+                        self.held.clearRetainingCapacity();
+                        self.held_at = 0;
+                    } else if (wait == .connection and !found) {
+                        self.hold(event);
                     }
                 },
                 .winsize => |ws| self.vx.resize(self.allocator, self.tty.writer(), ws) catch {},
-                else => {},
+                // Not keys, and not to be dropped with them: the terminal says
+                // what colour it is once, in answer to a question asked at the
+                // start, and a connection named on the command line is being
+                // waited for by the time the answer arrives.
+                .color_scheme => |scheme| if (self.forced_scheme == null) {
+                    self.scheme = switch (scheme) {
+                        .light => .light,
+                        .dark => .dark,
+                    };
+                },
+                .color_report => |report| if (self.forced_scheme == null and report.kind == .bg) {
+                    self.scheme = if (isDark(report.value)) .dark else .light;
+                },
+                else => if (wait == .connection and !found) {
+                    self.hold(event);
+                },
             }
         }
         return found;

@@ -206,6 +206,17 @@ on its own socket, MySQL a `KILL QUERY` down a second connection while the first
 waits through the connector's non-blocking calls. The connection stays usable, and
 a batch stops at the statement that was interrupted.
 
+**So can a connection.** One that takes more than a moment to open puts a panel
+in the middle of the screen: what is being opened, the step it is on - looking a
+name up, connecting to an address, the TLS handshake, logging in, reading what
+is there - and for how long. `esc` or `ctrl+c` gives up and puts back whatever
+was on screen before. Anything else typed meanwhile is kept and happens once the
+connection is there, as it did when a connect simply blocked; giving up lets go
+of it. The attempt is made on a thread of its own, because a name that does not
+resolve and an address that does not answer are calls nothing can interrupt; one
+that was given up on runs out unwatched and closes what it opened, if it opened
+anything.
+
 ## What it looks like
 
 The picture above is a table: the objects in the database down the left, the rows
@@ -1182,6 +1193,18 @@ arrived as `2499.5`.
 ```sh
 zig build && ./tests/postgres.sh
 zig build && ./tests/mysql.sh
+```
+
+[tests/connecting.sh](tests/connecting.sh) is about the server that does not
+answer, so it brings none up: a listener that takes a connection and says nothing
+is that server on any machine, for as long as the test wants it. It checks that
+the wait is said on the screen - with the step it is stuck on, and without the
+password - that `esc` gets the program back with whatever was open still open,
+that a key typed during the wait is not lost, and that an attempt somebody gave
+up on neither holds up the next one nor writes on its panel.
+
+```sh
+zig build && ./tests/connecting.sh
 ```
 
 [tests/mssql.sh](tests/mssql.sh) is worth more than the rest of these, because

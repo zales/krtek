@@ -117,6 +117,9 @@ jobs:
             # Every screen at every size worth caring about. It lives with the
             # suite that needs no server because it needs none either.
             ./tests/sizes.sh
+            # And what is on the screen while a server does not answer - which
+            # is a listener on this machine, so that one needs none as well.
+            ./tests/connecting.sh
           else
             ./tests/${{ matrix.suite }}.sh
           fi

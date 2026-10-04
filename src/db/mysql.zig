@@ -73,6 +73,9 @@ pub const Db = struct {
         const self = try allocator.create(Db);
         self.* = .{ .allocator = allocator, .conn = conn };
 
+        // The connector resolves, connects and logs in inside one call, so one
+        // sentence is all there is to say about it.
+        db.tell("connecting to {s}:{d}", .{ parts.host, parts.port });
         var connected: ?*MYSQL = null;
         var status = mysql_real_connect_start(
             &connected,

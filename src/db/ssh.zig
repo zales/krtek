@@ -361,6 +361,7 @@ pub fn connect(allocator: std.mem.Allocator, options: Options, why: *List) Error
     errdefer _ = libssh2_session_free(session);
     libssh2_session_set_timeout(session, TIMEOUT_MS);
 
+    db.tell("SSH handshake with {s}", .{options.host});
     if (libssh2_session_handshake(session, stream.fd) != 0) {
         const said = lastError(session);
         // "Failed getting banner" is the far end taking the connection and then
@@ -377,8 +378,10 @@ pub fn connect(allocator: std.mem.Allocator, options: Options, why: *List) Error
         return error.Handshake;
     }
     try checkHost(allocator, session, options, why);
+    db.tell("logging in as {s}", .{options.user});
     try authenticate(allocator, session, options, why);
 
+    db.tell("opening sftp on {s}", .{options.host});
     const sftp = libssh2_sftp_init(session) orelse {
         // A server that takes an ssh login and refuses sftp is a server with the
         // subsystem turned off, which is worth saying in those words.

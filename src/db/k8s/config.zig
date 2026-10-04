@@ -228,6 +228,10 @@ const Credential = struct {
 /// been the same across every apiVersion of it: what matters is under `status`.
 fn plugin(arena: std.mem.Allocator, chosen: Chosen, why: *List) Error!Credential {
     var trouble: List = .empty;
+    // The slow part of reaching a cluster, more often than the cluster is: a
+    // plugin that asks a cloud for a token takes seconds where the API server
+    // takes none.
+    db.tell("asking {s} for credentials", .{chosen.command});
     const got = exec.run(arena, chosen.command, chosen.args, chosen.env, &trouble) catch {
         try why.print(arena, "the credential plugin {s} did not run: {s}", .{ chosen.command, trouble.items });
         return error.Config;

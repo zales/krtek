@@ -288,6 +288,7 @@ pub fn startTls(allocator: std.mem.Allocator, stream: *Stream, host: []const u8,
     // than that timeout could not be reached at all: at a third of a second each
     // way the first flight of the handshake had not come back yet, and krtek said
     // the handshake had failed.
+    db.tell("TLS handshake with {s}", .{host});
     var waiting: i64 = 0;
     while (true) {
         if (ssl.SSL_connect(session) == 1) {
@@ -403,6 +404,7 @@ pub fn dial(allocator: std.mem.Allocator, host: []const u8, port: u16) !std.c.fd
     var service: [8]u8 = undefined;
     const service_text = std.mem.printSentinel(&service, "{d}", .{port}, 0) catch return error.BadPort;
     var found: ?*std.c.addrinfo = null;
+    db.tell("looking up {s}", .{host});
     if (std.c.getaddrinfo(zero.ptr, service_text.ptr, &hints, &found) != @as(std.c.EAI, @fromBackingInt(0))) {
         return error.NoSuchHost;
     }
@@ -413,12 +415,31 @@ pub fn dial(allocator: std.mem.Allocator, host: []const u8, port: u16) !std.c.fd
         if (fd < 0) {
             continue;
         }
+        // The address as well as the name, where they differ: a name with an
+        // IPv6 address that goes nowhere spends a long time on it before the
+        // IPv4 one is tried, and "connecting to the name" would not say which
+        // of the two is the one not answering.
+        var numbers: [64]u8 = undefined;
+        const address = numeric(info, &numbers);
+        if (address.len == 0 or std.mem.eql(u8, address, host)) {
+            db.tell("connecting to {s}:{d}", .{ host, port });
+        } else {
+            db.tell("connecting to {s}:{d} at {s}", .{ host, port, address });
+        }
         if (std.c.connect(fd, info.addr.?, info.addrlen) == 0) {
             return fd;
         }
         _ = std.c.close(fd);
     }
     return error.Refused;
+}
+
+/// An address in figures, or nothing where the resolver will not say.
+fn numeric(info: *const std.c.addrinfo, into: []u8) []const u8 {
+    const addr = info.addr orelse return "";
+    const failed = std.c.getnameinfo(addr, info.addrlen, into.ptr, @intCast(into.len), null, 0, .{ .NUMERICHOST = true }) !=
+        @as(std.c.EAI, @fromBackingInt(0));
+    return if (failed) "" else std.mem.sliceTo(into, 0);
 }
 
 // ------------------------------------------------------------------- tests

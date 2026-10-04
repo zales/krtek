@@ -92,6 +92,7 @@ pub const Db = struct {
         errdefer self.close();
         setTimeout(socket, READ_TIMEOUT_MS);
 
+        db.tell("waiting for {s} to answer", .{parts.host});
         if (parts.password.len != 0) {
             const reply = self.command(&[_][]const u8{ "AUTH", parts.password }) catch {
                 try report.appendSlice(allocator, self.message());

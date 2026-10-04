@@ -15,6 +15,7 @@ const conns = @import("connections.zig");
 const keychain = @import("keychain.zig");
 const biometry = @import("biometry.zig");
 const Files = @import("files.zig");
+const draw = @import("draw.zig");
 
 pub const Term = term.Term;
 
@@ -282,6 +283,172 @@ const Running = struct {
     cancelled: bool = false,
     copy_started: f64 = 0,
     copy_ticked: f64 = 0,
+};
+
+/// The spinner, one frame per tick.
+pub const SPINNER = [_][]const u8{ "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏" };
+
+/// A connection being opened, for as long as somebody is waiting for it: what
+/// the panel in the middle of the screen says.
+pub const Connecting = struct {
+    started: f64,
+    /// The target without its password.
+    what: []const u8,
+    /// What is being done about it right now. Said by the thread doing it and
+    /// read by the one drawing, which are never the same thread.
+    stage: database.Stage = .{},
+    frame: usize = 0,
+    /// Esc, or ctrl+c: nothing that is still to come is wanted any more. Kept
+    /// here rather than with the statement's own flag, because what follows a
+    /// connection is several statements and each of them starts that one clean.
+    given_up: std.atomic.Value(bool) = .init(false),
+};
+
+/// The thread that stays with the screen while a connection is being opened: it
+/// draws the panel, moves its spinner, and listens for esc.
+///
+/// The thread that usually does those things is the one doing the opening, and
+/// not all of that can be interrupted to draw. The call that connects has a
+/// thread of its own for that reason - see `Attempt` - but what comes after it,
+/// reading what the connection holds, works on the App itself and has to stay
+/// where the App is used; and the SQL drivers read their catalogs with calls
+/// that do not come back until the server has answered. So the screen is lent
+/// out instead: from `start` to `stop` nothing else draws or reads a key, and
+/// all that passes between the two threads is the sentence on the panel and
+/// whether esc was pressed.
+const Attendant = struct {
+    thread: ?std.Thread = null,
+    /// Written to when it is time to stop, so that stopping does not have to
+    /// wait out a tick.
+    wake: [2]std.c.fd_t = .{ -1, -1 },
+
+    /// A panel that cannot be had is not worth failing a connection over: with
+    /// no thread there is simply nothing drawn, as there never used to be.
+    fn start(app: *App) Attendant {
+        var self = Attendant{};
+        if (std.c.pipe(&self.wake) != 0) {
+            return .{};
+        }
+        self.thread = std.Thread.spawn(.{}, run, .{ app, self.wake[0] }) catch {
+            self.close();
+            return .{};
+        };
+        return self;
+    }
+
+    fn run(app: *App, wake: std.c.fd_t) void {
+        if (app.connecting == null) {
+            return;
+        }
+        // The one in the App, not a copy of it: the flag and the sentence are
+        // what the two threads share.
+        const state = &app.connecting.?;
+        while (true) {
+            var fds = [1]std.c.pollfd{.{ .fd = wake, .events = std.c.POLL.IN, .revents = 0 }};
+            const ready = std.c.poll(&fds, 1, 80);
+            if (ready < 0 and std.c._errno().* == @backingInt(std.c.E.INTR)) {
+                continue;
+            }
+            if (ready != 0) {
+                return;
+            }
+            if (!state.given_up.load(.acquire) and app.screen.dismissed()) {
+                state.given_up.store(true, .release);
+            }
+            app.showConnecting();
+        }
+    }
+
+    /// Give the screen back. Safe to call twice: every way out of a connect
+    /// stops it, and some of them have already done so.
+    fn stop(self: *Attendant) void {
+        const thread = self.thread orelse return;
+        _ = std.c.write(self.wake[1], "!", 1);
+        thread.join();
+        self.thread = null;
+        self.close();
+    }
+
+    fn close(self: *Attendant) void {
+        for (self.wake) |end| {
+            _ = std.c.close(end);
+        }
+    }
+};
+
+/// One attempt at opening a connection, made on a thread of its own.
+///
+/// `Db.open` cannot be asked whether to carry on. A name being looked up and an
+/// address that does not answer are each one call into the system, which comes
+/// back when it comes back - and for an address that goes nowhere that is more
+/// than a minute. Made on the thread that runs the program, it was a minute of
+/// a screen that said nothing and keys that did nothing. So it is made over
+/// here, where it can be walked away from when somebody presses esc.
+///
+/// To stop waiting, not to stop it: the call cannot be interrupted from outside
+/// either. An attempt nobody is waiting for runs to its end unwatched, closes
+/// what it opened if it opened anything, and frees itself. `state` says which
+/// side it belongs to, and only that side touches it.
+const Attempt = struct {
+    allocator: std.mem.Allocator,
+    target: []u8,
+    report: std.ArrayList(u8) = .empty,
+    stage: database.Stage = .{},
+    outcome: anyerror!database.Db = error.Driver,
+    /// A pipe the thread writes one byte into when it has finished, which is
+    /// what the wait wakes up on: a connection that takes four milliseconds
+    /// should not take until the next tick to be noticed.
+    done: [2]std.c.fd_t,
+    state: std.atomic.Value(State) = .init(.running),
+
+    const State = enum(u8) { running, finished, abandoned };
+
+    fn start(allocator: std.mem.Allocator, target: []const u8) !*Attempt {
+        const self = try allocator.create(Attempt);
+        errdefer allocator.destroy(self);
+        const copy = try allocator.dupe(u8, target);
+        errdefer allocator.free(copy);
+        var ends: [2]std.c.fd_t = undefined;
+        if (std.c.pipe(&ends) != 0) {
+            return error.NoPipe;
+        }
+        errdefer for (ends) |end| {
+            _ = std.c.close(end);
+        };
+        self.* = .{ .allocator = allocator, .target = copy, .done = ends };
+        const thread = try std.Thread.spawn(.{}, run, .{self});
+        thread.detach();
+        return self;
+    }
+
+    fn run(self: *Attempt) void {
+        database.listening = &self.stage;
+        self.outcome = database.Db.open(self.allocator, self.target, &self.report);
+        if (self.state.cmpxchgStrong(.running, .finished, .acq_rel, .acquire) == null) {
+            // Somebody is still waiting, and from this byte on it is theirs.
+            _ = std.c.write(self.done[1], "!", 1);
+            return;
+        }
+        if (self.outcome) |opened| {
+            opened.close();
+        } else |_| {}
+        self.destroy();
+    }
+
+    /// Stop waiting for it. False when it finished first, in which case it is
+    /// still the caller's and its answer is about to arrive.
+    fn abandon(self: *Attempt) bool {
+        return self.state.cmpxchgStrong(.running, .abandoned, .acq_rel, .acquire) == null;
+    }
+
+    fn destroy(self: *Attempt) void {
+        for (self.done) |end| {
+            _ = std.c.close(end);
+        }
+        self.report.deinit(self.allocator);
+        self.allocator.free(self.target);
+        self.allocator.destroy(self);
+    }
 };
 
 /// What the program has told whoever is watching, and what it would say if
@@ -652,6 +819,10 @@ pub const App = struct {
     /// time: a connection that holds rows has no business keeping one open.
     files: ?*Files.Manager = null,
     running: Running = .{},
+    /// While a connection is being opened and until there is something of it
+    /// to show. The program's rather than a tab's: it is on the screen for the
+    /// length of one call and gone before any other tab could come forward.
+    connecting: ?Connecting = null,
     /// Set once the App sits at its final address. `init` connects while the
     /// struct is still being built and returned by value, so the pointer handed
     /// to the driver then would dangle - the watch is armed from `main` instead,
@@ -690,7 +861,17 @@ pub const App = struct {
         self.offerFound();
         self.view = .connections;
         if (target.len != 0) {
+            // Watched for the length of this one call, at the address the App
+            // has for now, so that the first screen of a connection named on
+            // the command line can be waited for - and given up on - like any
+            // other. Taken off again straight after: the address is about to
+            // change, and `main` arms it for good where the App ends up.
+            self.watchStatements();
             self.connect(target, true) catch {};
+            self.watch_armed = false;
+            if (self.connected) {
+                self.conn.watch(null);
+            }
         } else if (self.saved.list.items.items.len == 0) {
             self.say("no saved connections yet - press a to add one", .{});
         } else {
@@ -712,7 +893,21 @@ pub const App = struct {
     pub fn connect(self: *App, target: []const u8, keep: bool) !void {
         var report: std.ArrayList(u8) = .empty;
         defer report.deinit(self.allocator);
-        const opened = database.Db.open(self.allocator, target, &report) catch |err| {
+        var naming = std.heap.ArenaAllocator.init(self.allocator);
+        defer naming.deinit();
+        // Nothing at all rather than the target as it came, where the password
+        // cannot be taken out of it: this goes on the screen.
+        const what = conns.withoutPassword(naming.allocator(), target) catch "";
+        var attendant = self.attend(target, what);
+        defer self.connecting = null;
+        defer attendant.stop();
+        const opened = self.dial(target, &report) catch |err| {
+            attendant.stop();
+            if (err == error.GivenUp) {
+                self.say("gave up on {s}", .{what});
+                self.view = .connections;
+                return;
+            }
             // A missing password is worth asking for rather than just failing.
             // `NeedPassword` is a driver saying so; `needsPassword` is this reading
             // the sentence it wrote, which is what everything did before any of them
@@ -746,6 +941,45 @@ pub const App = struct {
             self.view = .connections;
             return;
         };
+        const entered = self.enter(opened, target, keep);
+        attendant.stop();
+        if (self.gaveUp()) {
+            return;
+        }
+        try entered;
+    }
+
+    /// Put the panel up for a connection that is about to be opened, and hand
+    /// the screen to the thread that keeps it moving. The caller stops it.
+    fn attend(self: *App, target: []const u8, what: []const u8) Attendant {
+        // A file on this machine is open before a panel could say so.
+        if (database.Db.engine(target) == .sqlite) {
+            return .{};
+        }
+        self.connecting = .{ .started = monotonicMs(), .what = what };
+        return Attendant.start(self);
+    }
+
+    /// What `connect` does with a connection once it has one.
+    fn enter(self: *App, opened: database.Db, target: []const u8, keep: bool) !void {
+        try self.take(opened, target);
+        if (keep) {
+            try self.rememberConnection(target);
+        }
+        self.say("{s} - {s}", .{ self.conn.describe(), self.conn.version() });
+        // A place that holds files opens on the files. The grid can show a
+        // directory as a table and that is worth having, but it is not what
+        // anybody connecting to a NAS came for, and nothing on that screen said
+        // the two panes were a key away.
+        if (self.conn.files() != null) {
+            self.openFiles() catch {};
+        }
+    }
+
+    /// Make a connection that has just been opened the one this tab is on, and
+    /// read enough of it to have something to show: its first schema, what is in
+    /// that, and the first of those.
+    fn take(self: *App, opened: database.Db, target: []const u8) !void {
         if (self.connected) {
             self.conn.close();
         }
@@ -773,6 +1007,9 @@ pub const App = struct {
         // it. Read once, here, so editing the list under an open connection cannot
         // change what is in force in the middle of it.
         self.read_only = self.markedReadOnly();
+        // The server has answered and the panel is still up: what it is waiting
+        // for now is the first screen, which on a slow line is most of the wait.
+        self.nowConnecting("connected, reading what is in it", .{});
         try self.setTable(null);
         self.grid.schema.clearRetainingCapacity();
         try self.firstSchema();
@@ -785,19 +1022,99 @@ pub const App = struct {
         self.view = .grid;
         try self.loadObjects();
         if (self.current()) |object| {
+            self.nowConnecting("connected, opening {s}", .{object.name});
             try self.openTable(object.name);
         }
-        if (keep) {
-            try self.rememberConnection(target);
+    }
+
+    /// Open a target in a way that can be given up on: the attempt is made on
+    /// a thread of its own, and this one waits for it or for esc, whichever
+    /// comes first. See `Attempt`.
+    fn dial(self: *App, target: []const u8, report: *std.ArrayList(u8)) !database.Db {
+        // A file is opened here. There is nothing in it to wait for, and it is
+        // the one driver that has to stay on this thread: SQLite is built without
+        // its mutexes, because until now nothing here ran beside anything else.
+        if (self.connecting == null) {
+            return database.Db.open(self.allocator, target, report);
         }
-        self.say("{s} - {s}", .{ self.conn.describe(), self.conn.version() });
-        // A place that holds files opens on the files. The grid can show a
-        // directory as a table and that is worth having, but it is not what
-        // anybody connecting to a NAS came for, and nothing on that screen said
-        // the two panes were a key away.
-        if (self.conn.files() != null) {
-            self.openFiles() catch {};
+        const state = &self.connecting.?;
+        const attempt = Attempt.start(self.allocator, target) catch {
+            // No thread to be had. Made here then, the way it always was, with
+            // nothing to watch.
+            return database.Db.open(self.allocator, target, report);
+        };
+        while (true) {
+            var fds = [1]std.c.pollfd{.{ .fd = attempt.done[0], .events = std.c.POLL.IN, .revents = 0 }};
+            const ready = std.c.poll(&fds, 1, 80);
+            if (ready > 0) {
+                break;
+            }
+            if (ready < 0 and std.c._errno().* != @backingInt(std.c.E.INTR)) {
+                // A pipe that cannot be waited on: wait for the byte itself,
+                // below, which is the old way of waiting with a thread in it.
+                break;
+            }
+            if (state.given_up.load(.acquire) and attempt.abandon()) {
+                return error.GivenUp;
+            }
+            // What the attempt says it is doing, passed on to the panel. Not
+            // read by the panel where it is said: an attempt that was given up
+            // on outlives the panel, and goes on talking.
+            var text: [database.Stage.SIZE]u8 = undefined;
+            state.stage.set("{s}", .{attempt.stage.read(&text)});
         }
+        // The byte is taken before anything is freed. It is the last thing the
+        // thread does with the attempt, so having it is knowing the thread has
+        // let go - `finished` alone is set a moment before that.
+        var byte: [1]u8 = undefined;
+        while (std.c.read(attempt.done[0], &byte, 1) < 0 and std.c._errno().* == @backingInt(std.c.E.INTR)) {}
+        defer attempt.destroy();
+        report.appendSlice(self.allocator, attempt.report.items) catch {};
+        return attempt.outcome;
+    }
+
+    /// Say what a connection being opened is busy with now, for the panel.
+    fn nowConnecting(self: *App, comptime fmt: []const u8, args: anytype) void {
+        if (self.connecting) |*state| {
+            state.stage.set(fmt, args);
+        }
+    }
+
+    /// The panel, drawn again: the next frame of its spinner and whatever the
+    /// sentence has become. The attendant's, and nobody else's while it runs.
+    fn showConnecting(self: *App) void {
+        if (self.connecting == null) {
+            return;
+        }
+        const state = &self.connecting.?;
+        // Anything under a third of a second should not flash a panel at all.
+        if (monotonicMs() - state.started < 300) {
+            return;
+        }
+        state.frame = (state.frame + 1) % SPINNER.len;
+        draw.connecting(self);
+    }
+
+    /// Whether somebody stopped waiting after the connection was made and
+    /// before there was anything of it to show - and if so, the tab is put back
+    /// to having nothing in it. A connection whose first screen was given up on
+    /// is not one to be left standing in: its list is half read or not read at
+    /// all, and esc on a panel that says "gives up" means back to where the
+    /// connection was chosen.
+    fn gaveUp(self: *App) bool {
+        if (self.connecting == null) {
+            return false;
+        }
+        const state = &self.connecting.?;
+        if (!state.given_up.load(.acquire)) {
+            return false;
+        }
+        self.saveActiveTab();
+        self.tabs.items[self.active_tab].deinit(self.allocator);
+        self.tabs.items[self.active_tab] = Tab.init(self.allocator);
+        self.loadActiveTab();
+        self.say("gave up on {s}", .{state.what});
+        return true;
     }
 
     // --- the SQL editor ---
@@ -1037,6 +1354,16 @@ pub const App = struct {
     /// statement ends and the next begins, from the gap between calls.
     fn keepGoing(context: *anyopaque) bool {
         const self: *App = @ptrCast(@alignCast(context));
+        if (self.connecting) |*state| {
+            // The statements that follow a connection are part of opening it as
+            // far as anybody watching can tell, so they keep its panel and its
+            // key. Both are the attendant's for now - the screen is not this
+            // thread's to draw on - and all there is to do here is pass on what
+            // it heard. Giving up on one statement gives up on the rest, each
+            // of which starts with `cancelled` cleared.
+            self.running.cancelled = state.given_up.load(.acquire);
+            return !self.running.cancelled;
+        }
         const now = monotonicMs();
         if (now - self.running.ticked < 90) {
             return !self.running.cancelled;
@@ -1056,12 +1383,11 @@ pub const App = struct {
     /// One line at the bottom, over the frame that is already on screen: vaxis
     /// writes only the cells that changed, so nothing else is touched.
     fn drawSpinner(self: *App, elapsed: f64) void {
-        const frames = [_][]const u8{ "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏" };
-        self.running.frame = (self.running.frame + 1) % frames.len;
+        self.running.frame = (self.running.frame + 1) % SPINNER.len;
         const size = self.screen.size();
         var line: [160]u8 = undefined;
         const text = std.mem.print(&line, " {s} running {d:.1}s   ctrl+c stops it", .{
-            frames[self.running.frame],
+            SPINNER[self.running.frame],
             elapsed / 1000.0,
         }) catch return;
         self.screen.moveTo(size.rows - 2, 0);
@@ -3613,46 +3939,30 @@ pub const App = struct {
         }
         var report: std.ArrayList(u8) = .empty;
         defer report.deinit(self.allocator);
-        const opened = database.Db.open(self.allocator, target, &report) catch {
+        var naming = std.heap.ArenaAllocator.init(self.allocator);
+        defer naming.deinit();
+        const what = conns.withoutPassword(naming.allocator(), target) catch "";
+        var attendant = self.attend(target, what);
+        defer self.connecting = null;
+        defer attendant.stop();
+        const opened = self.dial(target, &report) catch |err| {
+            attendant.stop();
+            if (err == error.GivenUp) {
+                self.say("gave up on {s}", .{what});
+                return;
+            }
             self.complain("{s}", .{if (report.items.len != 0) report.items else "cannot open it"});
             return;
         };
-        // What was open, if anything was: this is also how something is opened
-        // by name from the list of connections, where nothing is.
-        if (self.connected) {
-            self.conn.close();
+        // What was open, if anything was, is closed on the way: this is also how
+        // something is opened by name from the list of connections, where
+        // nothing is.
+        const taken = self.take(opened, target);
+        attendant.stop();
+        if (self.gaveUp()) {
+            return;
         }
-        self.setFollow(0);
-        self.clearMarks();
-        self.conn = opened;
-        self.connected = true;
-        if (self.watch_armed) {
-            self.watchStatements();
-        }
-        self.allocator.free(self.owned_path);
-        // Without the password: this is what gets shown, and what the open form
-        // starts from.
-        var scratch = std.heap.ArenaAllocator.init(self.allocator);
-        defer scratch.deinit();
-        self.owned_path = try self.allocator.dupe(u8, try conns.withoutPassword(scratch.allocator(), target));
-        self.path = self.owned_path;
-        // The same question `connect` asks, for the same reason: a connection
-        // marked read-only in the list is read-only however it was reached.
-        self.read_only = self.markedReadOnly();
-        self.view = .grid;
-        try self.setTable(null);
-        self.grid.schema.clearRetainingCapacity();
-        try self.firstSchema();
-        self.clearConditions();
-        self.grid.where_text.clearRetainingCapacity();
-        self.cursor.hidden.clearRetainingCapacity();
-        self.cursor.marked.clearRetainingCapacity();
-        self.sidebar.selected = 0;
-        self.grid.page = 0;
-        try self.loadObjects();
-        if (self.current()) |object| {
-            try self.openTable(object.name);
-        }
+        try taken;
         self.say("{s} opened", .{self.conn.describe()});
     }
 
@@ -4756,6 +5066,23 @@ pub fn divCeil(a: usize, b: usize) usize {
 // thing for the largest one here.
 
 const testing = std.testing;
+
+test "an attempt is made on a thread of its own and says what became of it" {
+    // Nothing listens on port 1, and being refused is an answer that needs no
+    // server to give it.
+    const attempt = try Attempt.start(testing.allocator, "redis://127.0.0.1:1/0");
+    var byte: [1]u8 = undefined;
+    try testing.expectEqual(@as(isize, 1), std.c.read(attempt.done[0], &byte, 1));
+    defer attempt.destroy();
+    try testing.expectEqual(Attempt.State.finished, attempt.state.load(.acquire));
+    try testing.expectError(error.Driver, attempt.outcome);
+    try testing.expectEqualStrings("cannot reach redis at 127.0.0.1:1", attempt.report.items);
+    // What it was doing when it stopped is still there to be read.
+    var text: [database.Stage.SIZE]u8 = undefined;
+    try testing.expectEqualStrings("connecting to 127.0.0.1:1", attempt.stage.read(&text));
+    // It is over, so there is nothing left to walk away from.
+    try testing.expect(!attempt.abandon());
+}
 
 test "the filter form's operators mean what they say, and an unknown one is equality" {
     try testing.expectEqual(database.ask.Op.eq, operatorOf("="));

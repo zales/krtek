@@ -209,6 +209,7 @@ pub const Client = struct {
             };
         }
 
+        db.tell("waiting for {s} to answer", .{self.host});
         var source = StreamSource{ .stream = stream, .answered = answered };
         const response = readResponse(arena, source.source(), request.method, request.limit) catch |err| {
             self.disconnect();

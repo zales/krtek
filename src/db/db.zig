@@ -202,6 +202,69 @@ pub const Progress = struct {
     }
 };
 
+/// What a connection that is being opened is busy with, as a sentence somebody
+/// waiting for it can read: looking a name up, waiting for an address to answer,
+/// a handshake, a login.
+///
+/// A connection is opened on a thread of its own - a name that does not resolve
+/// and an address that does not answer both sit inside a call that cannot be
+/// asked whether to carry on, and the screen has to be able to say so meanwhile.
+/// So this is the one thing here two threads touch: the one opening writes it,
+/// the one drawing reads it, and `busy` is held for the length of a copy.
+pub const Stage = struct {
+    busy: std.atomic.Value(bool) = .init(false),
+    text: [SIZE]u8 = undefined,
+    len: usize = 0,
+
+    pub const SIZE = 120;
+
+    pub fn set(self: *Stage, comptime fmt: []const u8, args: anytype) void {
+        var line: [SIZE]u8 = undefined;
+        var writer = std.Io.Writer.fixed(&line);
+        // A sentence that does not fit is cut where the room ran out, which is
+        // what whoever draws it would have done with it anyway.
+        writer.print(fmt, args) catch {};
+        const said = writer.buffered();
+        self.lock();
+        defer self.unlock();
+        @memcpy(self.text[0..said.len], said);
+        self.len = said.len;
+    }
+
+    /// The sentence as it stands, copied out: the other thread may be half way
+    /// through the next one.
+    pub fn read(self: *Stage, into: *[SIZE]u8) []const u8 {
+        self.lock();
+        defer self.unlock();
+        @memcpy(into[0..self.len], self.text[0..self.len]);
+        return into[0..self.len];
+    }
+
+    fn lock(self: *Stage) void {
+        while (self.busy.swap(true, .acquire)) {
+            std.atomic.spinLoopHint();
+        }
+    }
+
+    fn unlock(self: *Stage) void {
+        self.busy.store(false, .release);
+    }
+};
+
+/// Who is listening to what this thread is doing, if anybody is. Per thread,
+/// because an attempt that was given up on goes on running until its call comes
+/// back, and what it says by then must not land on the screen of the next one.
+pub threadlocal var listening: ?*Stage = null;
+
+/// Say what is being done now, to whoever is listening. Called from wherever a
+/// connection is made - which is also where one is made again, in the middle of
+/// a statement, with nobody listening; that costs one comparison.
+pub fn tell(comptime fmt: []const u8, args: anytype) void {
+    if (listening) |stage| {
+        stage.set(fmt, args);
+    }
+}
+
 /// One cell. Text and blob point into the driver's memory and stay valid until
 /// the cursor moves on.
 pub const Value = union(enum) {
@@ -506,37 +569,55 @@ pub const Db = union(enum) {
     /// Open whatever the target describes: a file path, or a URL like
     /// postgres://user:password@host:port/database.
     pub fn open(allocator: std.mem.Allocator, target: []const u8, report: *std.ArrayList(u8)) !Db {
+        return switch (engine(target)) {
+            .kafka => .{ .kafka = try kafka.Db.open(allocator, target, report) },
+            .s3 => .{ .s3 = try s3.Db.open(allocator, target, report) },
+            .azure => .{ .azure = try azure.Db.open(allocator, target, report) },
+            .rabbit => .{ .rabbit = try rabbit.Db.open(allocator, target, report) },
+            .sftp => .{ .sftp = try sftp.Db.open(allocator, target, report) },
+            .k8s => .{ .k8s = try k8s.Db.open(allocator, target, report) },
+            .redis => .{ .redis = try redis.Db.open(allocator, target, report) },
+            .mysql => .{ .mysql = try mysql.Db.open(allocator, target, report) },
+            .mssql => .{ .mssql = try mssql.Db.open(allocator, target, report) },
+            .postgres => .{ .postgres = try postgres.Db.open(allocator, target, report) },
+            .sqlite => .{ .sqlite = try sqlite.Db.open(allocator, target, report) },
+        };
+    }
+
+    /// Which driver a target belongs to, without opening it. Whatever nobody
+    /// else claims is a path to a SQLite file.
+    pub fn engine(target: []const u8) std.meta.Tag(Db) {
         if (kafka.owns(target)) {
-            return .{ .kafka = try kafka.Db.open(allocator, target, report) };
+            return .kafka;
         }
         if (s3.owns(target)) {
-            return .{ .s3 = try s3.Db.open(allocator, target, report) };
+            return .s3;
         }
         if (azure.owns(target)) {
-            return .{ .azure = try azure.Db.open(allocator, target, report) };
+            return .azure;
         }
         if (rabbit.owns(target)) {
-            return .{ .rabbit = try rabbit.Db.open(allocator, target, report) };
+            return .rabbit;
         }
         if (sftp.owns(target)) {
-            return .{ .sftp = try sftp.Db.open(allocator, target, report) };
+            return .sftp;
         }
         if (k8s.owns(target)) {
-            return .{ .k8s = try k8s.Db.open(allocator, target, report) };
+            return .k8s;
         }
         if (redis.owns(target)) {
-            return .{ .redis = try redis.Db.open(allocator, target, report) };
+            return .redis;
         }
         if (mysql.owns(target)) {
-            return .{ .mysql = try mysql.Db.open(allocator, target, report) };
+            return .mysql;
         }
         if (mssql.owns(target)) {
-            return .{ .mssql = try mssql.Db.open(allocator, target, report) };
+            return .mssql;
         }
         if (isPostgresUrl(target)) {
-            return .{ .postgres = try postgres.Db.open(allocator, target, report) };
+            return .postgres;
         }
-        return .{ .sqlite = try sqlite.Db.open(allocator, target, report) };
+        return .sqlite;
     }
 
     pub fn close(self: Db) void {
@@ -1312,6 +1393,43 @@ fn isPostgresUrl(target: []const u8) bool {
     }
     // A bare keyword string, the way psql accepts it.
     return std.mem.find(u8, target, "host=") != null or std.mem.find(u8, target, "dbname=") != null;
+}
+
+test "a stage holds the last sentence said, cut to what fits" {
+    var stage = Stage{};
+    var out: [Stage.SIZE]u8 = undefined;
+    try std.testing.expectEqualStrings("", stage.read(&out));
+    stage.set("connecting to {s}:{d}", .{ "db.example", 5432 });
+    try std.testing.expectEqualStrings("connecting to db.example:5432", stage.read(&out));
+    stage.set("looking up {s}", .{"db.example"});
+    try std.testing.expectEqualStrings("looking up db.example", stage.read(&out));
+    // A name longer than the panel is wide is not a reason to say nothing.
+    const long: [300]u8 = @splat('x');
+    stage.set("looking up {s}", .{&long});
+    const said = stage.read(&out);
+    try std.testing.expectEqual(Stage.SIZE, said.len);
+    try std.testing.expect(std.mem.startsWith(u8, said, "looking up xxx"));
+}
+
+test "what is being done is told to whoever listens, and to nobody otherwise" {
+    tell("nobody hears {d}", .{1});
+    var stage = Stage{};
+    var out: [Stage.SIZE]u8 = undefined;
+    listening = &stage;
+    defer listening = null;
+    tell("TLS handshake with {s}", .{"db.example"});
+    try std.testing.expectEqualStrings("TLS handshake with db.example", stage.read(&out));
+}
+
+test "a target says which driver it is for before anything is opened" {
+    try std.testing.expectEqual(.postgres, Db.engine("postgres://u@h/db"));
+    try std.testing.expectEqual(.postgres, Db.engine("host=h dbname=db"));
+    try std.testing.expectEqual(.mysql, Db.engine("mariadb://u@h/db"));
+    try std.testing.expectEqual(.redis, Db.engine("redis://h:6379/0"));
+    try std.testing.expectEqual(.k8s, Db.engine("k8s://"));
+    // Whatever nobody claims is a file, which is the one thing opened in place.
+    try std.testing.expectEqual(.sqlite, Db.engine("demo.db"));
+    try std.testing.expectEqual(.sqlite, Db.engine("/srv/data/demo.db"));
 }
 
 test "a postgres target is told apart from a file" {
