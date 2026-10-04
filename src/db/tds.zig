@@ -142,15 +142,20 @@ pub const Connection = struct {
         options: Options,
         why: *db.List,
     ) !*Connection {
-        const self = try allocator.create(Connection);
-        errdefer allocator.destroy(self);
-        self.* = .{
-            .allocator = allocator,
-            .stream = net.connect(allocator, host, port) catch {
-                try why.print(allocator, "cannot reach {s}:{d}", .{ host, port });
-                return error.Driver;
-            },
+        var stream = net.connect(allocator, host, port) catch {
+            try why.print(allocator, "cannot reach {s}:{d}", .{ host, port });
+            return error.Driver;
         };
+        const self = allocator.create(Connection) catch |err| {
+            stream.close();
+            return err;
+        };
+        self.* = .{ .allocator = allocator, .stream = stream };
+        // One way out for everything below, and only one: `close` gives the
+        // connection itself back as well. With a second errdefer freeing it
+        // too, a server that hung up during the prelogin - or a handshake that
+        // failed - freed it twice, and that is not an error message, it is the
+        // program gone.
         errdefer self.close();
         self.stream.setTimeout(net.READ_TIMEOUT_MS);
 
