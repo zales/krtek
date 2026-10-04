@@ -57,6 +57,11 @@ until $SQLCMD -Q "SELECT 1" >/dev/null 2>&1; do
 	if [ "$tries" -gt 60 ]; then
 		echo " gave up" >&2
 		docker logs --tail 40 "$NAME" >&2
+		# The image is amd64 and nothing else. On Apple Silicon it runs under
+		# whatever Docker emulates with, and under QEMU the server segfaults
+		# before it listens - which reads like a broken image and is a setting.
+		docker logs "$NAME" 2>&1 | grep -q "qemu: uncaught target signal" &&
+			echo "the server died under QEMU: on Apple Silicon this image needs Docker Desktop's Apple Virtualization framework with Rosetta" >&2
 		exit 1
 	fi
 	printf .

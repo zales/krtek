@@ -11,6 +11,9 @@ usage: tests/screen.py <database> [keys ...]
 Keys are given as literal text, or as names in braces:
 {down} {up} {left} {right} {enter} {tab} {esc} {pgdn} {pgup} {home} {end}
 {bs} {ctrl-x} {wait} {keep}
+
+SCREEN_SLOW=3 makes every wait three times as long, for a machine that is busy
+with something else.
 """
 
 import base64
@@ -30,6 +33,13 @@ import fcntl
 # different shape - a list that scrolls needs a window shorter than the list.
 ROWS = int(os.environ.get("SCREEN_ROWS", 32))
 COLS = int(os.environ.get("SCREEN_COLS", 118))
+
+# How much longer than usual to wait for the app. Every wait here is a guess at
+# how long the app takes to answer a key, and a guess made on an idle machine is
+# short on a busy one: the screen is read before the answer is on it, and a test
+# fails that has nothing wrong with it. Slower rather than cleverer - waiting for
+# the output to go quiet would wait for ever on a screen that is following.
+SLOW = float(os.environ.get("SCREEN_SLOW", 1))
 
 NAMED = {
 	"down": "\x1b[B",
@@ -255,7 +265,7 @@ def run(database, script):
 	decoder = codecs.getincrementaldecoder("utf-8")("replace")
 
 	def drain(seconds=0.35):
-		deadline = time.time() + seconds
+		deadline = time.time() + seconds * SLOW
 		while time.time() < deadline:
 			ready, _, _ = select.select([fd], [], [], 0.05)
 			if not ready:

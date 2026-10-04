@@ -1027,7 +1027,13 @@ tests/kitty.py  x.db 'S' 'Cr'                            # keys as Ghostty sends
 tests/kitty.py  x.db '{shift}{f13}{kpdown}'               # keys that are not text
 tests/screen.py x.db '{tab}' 'Cc' | grep CLIPBOARD       # what a copy key sent
 SCREEN_RAW=/tmp/raw.bin tests/screen.py x.db '{keep}'    # keep the escapes too
+SCREEN_SLOW=3 tests/k8s.sh                               # wait three times as long
 ```
+
+Every wait in the harness is a guess at how long the app takes to answer a key.
+On a machine that is busy with something else the guess is short - the screen is
+read while the answer is still on its way, and a test fails that has nothing
+wrong with it - and `SCREEN_SLOW` is how to say so.
 
 [tests/kitty.py](tests/kitty.py) drives the same binary but sends keys the way a
 terminal with the kitty keyboard protocol does - `shift+s` as `CSI 115:83;2;83u`
@@ -1133,12 +1139,6 @@ and every way in that can fail: a wrong password, a vhost that is not there, and
 the AMQP port, which is the mistake everybody makes once. It browses no messages,
 because browsing messages is what this driver refuses to do.
 
-```sh
-zig build && ./tests/rabbit.sh
-```
-
-[tests/postgres.sh](tests/postgres.sh) and [tests/mysql.sh](tests/mysql.sh) came
-last and should have come first: everything exotic here was being checked against
 What it does to messages it does through the console, on purpose, and counts
 them with `rabbitmqctl` afterwards: `PEEK` has to leave five where there were
 five, and `DRAIN` three. Then the grid - a queue declared with `i` and removed
@@ -1149,6 +1149,12 @@ space in its name came back as a queue called `dead`; the exchange with no name
 declared as one called `direct`; and the broker's own `amq.` exchanges declared
 too, one of which it refuses.
 
+```sh
+zig build && ./tests/rabbit.sh
+```
+
+[tests/postgres.sh](tests/postgres.sh) and [tests/mysql.sh](tests/mysql.sh) came
+last and should have come first: everything exotic here was being checked against
 a real server while the two engines most people open were checked by hand. Each
 brings up its own and looks for what that engine does differently - PostgreSQL
 reads through the catalogs, has schemas that are not databases, streams a result
@@ -1175,6 +1181,12 @@ that will not finish being stopped with the connection still working
 afterwards. The one that found three faults in a single run exports the table
 and replays the file with plain `sqlcmd` rather than through krtek, so the file
 has to stand on its own.
+
+The image is amd64 and nothing else. On Apple Silicon it runs under whatever
+Docker emulates with, and under QEMU the server dies of a segmentation fault
+before it listens - which reads like a broken image and is a setting: Docker
+Desktop has to use the Apple Virtualization framework with Rosetta. The suite
+says so when that is what happened.
 
 ```sh
 zig build && ./tests/mssql.sh

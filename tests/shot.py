@@ -24,7 +24,7 @@ import time
 import xml.sax.saxutils as escaping
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from screen import BINARY, Screen, Style, parse
+from screen import BINARY, SLOW, Screen, Style, parse
 
 # The default palette of the terminal the shot pretends to be: krtek asks for the
 # background colour and draws its dark theme when it does not hear otherwise.
@@ -60,7 +60,9 @@ def capture(target, keys, rows, cols):
 	decoder = codecs.getincrementaldecoder("utf-8")("replace")
 
 	def drain(seconds):
-		deadline = time.time() + seconds
+		# As long as the harness waits, and longer when it is told the machine is
+		# busy: a shot taken before the answer arrived is a picture of a spinner.
+		deadline = time.time() + seconds * SLOW
 		while time.time() < deadline:
 			ready, _, _ = select.select([fd], [], [], 0.05)
 			if not ready:
