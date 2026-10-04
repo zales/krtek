@@ -111,10 +111,13 @@ has "and says how to stop waiting" "esc gives up"
 has "the panel names what is being opened" "redis://127.0.0.1:$PORT/0"
 has "and the step it is waiting on" "waiting for 127.0.0.1 to answer"
 
-# libpq asks for TLS first and waits to hear whether it may, which is as far as
-# this one gets - or, built without TLS, sends its startup packet and waits for
-# the server to ask who it is. Either way the step comes from inside libpq.
-PG_STEP='TLS handshake with 127.0.0.1\|logging in as app'
+# libpq asks for encryption first and waits to hear whether it may, which is as
+# far as this one gets. Which kind it asks for is the build's business: TLS, or
+# GSSAPI where it was built with that and the machine holds a Kerberos ticket
+# cache - the release for macOS on a Mac that has one - or neither, and then it
+# sends its startup packet and waits to be asked who it is. Whichever it is,
+# the step comes from inside libpq, and that is what is being checked.
+PG_STEP='TLS handshake with 127.0.0.1\|GSSAPI handshake with 127.0.0.1\|logging in as app'
 out=$(drawn "postgres://app:tajne-heslo@127.0.0.1:$PORT/db" '{sleep}')
 has "postgres says which step it is on" "$PG_STEP"
 has "the panel shows the target" "postgres://app@127.0.0.1:$PORT/db"
