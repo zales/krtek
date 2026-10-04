@@ -15,8 +15,16 @@ if [ ! -f "$PREFIX/lib/libmariadb.a" ]; then
 	echo "building the MariaDB connector $CONNECTOR as a static library"
 	curl -fsSL "https://github.com/mariadb-corporation/mariadb-connector-c/archive/refs/tags/v$CONNECTOR.tar.gz" -o /tmp/connector.tar.gz
 	mkdir -p /tmp/connector && tar xzf /tmp/connector.tar.gz -C /tmp/connector --strip-components=1
+	# The ways of logging in that a server may ask for, inside the archive. The
+	# connector builds all but the oldest as plugins it loads from a directory at
+	# run time - one that is only on the machine that built it - so a static
+	# binary could log in only with mysql_native_password, and MySQL 8 asks for
+	# caching_sha2_password by default. ed25519 is MariaDB's.
 	cmake -S /tmp/connector -B /tmp/connector/build -Wno-dev \
-		-DCMAKE_BUILD_TYPE=Release -DWITH_SSL=OPENSSL -DWITH_UNIT_TESTS=OFF >/dev/null
+		-DCMAKE_BUILD_TYPE=Release -DWITH_SSL=OPENSSL -DWITH_UNIT_TESTS=OFF \
+		-DCLIENT_PLUGIN_CACHING_SHA2_PASSWORD=STATIC \
+		-DCLIENT_PLUGIN_SHA256_PASSWORD=STATIC \
+		-DCLIENT_PLUGIN_CLIENT_ED25519=STATIC >/dev/null
 	cmake --build /tmp/connector/build --target mariadbclient -j"$(nproc)" >/dev/null
 	mkdir -p "$PREFIX/lib" "$PREFIX/include/mariadb" "$PREFIX/lib/pkgconfig"
 	# The archive is called mariadbclient; everything else calls it mariadb.
