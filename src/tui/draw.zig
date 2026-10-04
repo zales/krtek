@@ -1324,11 +1324,16 @@ fn detail(app: *App, size: Size, side: usize, rows: usize) !void {
     const width = if (size.cols > left + 4) size.cols - left - 3 else 10;
     const top: usize = 3;
     // Only as tall as the value needs, so a short cell does not open a big hole.
-    var lines: usize = 1;
-    var counter = std.mem.splitScalar(u8, text, '\n');
-    while (counter.next()) |part| {
-        lines += @max(1, app_mod.divCeil(term.width(part), @max(1, width - 2)));
+    // Counted in the rows it is drawn in, by the same cut. It was counted a
+    // line's width over two columns fewer than a row holds, and a value of long
+    // lines came out shorter than it is drawn: its end could not be scrolled to,
+    // and nothing said there was more.
+    var rows_needed: usize = 0;
+    var counting = text;
+    while (counting.len != 0) : (rows_needed += 1) {
+        _ = wrapRow(&counting, width - 4);
     }
+    const lines: usize = 1 + @max(1, rows_needed);
     // One row for each of the frame's edges, on top of the value itself.
     const height: usize = @max(4, @min(@min(rows - 2, 15), lines + 1));
     // What the keys move through, left where they can read it.
@@ -1415,14 +1420,7 @@ fn detail(app: *App, size: Size, side: usize, rows: usize) !void {
     // lines would jump over the wrapped part of one.
     var skipped: usize = 0;
     while (skipped < app.detail_at and rest.len != 0) : (skipped += 1) {
-        const newline = std.mem.findScalar(u8, rest, '\n');
-        const chunk = if (newline) |at| rest[0..at] else rest;
-        const piece = term.fit(chunk, width - 4);
-        if (piece.text.len < chunk.len) {
-            rest = rest[piece.text.len..];
-        } else {
-            rest = if (newline) |at| rest[at + 1 ..] else "";
-        }
+        _ = wrapRow(&rest, width - 4);
     }
     while (line + 1 < top + height) : (line += 1) {
         screen.moveTo(line, left + 1);
@@ -1432,16 +1430,9 @@ fn detail(app: *App, size: Size, side: usize, rows: usize) !void {
             fill(app, ' ', width - 3);
             continue;
         }
-        const newline = std.mem.findScalar(u8, rest, '\n');
-        const chunk = if (newline) |at| rest[0..at] else rest;
-        const piece = term.fit(chunk, width - 4);
+        const piece = wrapRow(&rest, width - 4);
         screen.put(piece.text);
         fill(app, ' ', width - 3 - piece.cols);
-        if (piece.text.len < chunk.len) {
-            rest = rest[piece.text.len..];
-        } else {
-            rest = if (newline) |at| rest[at + 1 ..] else "";
-        }
     }
     screen.reset();
     // Where in the value this is, when there is more of it than fits.
@@ -1455,6 +1446,24 @@ fn detail(app: *App, size: Size, side: usize, rows: usize) !void {
     else
         "enter/esc closes";
     box(app, top, left, width, height, column, hint, C.accent);
+}
+
+/// One row of a value wrapped to `cols` columns: what of `rest` goes on it, with
+/// `rest` moved past it - and past the line break too, where the row is the end
+/// of a line. The whole-value view counts, scrolls and draws its rows with this,
+/// so the rows the scroll is limited to are the rows there are.
+fn wrapRow(rest: *[]const u8, cols: usize) term.Fit {
+    const newline = std.mem.findScalar(u8, rest.*, '\n');
+    const line = if (newline) |at| rest.*[0..at] else rest.*;
+    const piece = term.fit(line, cols);
+    // Nothing that fits is the rest of the line not fitting at all; it is left
+    // out rather than tried again on every row after.
+    if (piece.text.len < line.len and piece.text.len != 0) {
+        rest.* = rest.*[piece.text.len..];
+    } else {
+        rest.* = if (newline) |at| rest.*[at + 1 ..] else "";
+    }
+    return piece;
 }
 
 fn note(app: *App, left: usize, width: usize, text: []const u8) void {
@@ -2546,6 +2555,38 @@ test "the last columns of a value that is not UTF-8 are still the end of it" {
             try testing.expect(term.width(tail(text, max)) <= max);
         }
     }
+}
+
+test "a value is counted in the rows it is drawn in" {
+    // Every line one column longer than a row: two rows each, where the count
+    // used to say one, and the end of the value could not be scrolled to.
+    const value = "aaaaaaaaaaa\nbbbbbbbbbbb\nccccccccccc\nEND";
+    try testing.expectEqual(@as(usize, 7), rowsOf(value, 10));
+    // A wide character is not cut in two, so a row of them holds one column less.
+    try testing.expectEqual(@as(usize, 3), rowsOf("日本語日本語", 5));
+    // Empty lines are rows; the end of the value after a last line break is not.
+    try testing.expectEqual(@as(usize, 3), rowsOf("a\n\nb", 10));
+    try testing.expectEqual(@as(usize, 1), rowsOf("a\n", 10));
+    try testing.expectEqual(@as(usize, 0), rowsOf("", 10));
+    // And the rows hold all of it, in order.
+    var rest: []const u8 = value;
+    var joined: std.ArrayList(u8) = .empty;
+    defer joined.deinit(testing.allocator);
+    while (rest.len != 0) {
+        const piece = wrapRow(&rest, 10);
+        try testing.expect(piece.cols <= 10);
+        try joined.appendSlice(testing.allocator, piece.text);
+    }
+    try testing.expectEqualStrings("aaaaaaaaaaabbbbbbbbbbbcccccccccccEND", joined.items);
+}
+
+fn rowsOf(value: []const u8, cols: usize) usize {
+    var rows: usize = 0;
+    var rest = value;
+    while (rest.len != 0) : (rows += 1) {
+        _ = wrapRow(&rest, cols);
+    }
+    return rows;
 }
 
 test "a password is dots, and as many of them as it has characters" {

@@ -875,8 +875,11 @@ pub fn charWidth(point: u21) u8 {
     return @intCast(@min(2, width(buf[0..len])));
 }
 
+/// A prefix of some text and the columns it takes.
+pub const Fit = struct { text: []const u8, cols: usize };
+
 /// The longest prefix of `text` that fits in `max` columns, plus its width.
-pub fn fit(text: []const u8, max: usize) struct { text: []const u8, cols: usize } {
+pub fn fit(text: []const u8, max: usize) Fit {
     var total: usize = 0;
     var end: usize = 0;
     // A grapheme cluster at a time, so a cell is never cut in the middle of one -
