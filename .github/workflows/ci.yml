@@ -24,9 +24,8 @@ jobs:
           - arch: x86_64
             runner: macos-15-intel
     env:
-      # The keg-only libraries keep their .pc files to themselves. The connector
-      # the binary links is the one built below, so its .pc comes first.
-      PKG_CONFIG_PATH: /tmp/mariadb-static/lib/pkgconfig:/opt/homebrew/opt/libpq/lib/pkgconfig:/usr/local/opt/libpq/lib/pkgconfig
+      # The keg-only libraries keep their .pc files to themselves.
+      PKG_CONFIG_PATH: /opt/homebrew/opt/libpq/lib/pkgconfig:/opt/homebrew/opt/mariadb-connector-c/lib/pkgconfig:/usr/local/opt/libpq/lib/pkgconfig:/usr/local/opt/mariadb-connector-c/lib/pkgconfig
     steps:
       - uses: actions/checkout@v4
       - uses: mlugg/setup-zig@v2
@@ -53,8 +52,13 @@ jobs:
 
       # -Dcpu=baseline for the same reason as in the release: a binary tuned to
       # the runner's CPU dies with an illegal instruction on anybody else's.
+      #
+      # The connector's .pc is put first for this step alone. For the whole job it
+      # is found by the tests as well, which are not static and ask pkg-config
+      # too: they got the archive without the zlib it needs, and did not link.
       - name: build
         run: |
+          PKG_CONFIG_PATH="/tmp/mariadb-static/lib/pkgconfig:$PKG_CONFIG_PATH" \
           zig build -Doptimize=safe -Dstatic -Dcpu=baseline \
             -Dlibpq="$(brew --prefix libpq)" -Dmariadb=/tmp/mariadb-static
 

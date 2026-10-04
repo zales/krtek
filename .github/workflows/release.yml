@@ -25,7 +25,7 @@ jobs:
           - arch: x86_64
             runner: macos-15-intel
     env:
-      PKG_CONFIG_PATH: /tmp/mariadb-static/lib/pkgconfig:/opt/homebrew/opt/libpq/lib/pkgconfig:/usr/local/opt/libpq/lib/pkgconfig
+      PKG_CONFIG_PATH: /opt/homebrew/opt/libpq/lib/pkgconfig:/usr/local/opt/libpq/lib/pkgconfig
     steps:
       - uses: actions/checkout@v4
         with:
@@ -66,6 +66,7 @@ jobs:
       # function it is written in.
       - name: build
         run: |
+          PKG_CONFIG_PATH="/tmp/mariadb-static/lib/pkgconfig:$PKG_CONFIG_PATH" \
           zig build -Doptimize=safe -Dstatic -Dstrip -Dcpu=baseline \
             -Dversion="${{ inputs.tag || github.ref_name }}" \
             -Dlibpq="$(brew --prefix libpq)" -Dmariadb=/tmp/mariadb-static
