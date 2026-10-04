@@ -519,7 +519,7 @@ DELETE QUEUE orders              and CLOSE, which hangs up on a client
 ```
 
 Nothing in that list happens while browsing. Declaring, binding and deleting also
-work from the grid - `i` on `queues` declares one, `d` removes it - and an *edit*
+work from the grid - `i` on `queues` declares one, `x` removes it - and an *edit*
 is refused, because a queue is declared and not altered. A dump of a vhost is
 those commands, so what comes out goes back in: that is the topology, not the
 messages, which is the only honest thing a dump of a broker can be.
@@ -1139,6 +1139,16 @@ zig build && ./tests/rabbit.sh
 
 [tests/postgres.sh](tests/postgres.sh) and [tests/mysql.sh](tests/mysql.sh) came
 last and should have come first: everything exotic here was being checked against
+What it does to messages it does through the console, on purpose, and counts
+them with `rabbitmqctl` afterwards: `PEEK` has to leave five where there were
+five, and `DRAIN` three. Then the grid - a queue declared with `i` and removed
+with `x`, an edit refused in the driver's own words - a connection marked
+read-only that does neither, and a dump of one vhost replayed into another. That
+last one found three faults at once: a name written bare, so the queue with a
+space in its name came back as a queue called `dead`; the exchange with no name
+declared as one called `direct`; and the broker's own `amq.` exchanges declared
+too, one of which it refuses.
+
 a real server while the two engines most people open were checked by hand. Each
 brings up its own and looks for what that engine does differently - PostgreSQL
 reads through the catalogs, has schemas that are not databases, streams a result

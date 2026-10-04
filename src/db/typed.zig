@@ -41,6 +41,27 @@ pub fn split(arena: std.mem.Allocator, text: []const u8) ![]const []const u8 {
     return out.items;
 }
 
+/// One argument, written so that `split` reads it back as the same argument: as
+/// it is where that is enough, and in quotes where it has a space in it or is
+/// empty - an empty one written bare is no argument at all, and the ones after
+/// it all move up by one.
+///
+/// `split` interprets nothing inside quotes, so there is nothing to escape, and
+/// the quote used is whichever kind the text does not have in it. A text with
+/// both kinds and a space is the one thing this cannot carry: it is written in
+/// double quotes and comes back cut at the first of them.
+pub fn word(out: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocator, text: []const u8) !void {
+    const bare = text.len != 0 and text[0] != '"' and text[0] != '\'' and
+        std.mem.indexOfAny(u8, text, " \t") == null;
+    if (bare) {
+        return out.appendSlice(allocator, text);
+    }
+    const quote: u8 = if (std.mem.indexOfScalar(u8, text, '"') == null) '"' else '\'';
+    try out.append(allocator, quote);
+    try out.appendSlice(allocator, text);
+    try out.append(allocator, quote);
+}
+
 /// Whether these bytes can be put on a screen. What a blob, a message or a file
 /// holds is nobody's promise, and a terminal handed a JPEG stops being a
 /// terminal - so what cannot be read as text is offered as its size instead.
@@ -90,6 +111,27 @@ test "a typed line comes apart the way somebody typing it would expect" {
     // was typed is what was meant, as far as anything here can tell.
     const open = try split(arena, "GET \"unclosed");
     try testing.expectEqualStrings("unclosed", open[1]);
+}
+
+test "what is written as one argument is read back as one" {
+    var scratch = std.heap.ArenaAllocator.init(testing.allocator);
+    defer scratch.deinit();
+    const arena = scratch.allocator();
+
+    for ([_][]const u8{ "orders", "dead letters", "", "order.#", "it's here", "say \"hi\" twice", "\"quoted\"", "tab\there" }) |text| {
+        var line: std.ArrayListUnmanaged(u8) = .empty;
+        try line.appendSlice(arena, "DECLARE QUEUE ");
+        try word(&line, arena, text);
+        try line.appendSlice(arena, " classic");
+        const args = try split(arena, line.items);
+        try testing.expectEqual(@as(usize, 4), args.len);
+        try testing.expectEqualStrings(text, args[2]);
+        try testing.expectEqualStrings("classic", args[3]);
+    }
+    // And a plain name is left as somebody would have typed it.
+    var plain: std.ArrayListUnmanaged(u8) = .empty;
+    try word(&plain, arena, "orders");
+    try testing.expectEqualStrings("orders", plain.items);
 }
 
 test "text is shown and bytes are not pretended to be text" {

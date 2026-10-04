@@ -656,18 +656,25 @@ pub const Db = struct {
                     "EXCHANGE"
                 else
                     "";
+                // Every name goes through `typed.word`, which puts quotes round one
+                // with a space in it. Written bare, `DECLARE QUEUE dead letters
+                // classic` is read back as a queue called `dead` - and a dump that
+                // makes a different queue from the one it was taken of is worse
+                // than no dump, because it looks as though it worked.
                 switch (value.kind) {
                     .delete => {
                         if (std.mem.eql(u8, value.table.name, "bindings")) {
-                            try out.print(allocator, "UNBIND {s} {s} {s}", .{
-                                db.ask.only(value.where, "source") orelse "?",
-                                db.ask.only(value.where, "destination") orelse "?",
-                                db.ask.only(value.where, "properties") orelse "?",
-                            });
+                            try out.appendSlice(allocator, "UNBIND");
+                            for ([_][]const u8{ "source", "destination", "properties" }) |column| {
+                                try out.append(allocator, ' ');
+                                try typed.word(&out, allocator, db.ask.only(value.where, column) orelse "?");
+                            }
                         } else if (std.mem.eql(u8, value.table.name, "connections")) {
-                            try out.print(allocator, "CLOSE {s}", .{name});
+                            try out.appendSlice(allocator, "CLOSE ");
+                            try typed.word(&out, allocator, name);
                         } else {
-                            try out.print(allocator, "DELETE {s} {s}", .{ kind, name });
+                            try out.print(allocator, "DELETE {s} ", .{kind});
+                            try typed.word(&out, allocator, name);
                         }
                     },
                     .update => try out.appendSlice(allocator, "-- a queue is declared, not altered"),
@@ -680,19 +687,41 @@ pub const Db = struct {
                                 try out.print(allocator, "-- {s} is bound to the default exchange by the broker", .{
                                     flat(db.ask.valueOf(value.cells, "destination")) orelse "?",
                                 });
-                            } else {
-                                try out.print(allocator, "BIND {s} {s} {s}", .{
+                            } else if (eql(flat(db.ask.valueOf(value.cells, "destination_type")) orelse "queue", "exchange")) {
+                                // `BIND` binds a queue. Writing one for an exchange
+                                // would put back a binding to a queue of that name,
+                                // which is a different thing and not there.
+                                try out.print(allocator, "-- {s} is bound to the exchange {s}, which BIND does not write", .{
                                     source,
                                     flat(db.ask.valueOf(value.cells, "destination")) orelse "?",
-                                    flat(db.ask.valueOf(value.cells, "routing_key")) orelse "",
                                 });
+                            } else {
+                                try out.appendSlice(allocator, "BIND ");
+                                try typed.word(&out, allocator, source);
+                                try out.append(allocator, ' ');
+                                try typed.word(&out, allocator, flat(db.ask.valueOf(value.cells, "destination")) orelse "?");
+                                // The key last and only where there is one: an
+                                // empty one is what leaving it out means.
+                                const key = flat(db.ask.valueOf(value.cells, "routing_key")) orelse "";
+                                if (key.len != 0) {
+                                    try out.append(allocator, ' ');
+                                    try typed.word(&out, allocator, key);
+                                }
                             }
                         } else if (kind.len == 0) {
                             try out.print(allocator, "-- {s} are the broker's own, and are not declared", .{value.table.name});
+                        } else if (std.mem.eql(u8, kind, "EXCHANGE") and (name.len == 0 or std.mem.startsWith(u8, name, "amq."))) {
+                            // The default exchange and the `amq.` ones come with the
+                            // vhost. Nobody declared them and nobody can: written
+                            // out, the nameless one came back as an exchange called
+                            // `direct`, and `amq.rabbitmq.trace` as an error.
+                            try out.print(allocator, "-- {s} is the broker's own, and is not declared", .{
+                                if (name.len == 0) "the default exchange" else name,
+                            });
                         } else {
-                            try out.print(allocator, "DECLARE {s} {s} {s}", .{
-                                kind,
-                                name,
+                            try out.print(allocator, "DECLARE {s} ", .{kind});
+                            try typed.word(&out, allocator, name);
+                            try out.print(allocator, " {s}", .{
                                 flat(db.ask.valueOf(value.cells, "type")) orelse
                                     if (std.mem.eql(u8, kind, "QUEUE")) "classic" else "direct",
                             });
@@ -1371,6 +1400,68 @@ pub const Ddl = struct {
 // ------------------------------------------------------------------- tests
 
 const testing = std.testing;
+
+test "what a dump writes is what the console reads back" {
+    var scratch = std.heap.ArenaAllocator.init(testing.allocator);
+    defer scratch.deinit();
+    const arena = scratch.allocator();
+    const queues = db.Table{ .name = "queues" };
+    const exchanges = db.Table{ .name = "exchanges" };
+    const bindings = db.Table{ .name = "bindings" };
+
+    // A queue with a space in its name, which is the one a bare name loses.
+    var line = try Db.wording(undefined, arena, .{ .change = .{ .kind = .insert, .table = queues, .cells = &.{
+        .{ .column = "name", .value = "dead letters" },
+        .{ .column = "type", .value = "quorum" },
+        .{ .column = "durable", .value = "false" },
+    } } });
+    var args = try typed.split(arena, line);
+    try testing.expectEqual(@as(usize, 5), args.len);
+    try testing.expectEqualStrings("dead letters", args[2]);
+    try testing.expectEqualStrings("quorum", args[3]);
+    try testing.expectEqualStrings("transient", args[4]);
+
+    // Bound, and taken away again, by the same name.
+    line = try Db.wording(undefined, arena, .{ .change = .{ .kind = .insert, .table = bindings, .cells = &.{
+        .{ .column = "source", .value = "events" },
+        .{ .column = "destination", .value = "dead letters" },
+        .{ .column = "destination_type", .value = "queue" },
+        .{ .column = "routing_key", .value = "order.#" },
+    } } });
+    args = try typed.split(arena, line);
+    try testing.expectEqual(@as(usize, 4), args.len);
+    try testing.expectEqualStrings("BIND", args[0]);
+    try testing.expectEqualStrings("dead letters", args[2]);
+    try testing.expectEqualStrings("order.#", args[3]);
+    line = try Db.wording(undefined, arena, .{ .change = .{ .kind = .delete, .table = queues, .where = &.{
+        .{ .column = "name", .value = "dead letters" },
+    } } });
+    try testing.expectEqualStrings("DELETE QUEUE \"dead letters\"", line);
+
+    // What comes with the vhost is said to be there and is not declared: the
+    // exchange with no name, and the ones the broker keeps for itself.
+    for ([_][]const u8{ "", "amq.direct", "amq.rabbitmq.trace" }) |name| {
+        line = try Db.wording(undefined, arena, .{ .change = .{ .kind = .insert, .table = exchanges, .cells = &.{
+            .{ .column = "name", .value = name },
+            .{ .column = "type", .value = "direct" },
+        } } });
+        try testing.expect(std.mem.startsWith(u8, line, "-- "));
+    }
+    line = try Db.wording(undefined, arena, .{ .change = .{ .kind = .insert, .table = exchanges, .cells = &.{
+        .{ .column = "name", .value = "events" },
+        .{ .column = "type", .value = "topic" },
+    } } });
+    try testing.expectEqualStrings("DECLARE EXCHANGE events topic", line);
+
+    // A binding between two exchanges is not one `BIND` can make, so it is not
+    // written as though it were.
+    line = try Db.wording(undefined, arena, .{ .change = .{ .kind = .insert, .table = bindings, .cells = &.{
+        .{ .column = "source", .value = "events" },
+        .{ .column = "destination", .value = "audit" },
+        .{ .column = "destination_type", .value = "exchange" },
+    } } });
+    try testing.expect(std.mem.startsWith(u8, line, "-- "));
+}
 
 test "a command line comes apart the way a shell would do it" {
     var scratch = std.heap.ArenaAllocator.init(testing.allocator);
