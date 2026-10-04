@@ -4145,7 +4145,7 @@ pub const App = struct {
         try form.wasNamed(column.original);
         // The engine's own types, not a list that happens to suit SQLite: MySQL
         // offers `varchar(255)`, PostgreSQL `timestamptz`.
-        const types = self.conn.ddl().types();
+        const types = try withOwnType(form.arena.allocator(), self.conn.ddl().types(), column.type);
         try form.choice("type", types, Form.indexOf(types, column.type));
         form.sameLine();
         form.inGroup(group);
@@ -4158,6 +4158,24 @@ pub const App = struct {
         try form.toggle("pk", column.pk);
         form.sameLine();
         form.inGroup(group);
+    }
+
+    /// The types a column's row offers: the engine's list, and the column's own
+    /// type on the end of it where the list does not have that. A list is a
+    /// handful of the usual ones and a table is whatever somebody declared -
+    /// `DECIMAL(15,2)`, `varchar(40)` - and a type the form could not show was
+    /// shown as the first one in the list, and then saved as it: opening the
+    /// alter form and adding a column changed the type of every column like that.
+    fn withOwnType(arena: std.mem.Allocator, types: []const []const u8, own: []const u8) ![]const []const u8 {
+        for (types) |known| {
+            if (std.ascii.eqlIgnoreCase(known, own)) {
+                return types;
+            }
+        }
+        const offered = try arena.alloc([]const u8, types.len + 1);
+        @memcpy(offered[0..types.len], types);
+        offered[types.len] = try arena.dupe(u8, own);
+        return offered;
     }
 
     /// Append another column row to an open create/alter form.
