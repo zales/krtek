@@ -643,10 +643,17 @@ pub const Db = struct {
         if (items.len == 0) {
             return null;
         }
+        return oneObject(arena, resource.singular, items[0]);
+    }
+
+    /// One object written out whole, under a line that says what it is. The
+    /// writer takes the list over with the line already in it; one made from the
+    /// bare slice would start at its first byte and write the object over it.
+    fn oneObject(arena: std.mem.Allocator, singular: []const u8, item: Json) error{OutOfMemory}!?[]const u8 {
         var out: List = .empty;
-        try out.print(arena, "# one {s}, as the cluster holds it\n", .{resource.singular});
-        var writer = std.Io.Writer.Allocating.initOwnedSlice(arena, out.items);
-        std.json.Stringify.value(items[0], .{ .whitespace = .indent_tab }, &writer.writer) catch return null;
+        try out.print(arena, "# one {s}, as the cluster holds it\n", .{singular});
+        var writer = std.Io.Writer.Allocating.fromArrayList(arena, &out);
+        std.json.Stringify.value(item, .{ .whitespace = .indent_tab }, &writer.writer) catch return null;
         return writer.written();
     }
 
@@ -2441,6 +2448,18 @@ test "a context offered from the kubeconfig survives the round trip into a targe
         // And nothing was read as a namespace, because none was asked for.
         try testing.expectEqualStrings("", parts.namespace);
     }
+}
+
+test "the structure view's object comes under the line that says what it is" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const pod = try std.json.parseFromSliceLeaky(Json, a, "{\"kind\":\"Pod\",\"metadata\":{\"name\":\"api-7c9\"}}", .{});
+    const text = (try Db.oneObject(a, "pod", pod)).?;
+    // The line first and the object whole after it: a writer that began again at
+    // the front of the list would leave the object alone, starting at its brace.
+    try testing.expectStringStartsWith(text, "# one pod, as the cluster holds it\n{\n\t\"kind\": \"Pod\",\n");
+    try testing.expectStringEndsWith(text, "\t\t\"name\": \"api-7c9\"\n\t}\n}");
 }
 
 test "a machine with no kubeconfig has no contexts to offer, and does not mind" {

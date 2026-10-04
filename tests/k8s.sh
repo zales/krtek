@@ -306,6 +306,20 @@ printf '%s' "$logged" | grep -q "listening on" || {
 }
 echo "ok: l on it shows that pod's log"
 
+# S shows one object of the kind whole, under a line that says what it is one of.
+# The line is written before the object, so the way this breaks is the object
+# landing on top of it.
+structure=$(python3 tests/screen.py "$ROOT" 'S' '{sleep}' '{keep}' 2>&1)
+printf '%s' "$structure" | grep -q "# one pod, as the cluster holds it" || {
+	printf '%s\n' "$structure" >&2
+	fail "the structure view should say what its object is one of"
+}
+printf '%s' "$structure" | grep -q '"metadata"' || {
+	printf '%s\n' "$structure" >&2
+	fail "the structure view should show the object itself"
+}
+echo "ok: S shows one pod whole, under the line that says it is one"
+
 # The kinds a cluster has that Kubernetes does not. k3s ships four definitions of
 # its own, which is what makes this checkable without installing anything: their
 # columns come out of the definition, the way kubectl gets them.
