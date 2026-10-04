@@ -188,7 +188,10 @@ pub const Db = struct {
         errdefer self.close();
         const home = self.home.allocator();
 
-        self.parts = address.parse(home, target) catch {
+        // A copy of its own. What comes out of the parser points into the text
+        // it was given, and the caller's text is the caller's: a saved connection
+        // hands over one it frees as soon as this returns, password and all.
+        self.parts = address.parse(home, try home.dupe(u8, target)) catch {
             try report.appendSlice(allocator, "that is not a kubernetes target");
             return error.Driver;
         };
