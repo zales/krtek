@@ -47,6 +47,8 @@ const usage =
     \\       krtek s3+http://key:secret@localhost:9000/bucket
     \\       krtek azure://account:key@container
     \\       krtek rabbit://guest@host:15672/vhost
+    \\       krtek mqtt://user@host:1883   everything a broker carries
+    \\       krtek mqtts://host/home/#     over TLS, and one branch of it
     \\       krtek sftp://user@host/srv/data
     \\       krtek k8s://                  the current kubeconfig context
     \\       krtek k8s://prod/payments     a context, and a namespace in it

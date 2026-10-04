@@ -81,6 +81,7 @@ footer { margin-top: 3.5rem; padding-top: 1.5rem; border-top: 1px solid var(--li
 		<span class="engine">S3</span>
 		<span class="engine">Azure Blob</span>
 		<span class="engine">RabbitMQ</span>
+		<span class="engine">MQTT</span>
 		<span class="engine">SFTP</span>
 		<span class="engine">Kubernetes</span>
 		<span class="engine">CSV files</span>
@@ -120,7 +121,7 @@ everyone who already trusts it.</p>
 
 <p><strong>It needs nothing installed.</strong> SQLite, libpq, the MariaDB
 connector, libssh2 and OpenSSL are linked into the binary, and Redis, Kafka, S3,
-Azure Blob, RabbitMQ, the Kubernetes API and SQL Server's TDS are spoken
+Azure Blob, RabbitMQ, MQTT, the Kubernetes API and SQL Server's TDS are spoken
 directly - down to the WebSocket a shell in a container needs, so no
 <code>kubectl</code> either.
 The Linux builds are static against musl and run on any distribution; the macOS

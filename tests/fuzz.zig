@@ -30,7 +30,7 @@
 const std = @import("std");
 const db = @import("db");
 
-const Target = enum { snappy, lz4, gzip, zstd, records, resp, http, listing, blobs, management };
+const Target = enum { snappy, lz4, gzip, zstd, records, resp, http, listing, blobs, management, mqtt };
 
 /// What one input may allocate: comfortably more than any parser needs for a real
 /// batch, and far less than a machine has.
@@ -118,6 +118,9 @@ fn run(gpa: std.mem.Allocator, target: Target, input: []const u8) !void {
             _ = try db.http.readResponse(a, source.source(), "GET", 1 << 20);
         },
         .listing => _ = try db.s3.parseListing(a, input),
+        // Packets off a broker's socket: a length in front of each, and inside a
+        // PUBLISH another one for the topic. Neither may be believed past the end.
+        .mqtt => db.mqtt.wire.fuzzPackets(input),
         .blobs => _ = try db.azure.parseListing(a, input),
         // The JSON is Zig's to parse; what is ours is the walk over it, the base64
         // in a message body and the flattening of whatever shape came back.
@@ -203,6 +206,14 @@ fn corpusFor(target: Target) []const []const u8 {
             &.{ 0x28, 0xb5, 0x2f, 0xfd, 0x24, 0x03, 0x19, 0x00, 0x00, 'a', 'b', 'c', 0x1b, 0xbf, 0x1a, 0x0e },
         },
         .records => &.{&batch},
+        .mqtt => &.{
+            // CONNACK, SUBACK, a PUBLISH at each quality, PUBREL, PINGRESP.
+            &.{ 0x20, 2, 0, 0 },
+            &.{ 0x90, 3, 0, 1, 2 },
+            &.{ 0x30, 10, 0, 3, 'a', '/', 'b', 'h', 'e', 'l', 'l', 'o' },
+            &.{ 0x33, 12, 0, 3, 'a', '/', 'b', 0, 7, 'h', 'e', 'l', 'l', 'o' },
+            &.{ 0x35, 7, 0, 1, 't', 0, 9, 'x', 'y', 0x62, 2, 0, 9, 0xd0, 0 },
+        },
         .resp => &.{
             "+OK\r\n",
             "-ERR no\r\n",

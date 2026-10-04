@@ -103,6 +103,7 @@ pub const Engine = enum {
     s3,
     azure,
     rabbit,
+    mqtt,
     sftp,
     k8s,
     /// Whatever this does not model: the target as it stands.
@@ -120,6 +121,7 @@ pub const Engine = enum {
             .s3 => "S3",
             .azure => "Azure",
             .rabbit => "RabbitMQ",
+            .mqtt => "MQTT",
             .sftp => "SFTP",
             .k8s => "Kubernetes",
             .other => "target",
@@ -138,8 +140,8 @@ pub const Engine = enum {
 
 /// In the order the form offers them, most used first.
 pub const ENGINES = [_][]const u8{
-    "SQLite", "PostgreSQL", "MySQL", "SQL Server", "Redis", "Kafka",  "S3",
-    "Azure",  "RabbitMQ",   "SFTP",  "Kubernetes", "CSV",   "target",
+    "SQLite", "PostgreSQL", "MySQL", "SQL Server", "Redis",      "Kafka", "S3",
+    "Azure",  "RabbitMQ",   "MQTT",  "SFTP",       "Kubernetes", "CSV",   "target",
 };
 
 test "the engine list offers every engine there is" {
@@ -190,6 +192,11 @@ pub fn engineOf(target: []const u8) Engine {
     for ([_][]const u8{ "rabbit://", "rabbitmq://", "rabbit+tls://", "rabbits://", "rabbitmq+tls://", "amqp://", "amqps://" }) |prefix| {
         if (std.ascii.startsWithIgnoreCase(target, prefix)) {
             return .rabbit;
+        }
+    }
+    for ([_][]const u8{ "mqtt://", "mqtts://", "mqtt+tls://", "mqtt+ssl://" }) |prefix| {
+        if (std.ascii.startsWithIgnoreCase(target, prefix)) {
+            return .mqtt;
         }
     }
     for ([_][]const u8{ "sftp://", "ssh://", "scp://" }) |prefix| {
@@ -270,6 +277,7 @@ pub fn compose(arena: std.mem.Allocator, shape: Shape) ![]const u8 {
         .s3 => if (shape.tls) "s3://" else "s3+http://",
         .azure => if (shape.tls) "azure://" else "azure+http://",
         .rabbit => if (shape.tls) "rabbits://" else "rabbit://",
+        .mqtt => if (shape.tls) "mqtts://" else "mqtt://",
         .sftp => "sftp://",
         .k8s => "k8s://",
         else => "",
@@ -344,6 +352,7 @@ pub fn decompose(arena: std.mem.Allocator, target: []const u8) ?Shape {
             shape.name = url.path;
             shape.tls = switch (engine) {
                 .kafka, .rabbit => !std.mem.eql(u8, url.scheme, "kafka") and !std.mem.eql(u8, url.scheme, "rabbit"),
+                .mqtt => !std.mem.eql(u8, url.scheme, "mqtt"),
                 .s3 => !std.mem.eql(u8, url.scheme, "s3+http"),
                 .azure => !std.mem.eql(u8, url.scheme, "azure+http"),
                 else => false,
@@ -1132,6 +1141,39 @@ test "a SQL Server target survives being taken apart and put back" {
     try std.testing.expectEqualStrings("objednavky", shape.name);
     try std.testing.expectEqualStrings(target, try compose(a, shape));
     try std.testing.expectEqualStrings("SQL Server", (Connection{ .name = "a", .target = target }).engine());
+}
+
+test "a broker is taken apart into what the form asks for, and put back" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    try std.testing.expectEqual(Engine.mqtt, engineOf("mqtt://broker"));
+    try std.testing.expectEqual(Engine.mqtt, engineOf("MQTTS://broker:8883"));
+    try std.testing.expectEqualStrings("MQTT", (Connection{ .name = "a", .target = "mqtt://broker" }).engine());
+    {
+        // What follows the host is the filter, slashes, + and # and all.
+        const target = "mqtts://ada@broker.example:8884/dum/+/teplota/#";
+        const shape = decompose(a, target).?;
+        try std.testing.expectEqual(Engine.mqtt, shape.engine);
+        try std.testing.expect(shape.tls);
+        try std.testing.expectEqualStrings("ada", shape.user);
+        try std.testing.expectEqualStrings("broker.example", shape.host);
+        try std.testing.expectEqualStrings("8884", shape.port);
+        try std.testing.expectEqualStrings("dum/+/teplota/#", shape.name);
+        try std.testing.expectEqualStrings(target, try compose(a, shape));
+    }
+    {
+        const shape = decompose(a, "mqtt://broker").?;
+        try std.testing.expect(!shape.tls);
+        try std.testing.expectEqualStrings("", shape.name);
+    }
+    // A spelling of its own and an option the form has no field for stay the
+    // one field they were.
+    try std.testing.expect(decompose(a, "mqtt+tls://broker") == null);
+    try std.testing.expect(decompose(a, "mqtt://broker?client=kuchyn") == null);
+    // And the password typed at the prompt comes off again without the filter.
+    try std.testing.expectEqualStrings("mqtt://ada@broker/dum/#", try withoutPassword(a, "mqtt://ada@broker/dum/#?password=tajne"));
 }
 
 test "a delimited file is told from a database by its name" {

@@ -5,7 +5,7 @@
 A database manager for the terminal, written in Zig: what a graphical client
 does - browse, edit, alter, dump, import - on a text screen, and quicker, because
 everything is a key press. **SQLite, PostgreSQL, MySQL/MariaDB, SQL Server, Redis,
-Kafka, S3, Azure Blob, RabbitMQ, SFTP and Kubernetes**, behind one interface -
+Kafka, S3, Azure Blob, RabbitMQ, MQTT, SFTP and Kubernetes**, behind one interface -
 and a **CSV file**, opened as a table.
 
 *Krtek* is Czech for a mole: a small thing that digs through what is underneath
@@ -52,7 +52,7 @@ architectures. The `.deb` installs the binary, the man page and the copyright, a
 **Depends on nothing at all**, so it goes on any Debian or Ubuntu of any age.
 
 **It needs nothing installed.** SQLite, libpq, the MariaDB connector, libssh2 and
-OpenSSL are linked into the binary, and Redis, Kafka, S3, Azure Blob, RabbitMQ,
+OpenSSL are linked into the binary, and Redis, Kafka, S3, Azure Blob, RabbitMQ, MQTT,
 the Kubernetes API and SQL Server's TDS are spoken directly - down to the WebSocket a shell in a
 container needs, so no `kubectl` either. The Linux
 builds are static against musl and run on any distribution - checked on Debian with nothing
@@ -75,6 +75,8 @@ zig build -Doptimize=safe
 ./zig-out/bin/krtek s3+http://key:secret@localhost:9000/bucket
 ./zig-out/bin/krtek azure://account:key@container
 ./zig-out/bin/krtek rabbit://guest@host:15672/vhost
+./zig-out/bin/krtek mqtt://user@host:1883   # everything a broker carries
+./zig-out/bin/krtek mqtts://host/home/#     # over TLS, and one branch of it
 ./zig-out/bin/krtek sftp://user@host/srv/data
 ./zig-out/bin/krtek k8s://                 # the kubeconfig's current context
 ./zig-out/bin/krtek k8s://prod/payments    # a context, and a namespace in it
@@ -554,6 +556,91 @@ Google Cloud Storage is **not** a driver here: it has an S3-compatible XML API,
 so `s3://key:secret@storage.googleapis.com/bucket` with HMAC keys is the shape
 that should work. It is untested - there was no account to try it against - so
 that is a suggestion rather than a claim.
+
+## MQTT
+
+**A broker holds nothing to list, and this driver does not pretend it does.**
+There is no "show me the topics" in MQTT: a topic exists while somebody
+publishes to it, and the only way to learn of one is to be subscribed when a
+message for it goes by. So that is what `krtek` does. It subscribes - to
+everything, unless the target names a filter - and the tables are what has
+arrived since:
+
+| table | what it is | `i` | edit | `x` |
+| --- | --- | --- | --- | --- |
+| `topics` | every topic heard from, with the last thing said on it | publishes | publishes the row again, with the change | clears the retained message |
+| `messages` | each message in the order it came, the newest last | publishes | refused: sent is sent | refused |
+| `subscriptions` | the filters this connection listens to | subscribes | changes the quality of service | unsubscribes |
+| `$SYS` | what the broker says about itself, where it does | - | - | - |
+
+**The retained messages arrive first**, so a moment after connecting `topics` is
+what the broker holds: the state of a house, the configuration of a fleet. `R`
+on `messages` follows the log as it grows.
+
+**What follows the host is the filter**, because a broker has no database to
+name. Nothing is everything, with the broker's own `$SYS` beside it; a path is
+that and nothing else, which is how a broker with a great deal going through it
+is looked at a branch at a time:
+
+```sh
+krtek mqtt://broker                     # everything, and $SYS
+krtek mqtt://ada@broker/home/#          # one branch; asks for the password
+krtek mqtts://broker:8883/home/+/temperature
+krtek "mqtt://broker?client=bench-1&keepalive=15"
+```
+
+**Something has to keep listening**, which is the one way this driver is unlike
+the others. A database answers when asked; a broker sends when it has something,
+wants some of it acknowledged, and takes a client that has been silent too long
+for gone. So the connection belongs to a thread of its own, which reads what
+arrives, acknowledges it and says it is still there twice in every keep-alive,
+while the interface is answered out of memory. Nothing is missed because nobody
+pressed a key. A connection that is lost says so in the header, what was heard
+stays on the screen, and the next thing asked for connects again and subscribes
+to what it was subscribed to.
+
+What is kept is bounded: the last fifty thousand messages, or sixty-four
+megabytes of them. The oldest go first, and `gb` says how many have.
+
+**The filter row speaks MQTT.** A condition on `topic` with a `+` or a `#` in it
+matches the way a subscription does, and so does anything typed into the raw
+field: `home/+/temperature` there is those topics, and a plain word is looked
+for in the topic and the payload.
+
+**It is MQTT 3.1.1**, written out in `src/db/mqtt/wire.zig` with no library:
+every broker speaks it, and what 5 adds is properties this would only skip. It
+subscribes at quality of service 2 so that a message is shown with the quality
+it was published with; a broker that grants less says so in `subscriptions`.
+
+The editor is a console - one command a line, and the payload is the rest of its
+line as it stands, braces and quotes and all:
+
+```
+PUBLISH home/lamp {"state": "on", "brightness": 80}
+PUBLISH -r -q 1 home/thermostat 22      retained, at quality 1
+RETAIN home/mode night                  the same as PUBLISH -r
+CLEAR home/thermostat                   clear the retained message
+SUBSCRIBE sensors/# 1
+UNSUBSCRIBE sensors/#
+TOPICS home/+/temperature               what has been heard, narrowed
+MESSAGES thermostat                     the last thousand that mention it
+STATUS                                  the connection, and the counts
+FORGET                                  empty what is kept here
+```
+
+A dump is those lines - the subscriptions and the last message of every topic,
+retained where it was - so a broker's state goes into a file and back into
+another broker. Running one publishes every line of it: what was retained is
+held again, and what was only heard goes by again, which for a topic a device
+acts on is an order given twice - a file to read before it is run. The log and
+`$SYS` are left out of it. A payload that a line cannot carry, one with a line
+break in it or bytes that are not text, is written as `PUBLISH -b` and base64.
+
+Two things a broker does not say, and so neither does this. A message passed on
+as it happens does not carry the retained flag, whoever published it and how, so
+`retained` is what the broker held when the subscription was made and what this
+connection has given it to hold since. And times are when a message *arrived
+here*, in UTC like Kafka's: MQTT 3.1.1 puts no timestamp on a message.
 
 ## RabbitMQ
 **Reading a queue is destructive, so this driver does not read queues.** AMQP has
@@ -1078,6 +1165,8 @@ permanent.
 | `src/db/azure.zig` | Azure Blob: the same shape, a different signature |
 | `src/db/azure/` | Shared Key, and the three ways to write a target |
 | `src/db/rabbit.zig` | RabbitMQ: the topology as tables, over the management API |
+| `src/db/mqtt.zig` | MQTT: the connection, the thread that listens, and what was heard as tables |
+| `src/db/mqtt/wire.zig` | the MQTT 3.1.1 packets, and how a filter matches a topic |
 | `src/db/rabbit/` | which endpoint each table is, where its columns live in the JSON, and the target |
 | `src/db/ssh.zig` | the little of libssh2 this needs, and the connecting and authenticating |
 | `src/db/sftp.zig` | SFTP: a directory as a table, with real renames |
@@ -1238,6 +1327,21 @@ too, one of which it refuses.
 
 ```sh
 zig build && ./tests/rabbit.sh
+```
+
+[tests/mqtt.sh](tests/mqtt.sh) is the same against Mosquitto, with
+`mosquitto_pub` and `mosquitto_sub` from the same image as the other side of
+every exchange: what was retained before `krtek` connected has to be in `topics`
+when it does, what `krtek` publishes has to reach a subscriber that is not
+`krtek`, and what it clears has to be gone for the next client. A broker with a
+password file is connected to with the wrong password, with none and with no
+user, and one with TLS under a certificate nobody signed - refused, unless the
+target says not to look. Most of the driver needs no broker to be tested - the unit tests bring
+their own, forty lines of one on the other end of a socket pair - so what the
+suite adds is a real one, and a restart of it under an open connection.
+
+```sh
+zig build && ./tests/mqtt.sh
 ```
 
 [tests/postgres.sh](tests/postgres.sh) and [tests/mysql.sh](tests/mysql.sh) came

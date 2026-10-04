@@ -77,7 +77,7 @@ bottles() {
 cat <<EOF
 # krtek $version. Written by packaging/formula.sh - do not edit by hand.
 class Krtek < Formula
-  desc "Terminal database manager for SQLite, PostgreSQL, MySQL, Redis, Kafka, S3, Azure Blob, RabbitMQ, SFTP and Kubernetes"
+  desc "Terminal database manager for SQLite, PostgreSQL, MySQL, Redis, Kafka, S3, Azure Blob, RabbitMQ, MQTT, SFTP and Kubernetes"
   homepage "https://github.com/zales/krtek"
   version "$version"
   license "MIT"

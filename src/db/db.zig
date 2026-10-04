@@ -20,6 +20,7 @@ pub const kafka = @import("kafka.zig");
 pub const s3 = @import("s3.zig");
 pub const azure = @import("azure.zig");
 pub const rabbit = @import("rabbit.zig");
+pub const mqtt = @import("mqtt.zig");
 pub const sftp = @import("sftp.zig");
 pub const k8s = @import("k8s.zig");
 pub const k8s_yaml = @import("k8s/yaml.zig");
@@ -163,6 +164,7 @@ comptime {
     _ = s3;
     _ = azure;
     _ = rabbit;
+    _ = mqtt;
     _ = sftp;
     _ = k8s;
     _ = k8s_yaml;
@@ -450,6 +452,7 @@ pub const Rows = union(enum) {
     s3: s3.Rows,
     azure: azure.Rows,
     rabbit: rabbit.Rows,
+    mqtt: mqtt.Rows,
     sftp: sftp.Rows,
     k8s: k8s.Rows,
 
@@ -575,6 +578,7 @@ pub const Db = union(enum) {
     s3: *s3.Db,
     azure: *azure.Db,
     rabbit: *rabbit.Db,
+    mqtt: *mqtt.Db,
     sftp: *sftp.Db,
     k8s: *k8s.Db,
 
@@ -586,6 +590,7 @@ pub const Db = union(enum) {
             .s3 => .{ .s3 = try s3.Db.open(allocator, target, report) },
             .azure => .{ .azure = try azure.Db.open(allocator, target, report) },
             .rabbit => .{ .rabbit = try rabbit.Db.open(allocator, target, report) },
+            .mqtt => .{ .mqtt = try mqtt.Db.open(allocator, target, report) },
             .sftp => .{ .sftp = try sftp.Db.open(allocator, target, report) },
             .k8s => .{ .k8s = try k8s.Db.open(allocator, target, report) },
             .redis => .{ .redis = try redis.Db.open(allocator, target, report) },
@@ -610,6 +615,9 @@ pub const Db = union(enum) {
         }
         if (rabbit.owns(target)) {
             return .rabbit;
+        }
+        if (mqtt.owns(target)) {
+            return .mqtt;
         }
         if (sftp.owns(target)) {
             return .sftp;
@@ -1050,6 +1058,7 @@ pub const Ddl = union(enum) {
     s3: s3.Ddl,
     azure: azure.Ddl,
     rabbit: rabbit.Ddl,
+    mqtt: mqtt.Ddl,
     sftp: sftp.Ddl,
     k8s: k8s.Ddl,
 

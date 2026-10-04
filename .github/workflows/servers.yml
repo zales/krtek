@@ -70,7 +70,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        suite: [sqlite, postgres, mysql, azure, s3, rabbit, sftp, kafka, k8s, mssql]
+        suite: [sqlite, postgres, mysql, azure, s3, rabbit, mqtt, sftp, kafka, k8s, mssql]
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4

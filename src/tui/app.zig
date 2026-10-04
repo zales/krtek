@@ -1826,6 +1826,18 @@ pub const App = struct {
                 try form.note("the port is the management one, 15672, and not the broker's 5672;");
                 try form.note("the default vhost is written %2F");
             },
+            .mqtt => {
+                try form.text("host", shape.host, 24);
+                try form.text("port", shape.port, 6);
+                form.sameLine();
+                try form.text("user", shape.user, 24);
+                try form.text("filter", shape.name, 32);
+                try form.toggle("TLS", shape.tls);
+                form.sameLine();
+                try form.note("the filter is what to listen to: empty is everything, dum/# all of");
+                try form.note("one branch, dum/+/teplota one level of any name. A broker with a");
+                try form.note("great deal going through it is better looked at a branch at a time.");
+            },
             .k8s => {
                 try form.text("context", shape.host, 32);
                 try form.text("namespace", shape.name, 24);
@@ -1912,6 +1924,7 @@ pub const App = struct {
             .{ .label = "database", .into = &shape.name },
             .{ .label = "bucket", .into = &shape.name },
             .{ .label = "vhost", .into = &shape.name },
+            .{ .label = "filter", .into = &shape.name },
             .{ .label = "user", .into = &shape.user },
             .{ .label = "access key", .into = &shape.user },
             .{ .label = "region", .into = &shape.region },

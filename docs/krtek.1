@@ -41,6 +41,9 @@ krtek \- a database manager for the terminal
 .RI rabbit://guest@host:15672/vhost
 .br
 .B krtek
+.RI mqtt://user@host:1883/filter
+.br
+.B krtek
 .RI sftp://user@host/srv/data
 .br
 .B krtek
@@ -57,8 +60,8 @@ krtek \- a database manager for the terminal
 .SH DESCRIPTION
 .B krtek
 browses, edits, alters, dumps and imports a database on a text screen. It speaks
-SQLite, PostgreSQL, MySQL/MariaDB, Redis, Kafka, S3, Azure Blob, RabbitMQ, SFTP
-and Kubernetes behind one interface, and needs nothing installed: the client
+SQLite, PostgreSQL, MySQL/MariaDB, Redis, Kafka, S3, Azure Blob, RabbitMQ, MQTT,
+SFTP and Kubernetes behind one interface, and needs nothing installed: the client
 libraries are linked into the binary, and the rest are spoken directly.
 .PP
 A Kafka topic is a table of
@@ -89,6 +92,25 @@ portal hands out, pasted as it stands. The account key can be typed as the
 password instead, or left in
 .BR AZURE_STORAGE_KEY ;
 a shared access signature works in place of one.
+.PP
+An MQTT broker has nothing to list, so what is shown is what has been heard
+since connecting:
+.I topics
+with the last message on each - the retained ones arrive first - the
+.I messages
+as they came, the
+.I subscriptions
+of this connection, and the broker's own
+.IR $SYS .
+The target's path is the filter to listen to:
+.I mqtt://host/home/#
+is one branch, and no path is everything. A new row publishes, a changed
+payload publishes it again, a deleted topic clears its retained message, and a
+row in
+.I subscriptions
+is a subscription.
+.B mqtts://
+is TLS.
 .PP
 RabbitMQ is reached through its management API, and what is a table is the
 topology:
