@@ -3,9 +3,15 @@
 //! The C declarations live in `src/sqlite.zig`; this file is the driver: the
 //! pragmas that answer the interface's questions, and the table rebuild SQLite
 //! needs for anything ALTER TABLE cannot do.
+//!
+//! It is also what a CSV file is opened through: the file is read into a
+//! database in memory, and written back when a statement has changed what it
+//! would say. Everything about the file itself is in `sheet.zig`; what is here
+//! is where a statement ends, which is when that question gets asked.
 
 const std = @import("std");
 const db = @import("db.zig");
+const sheet = @import("sheet.zig");
 const c = @import("sqlite");
 
 const List = db.List;
@@ -17,8 +23,23 @@ pub const Db = struct {
     version_text: std.ArrayList(u8) = .empty,
     /// Asked every so often whether the statement running now should go on.
     progress: ?db.Progress = null,
+    /// The delimited file this database was read from and is written back to,
+    /// where it is one. Null for a database that is its own file.
+    sheet: ?*sheet.Sheet = null,
+    /// What last went wrong, for a sheet. SQLite keeps its own last complaint
+    /// and that is what `message` gives for a database - but a sheet is looked
+    /// at after every statement, which asks SQLite other things and leaves it
+    /// with nothing to complain about, and writing a file fails in ways SQLite
+    /// never hears of.
+    failure: std.ArrayList(u8) = .empty,
 
     pub fn open(allocator: std.mem.Allocator, target: []const u8, report: *std.ArrayList(u8)) !*Db {
+        // A name that says CSV on a file that is a database: it is the
+        // database. Before a CSV could be opened every file was one, and one
+        // called `export.csv` read as text would be written back as text.
+        if (sheet.claims(target) and !isDatabase(allocator, target)) {
+            return openSheet(allocator, target, report);
+        }
         const zero = try allocator.dupeSentinel(u8, target, 0);
         defer allocator.free(zero);
         var handle: ?*c.Db = null;
@@ -42,18 +63,76 @@ pub const Db = struct {
         return self;
     }
 
+    /// Whether the file starts the way every SQLite database does.
+    fn isDatabase(allocator: std.mem.Allocator, target: []const u8) bool {
+        const magic = "SQLite format 3\x00";
+        const zero = allocator.dupeSentinel(u8, target, 0) catch return false;
+        defer allocator.free(zero);
+        const file = std.c.fopen(zero.ptr, "rb") orelse return false;
+        defer _ = std.c.fclose(file);
+        var head: [magic.len]u8 = undefined;
+        return std.c.fread(&head, 1, head.len, file) == head.len and std.mem.eql(u8, &head, magic);
+    }
+
+    /// A CSV file: a database in memory with the file read into it.
+    fn openSheet(allocator: std.mem.Allocator, target: []const u8, report: *std.ArrayList(u8)) !*Db {
+        var handle: ?*c.Db = null;
+        if (c.sqlite3_open_v2(":memory:", &handle, c.OPEN_READWRITE | c.OPEN_CREATE, null) != c.OK) {
+            try report.print(allocator, "cannot open {s}", .{target});
+            _ = c.sqlite3_close_v2(handle);
+            return error.Driver;
+        }
+        errdefer _ = c.sqlite3_close_v2(handle);
+        const file = try sheet.Sheet.open(allocator, handle, target, report);
+        errdefer file.close();
+        const self = try allocator.create(Db);
+        errdefer allocator.destroy(self);
+        self.* = .{ .allocator = allocator, .handle = handle, .sheet = file };
+        errdefer self.path.deinit(allocator);
+        try self.path.appendSlice(allocator, target);
+        try self.version_text.print(allocator, "CSV, through SQLite {s}", .{std.mem.span(c.sqlite3_libversion())});
+        return self;
+    }
+
     /// SQLite calls a handler every so many steps of its virtual machine, and a
     /// non-zero answer aborts the statement with SQLITE_INTERRUPT, so this needs
     /// no plumbing through the query path at all.
     pub fn watch(self: *Db, progress: ?db.Progress) void {
         self.progress = progress;
-        if (progress == null) {
+        self.listen();
+    }
+
+    fn listen(self: *Db) void {
+        if (self.progress == null) {
             c.sqlite3_progress_handler(self.handle, 0, null, null);
             return;
         }
         // Roughly every few milliseconds of work on current hardware: often
         // enough to feel responsive, rarely enough not to matter.
         c.sqlite3_progress_handler(self.handle, 20_000, onProgress, self);
+    }
+
+    /// A statement has ended: if this is a sheet, the file is brought up to
+    /// date with what the statement did. An error here is the file not having
+    /// been written, and `message` says why.
+    fn settled(self: *Db) db.Error!void {
+        const file = self.sheet orelse return;
+        // Reading the table back is a statement like any other, and the one
+        // statement nobody should be able to give up on half way: esc while a
+        // file is being written must not leave it unwritten.
+        c.sqlite3_progress_handler(self.handle, 0, null, null);
+        defer self.listen();
+        return file.settle(self.handle, &self.failure, false);
+    }
+
+    /// SQLite said no. For a sheet what it said is kept, because the look at
+    /// the file that follows every statement leaves SQLite with nothing to say.
+    fn refused(self: *Db) db.Error {
+        if (self.sheet != null) {
+            self.failure.clearRetainingCapacity();
+            self.failure.appendSlice(self.allocator, std.mem.span(c.sqlite3_errmsg(self.handle))) catch {};
+        }
+        return error.Driver;
     }
 
     /// Tell the caller a statement is beginning, so its timer starts here.
@@ -71,19 +150,36 @@ pub const Db = struct {
 
     pub fn close(self: *Db) void {
         c.sqlite3_progress_handler(self.handle, 0, null, null);
+        if (self.sheet) |file| {
+            // The last chance for anything a statement left unwritten: a batch
+            // that failed half way, a write that was refused the first time.
+            file.settle(self.handle, &self.failure, true) catch {};
+            file.close();
+        }
         _ = c.sqlite3_close_v2(self.handle);
         self.path.deinit(self.allocator);
         self.version_text.deinit(self.allocator);
+        self.failure.deinit(self.allocator);
         self.allocator.destroy(self);
     }
 
-    pub fn caps(_: *Db) db.Caps {
+    pub fn caps(self: *Db) db.Caps {
         return .{
             .schemas = false,
             .hidden_row_id = true, // rowid addresses a row without a key
             .rebuild_to_alter = true,
             .databases = false,
-            .label = "SQLite",
+            .label = if (self.sheet != null) "CSV" else "SQLite",
+            // Every one of these would work, for as long as the file is open,
+            // and none of them is anything a CSV file can hold.
+            .no_relations = if (self.sheet != null)
+                "a CSV file holds rows and nothing else: an index, a view, a trigger or a key would be gone when it is closed"
+            else
+                "",
+            .no_tables = if (self.sheet != null)
+                "a CSV file is one table, named after the file: another one would be gone when it is closed"
+            else
+                "",
         };
     }
 
@@ -96,24 +192,32 @@ pub const Db = struct {
     }
 
     pub fn message(self: *Db) []const u8 {
+        if (self.failure.items.len != 0) {
+            return self.failure.items;
+        }
         return std.mem.span(c.sqlite3_errmsg(self.handle));
     }
 
     pub fn exec(self: *Db, sql: []const u8) db.Error!void {
         self.starting();
+        self.failure.clearRetainingCapacity();
         const zero = try self.allocator.dupeSentinel(u8, sql, 0);
         defer self.allocator.free(zero);
         if (c.sqlite3_exec(self.handle, zero.ptr, null, null, null) != c.OK) {
-            return error.Driver;
+            // What ran before the one that failed still ran, and is written
+            // with whatever changes next - or when the file is closed.
+            return self.refused();
         }
+        try self.settled();
     }
 
     pub fn query(self: *Db, sql: []const u8, rest: ?*[]const u8) db.Error!?db.Rows {
         self.starting();
+        self.failure.clearRetainingCapacity();
         var stmt: ?*c.Stmt = null;
         var tail: ?[*]const u8 = null;
         if (c.sqlite3_prepare_v2(self.handle, sql.ptr, @intCast(sql.len), &stmt, &tail) != c.OK) {
-            return error.Driver;
+            return self.refused();
         }
         if (rest) |out| {
             const used = if (tail) |t| @intFromPtr(t) - @intFromPtr(sql.ptr) else sql.len;
@@ -136,7 +240,7 @@ pub const Db = struct {
         var stmt: ?*c.Stmt = null;
         var tail: ?[*]const u8 = null;
         if (c.sqlite3_prepare_v2(self.handle, sql.ptr, @intCast(sql.len), &stmt, &tail) != c.OK) {
-            return error.Driver;
+            return self.refused();
         }
         if (stmt == null) {
             return null;
@@ -449,6 +553,11 @@ pub const Db = struct {
     };
 
     pub fn settings(self: *Db, arena: std.mem.Allocator) db.Error![]db.Setting {
+        // The pragmas of a database that exists to hold a file say nothing
+        // about the file, which is what somebody looking here is asking about.
+        if (self.sheet) |file| {
+            return file.settings(arena);
+        }
         var list: std.ArrayList(db.Setting) = .empty;
         try list.append(arena, .{ .label = "file", .value = self.path.items });
         {
@@ -507,6 +616,8 @@ pub const Rows = struct {
     stmt: ?*c.Stmt,
     changed_before: ?i64 = null,
     changed: i64 = 0,
+    /// Walked to its end, which is where a sheet is looked at.
+    done: bool = false,
 
     pub fn next(self: *Rows) db.Error!bool {
         if (self.changed_before == null) {
@@ -516,9 +627,11 @@ pub const Rows = struct {
             c.ROW => true,
             c.DONE => blk: {
                 self.changed = c.sqlite3_total_changes(self.owner.handle) - (self.changed_before orelse 0);
+                self.done = true;
+                try self.owner.settled();
                 break :blk false;
             },
-            else => error.Driver,
+            else => self.owner.refused(),
         };
     }
 
@@ -530,6 +643,13 @@ pub const Rows = struct {
     pub fn close(self: *Rows) void {
         _ = c.sqlite3_finalize(self.stmt);
         self.stmt = null;
+        // A statement that was not walked to its end is ended by this, and what
+        // it changed by then is changed. There is nobody here to tell if the
+        // file cannot be written; the next change says so.
+        if (!self.done) {
+            self.done = true;
+            self.owner.settled() catch {};
+        }
     }
 
     pub fn columnCount(self: *Rows) usize {

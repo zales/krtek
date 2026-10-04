@@ -9,7 +9,7 @@
 
 const std = @import("std");
 const database = @import("db");
-const csv = @import("csv.zig");
+const csv = database.csv;
 const Form = @import("form.zig");
 const app_mod = @import("app.zig");
 const App = app_mod.App;

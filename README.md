@@ -5,7 +5,8 @@
 A database manager for the terminal, written in Zig: what a graphical client
 does - browse, edit, alter, dump, import - on a text screen, and quicker, because
 everything is a key press. **SQLite, PostgreSQL, MySQL/MariaDB, SQL Server, Redis,
-Kafka, S3, Azure Blob, RabbitMQ, SFTP and Kubernetes**, behind one interface.
+Kafka, S3, Azure Blob, RabbitMQ, SFTP and Kubernetes**, behind one interface -
+and a **CSV file**, opened as a table.
 
 *Krtek* is Czech for a mole: a small thing that digs through what is underneath
 and comes back up with what it found.
@@ -64,6 +65,7 @@ Or from source, which needs nothing but Zig 0.17:
 zig build -Doptimize=safe
 ./zig-out/bin/krtek              # the list of saved connections
 ./zig-out/bin/krtek database.db
+./zig-out/bin/krtek data.csv               # a CSV or TSV file, as one table
 ./zig-out/bin/krtek postgres://user@host:5432/database
 ./zig-out/bin/krtek mysql://user@host:3306/database
 ./zig-out/bin/krtek mssql://user@host:1433/database
@@ -79,7 +81,8 @@ zig build -Doptimize=safe
 ```
 
 A SQLite file is opened through SQLite's own VFS: edits go straight to disk and
-there is nothing to save.
+there is nothing to save. A CSV file is one table, and is written when a row or
+a column changes - see [CSV files](#csv-files).
 
 **Connections are saved**, and started with no argument the app opens the list of
 them: `enter` connects, `a` adds, `e` edits, `d` removes. The file is
@@ -290,6 +293,63 @@ an SVG - so `./tests/shots.sh` regenerates every one of them, and they cannot
 quietly drift away from what the program does. The three that need a server -
 the SQL Server one and the two cluster ones - are taken by the suites that
 already bring one up, with `SHOTS=1`.
+
+## CSV files
+
+```sh
+krtek people.csv        # or .tsv
+```
+
+A file whose name ends in `.csv` or `.tsv` is read into a SQLite database in
+memory, as one table named after the file, with its first line as the column
+names. From there on it is a table like any other: it sorts, filters, takes the
+row form and the alter form, and answers SQL - `select mesto, avg(plat) from
+people group by 1` on a file that has never seen a database.
+
+**What separates the fields is read off the first line**: a comma, a semicolon,
+a tab or a bar, whichever there is most of. A `.tsv` is tabs whatever is in it.
+A semicolon is what a spreadsheet writes wherever the comma is the decimal mark,
+so **a comma in a number is read as one too** - `100,50` is a number in a file
+separated by semicolons, sorts as one and is written back with its comma.
+
+**A file nobody changed is a file nobody wrote.** That is the rule both ends are
+held to:
+
+- **A column is a number only when every value in it writes back as the same
+  bytes.** `1`, `-7` and `3.14` are numbers. `007`, `+7` and `1e5` are text, and
+  stay what the file said. A column of prices - `1.50`, `10.00`, the same count
+  of digits every time - is a `DECIMAL(15,2)`: a number to sort and add up, and
+  the type is what remembers to write `2` back as `2.00`.
+- **Nothing between two separators is no value, and `""` is an empty text** -
+  the way PostgreSQL's `COPY` reads them, and the only way a delimited file has
+  of telling the two apart.
+- **The file is written when the table no longer says what the file does**, and
+  not otherwise: looking at it, a statement that was rolled back, and an update
+  that changed nothing leave it untouched. A transaction is written when it
+  commits.
+- **It is written the way it was read**: its separator, its line endings, its
+  byte order mark, whether its last line ends, and its header as it stood. The
+  one thing not kept is quoting nobody needed - a field is quoted when it has to
+  be.
+- **It is written beside itself and renamed into place**, with its permissions,
+  so a write that fails half way leaves the file as it was; a link is followed
+  rather than replaced; a file marked read-only is refused rather than gone
+  round; and **a file that changed on disk since it was read is not written
+  over** - the statement says so, and opening it again shows what is there now.
+
+A row longer than the header gets columns of its own (`column_3`), a shorter one
+gets gaps, and a header with no name or the same name twice gets names that can
+be told apart - and goes back as it came unless the column is renamed. So does a
+column called `rowid`: left with that name it would take it from the row's own
+number, which is what a row is edited by. A file that is a SQLite database is
+opened as one, whatever it is called.
+
+A CSV file holds rows and nothing else, so `c`, `N`, `Y` and `D` - another
+table, another name, a copy, no table - are refused, and so are indexes, views,
+triggers and keys: each would live in memory and be gone when the file is closed.
+The types are worked out again every time the file is opened, so a `NOT NULL` or
+a default set in the alter form lasts as long as the session. `gb` says what was
+found: the separator, the decimal mark, the line ending.
 
 ## Redis
 
@@ -988,6 +1048,8 @@ permanent.
 | --- | --- |
 | `src/db/db.zig` | the interface, the shared quoting and the statement splitter |
 | `src/db/sqlite.zig` | the SQLite driver: pragmas and the table rebuild |
+| `src/db/sheet.zig` | a CSV file opened through that driver: reading it in, writing it back |
+| `src/db/csv.zig` | reading and writing delimited files |
 | `src/db/postgres.zig` | the PostgreSQL driver over libpq, single-row mode |
 | `src/db/mysql.zig` | the MySQL and MariaDB driver over the MariaDB connector |
 | `src/db/mssql.zig` | the SQL Server driver: T-SQL, `sys.*` and the schema statements |
@@ -999,7 +1061,6 @@ permanent.
 | `src/tui/editor.zig` | the SQL editor and the tokenizer that colours it |
 | `src/tui/fuzzy.zig` | the fuzzy match shared by the palette and the filter |
 | `src/tui/form.zig` | the form widget every dialog is built from |
-| `src/tui/csv.zig` | reading and writing delimited files |
 | `src/tui/draw.zig` | rendering |
 | `src/tui/input.zig` | the key map and the command palette |
 | `src/tui/connections.zig` | the saved connections and where each keeps its password |
@@ -1195,6 +1256,15 @@ zig build && ./tests/postgres.sh
 zig build && ./tests/mysql.sh
 ```
 
+[tests/csv.sh](tests/csv.sh) opens a CSV file the way a spreadsheet in half of
+Europe writes one - semicolons, CRLF, a comma in the numbers, a line break
+inside a quoted value - changes one cell through the interface, and compares the
+file with what it should now be, byte for byte:
+
+```sh
+zig build && ./tests/csv.sh
+```
+
 [tests/connecting.sh](tests/connecting.sh) is about the server that does not
 answer, so it brings none up: a listener that takes a connection and says nothing
 is that server on any machine, for as long as the test wants it. It checks that
@@ -1264,6 +1334,14 @@ with `psql` doing the same.
 
 * **No undo.** The file is edited in place, like any other database client, so
   `:dump` before a risky change.
+* **A CSV file is held in memory and written whole.** Fine for the files people
+  open by hand, slow for one of a gigabyte: every change writes all of it, into
+  a new file that takes the old one's place - with its permissions, and without
+  its hard links or its extended attributes. It
+  has to be UTF-8, or at least not UTF-16, and its first line has to be the
+  header. Numbers are shown the way every other engine's are, with a point,
+  and typed with one, whatever mark the file writes them with: `150,5` typed
+  into a column of numbers is a text, and goes into the file as one.
 * **A rebuild cannot recover what the pragmas do not report:** `CHECK`
   constraints, generated columns and collations are lost when a table is altered.
   The form says so.

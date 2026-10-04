@@ -8,6 +8,9 @@ krtek \- a database manager for the terminal
 .RI [ database.db ]
 .br
 .B krtek
+.RI data.csv
+.br
+.B krtek
 .RI postgres://user@host:port/database
 .br
 .B krtek
@@ -181,6 +184,18 @@ gives the same string; anything else stays the one field it was.
 .PP
 A SQLite file is opened through SQLite's own VFS: edits go straight to disk, the
 database is never held in memory, and there is nothing to save.
+.PP
+A file whose name ends in
+.B .csv
+or
+.B .tsv
+is read into one table, named after the file, with its first line as the column
+names. It is then a table like any other: sorted, filtered, edited and asked
+questions in SQL. The file is written back when a row or a column changes, and
+only then, with the separator, line ending and byte order mark it was read with.
+A semicolon, a tab or a bar between the fields is recognised, and so is a comma
+as the decimal mark. It is not written over when it has changed on disk since it
+was read.
 .PP
 Press
 .B ?

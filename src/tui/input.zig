@@ -290,8 +290,11 @@ pub const Action = struct {
         anything,
         /// The editor and the search across tables, which are written as SQL.
         sql,
-        /// Creating, altering, renaming, copying, emptying or dropping the object.
+        /// Altering or emptying the object.
         ddl,
+        /// Creating, renaming, copying or dropping it: what needs the connection
+        /// to hold more than the one table it is.
+        tables,
         /// An index, a view, a trigger or a foreign key.
         relations,
         inserting,
@@ -318,6 +321,7 @@ pub fn offered(action: Action, caps: database.Caps, has_files: bool) bool {
         .anything => true,
         .sql => caps.speaks_sql,
         .ddl => caps.no_ddl.len == 0,
+        .tables => caps.no_ddl.len == 0 and caps.no_tables.len == 0,
         .relations => caps.no_ddl.len == 0 and caps.no_relations.len == 0,
         .inserting => caps.no_insert.len == 0,
         .editing => caps.no_update.len == 0,
@@ -349,16 +353,16 @@ pub const actions = [_]Action{
     .{ .keys = "x", .does = .delete, .label = "delete the marked rows", .also = "remove", .needs = .main, .wants = .deleting },
     .{ .keys = "space", .does = .mark, .label = "mark the row", .also = "select tick visual v", .needs = .main },
     .{ .keys = "gv", .does = .whole_value, .label = "show the whole value", .also = "detail full text", .needs = .main },
-    .{ .keys = "c", .does = .create_table, .label = "create a table", .also = "new", .wants = .ddl },
+    .{ .keys = "c", .does = .create_table, .label = "create a table", .also = "new", .wants = .tables },
     .{ .keys = "a", .does = .alter_table, .label = "alter the table", .also = "change columns modify", .wants = .ddl },
     .{ .keys = "I", .does = .index, .label = "add an index", .also = "unique primary key", .wants = .relations },
     .{ .keys = "K", .does = .foreign_key, .label = "add a foreign key", .also = "reference relation", .wants = .relations },
     .{ .keys = "gV", .does = .view, .label = "create a view", .also = "new", .wants = .relations },
     .{ .keys = "T", .does = .trigger, .label = "create a trigger", .also = "new", .wants = .relations },
-    .{ .keys = "N", .does = .rename, .label = "rename the table", .also = "move", .wants = .ddl },
-    .{ .keys = "Y", .does = .copy_table, .label = "copy the table", .also = "duplicate", .wants = .ddl },
+    .{ .keys = "N", .does = .rename, .label = "rename the table", .also = "move", .wants = .tables },
+    .{ .keys = "Y", .does = .copy_table, .label = "copy the table", .also = "duplicate", .wants = .tables },
     .{ .keys = "X", .does = .truncate, .label = "empty the table", .also = "truncate delete all", .wants = .ddl },
-    .{ .keys = "D", .does = .drop, .label = "drop the table", .also = "delete remove", .wants = .ddl },
+    .{ .keys = "D", .does = .drop, .label = "drop the table", .also = "delete remove", .wants = .tables },
     .{ .keys = "E", .does = .export_rows, .label = "export", .also = "dump sql csv save" },
     .{ .keys = "y", .does = .yank, .label = "copy to the clipboard", .also = "yank value row page csv sql" },
     .{ .keys = "gM", .does = .import, .label = "import", .also = "load sql csv file", .wants = .inserting },
@@ -1057,10 +1061,12 @@ fn perform(app: *App, does: Does) !void {
     // these otherwise opens a form to be filled in before the engine says no.
     // The ones that write what hangs off an object are apart, because an engine
     // can have the first without the second: a Kafka topic is created and
-    // dropped and has no indexes.
+    // dropped and has no indexes. And the ones that need room for another table
+    // are apart again, because a CSV file is altered and is only ever one.
     const allowed = app.caps();
     const refused = switch (actionThat(does).wants) {
         .ddl => allowed.no_ddl,
+        .tables => if (allowed.no_ddl.len != 0) allowed.no_ddl else allowed.no_tables,
         .relations => if (allowed.no_ddl.len != 0) allowed.no_ddl else allowed.no_relations,
         else => "",
     };

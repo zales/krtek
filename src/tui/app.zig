@@ -6,7 +6,7 @@ const std = @import("std");
 const database = @import("db");
 const term = @import("term.zig");
 const Form = @import("form.zig");
-const csv = @import("csv.zig");
+const csv = database.csv;
 const dump_mod = @import("dump.zig");
 const Editor = @import("editor.zig").Editor;
 const sql_syntax = @import("editor.zig");
@@ -1735,6 +1735,11 @@ pub const App = struct {
                 try form.text("file", shape.path, 52);
                 try form.note("a path to a database file; it is made if it is not there");
             },
+            .csv => {
+                try form.text("file", shape.path, 52);
+                try form.note("a path to a .csv or .tsv file whose first line names the columns;");
+                try form.note("it is opened as one table, and written when a row or a column changes");
+            },
             .other => {
                 try form.text("target", shape.path, 52);
                 try form.note("anything the engines take, as it stands - a libpq keyword string,");
@@ -1843,8 +1848,8 @@ pub const App = struct {
 
         // A cluster has no password to keep anywhere: it is reached with what the
         // kubeconfig carries, and offering a place to put one would be offering to
-        // keep something nothing will ever ask for.
-        if (shape.engine == .k8s) {
+        // keep something nothing will ever ask for. Nor has a file of rows.
+        if (shape.engine == .k8s or shape.engine == .csv) {
             return;
         }
         // Only offer what this machine has: the keychain is macOS's.
@@ -4541,6 +4546,13 @@ pub const App = struct {
             self.complain("a connection needs something to point at", .{});
             return;
         }
+        // Which of the two kinds of file a path is, is read off its name - so a
+        // CSV saved under another one would be opened as a database, and fail
+        // as one, with nothing to say why.
+        if (shape.engine == .csv and !conns.isSheet(target)) {
+            self.complain("a CSV file is known by its name: {s} has to end in .csv or .tsv", .{target});
+            return;
+        }
         if (editing) |at| {
             if (at < self.saved.list.items.items.len) {
                 // A connection that stops using the keychain, or moves to
@@ -4657,6 +4669,13 @@ pub const App = struct {
         }
         if (form.purpose == .create_table) {
             try self.conn.ddl().createTable(sql, a, .{ .schema = self.grid.schema.items, .name = name }, columns.items, &.{});
+            return;
+        }
+        // The name is a field of this form, so altering is also a way to rename
+        // - which the connection that is one table refuses under `N`, and has to
+        // refuse here for the same reason.
+        if (self.caps().no_tables.len != 0 and !std.mem.eql(u8, name, form.table)) {
+            self.complain("{s}", .{self.caps().no_tables});
             return;
         }
         // Whatever this engine has to preserve across an alter - on SQLite the

@@ -120,6 +120,9 @@ jobs:
             # And what is on the screen while a server does not answer - which
             # is a listener on this machine, so that one needs none as well.
             ./tests/connecting.sh
+            # A CSV file is a file: changed through the grid and compared, byte
+            # for byte, with what it should then be.
+            ./tests/csv.sh
           else
             ./tests/${{ matrix.suite }}.sh
           fi

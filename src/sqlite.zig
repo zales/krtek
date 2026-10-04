@@ -221,6 +221,13 @@ pub extern fn sqlite3_busy_timeout(db: ?*Db, ms: c_int) c_int;
 pub extern fn sqlite3_exec(db: ?*Db, sql: [*:0]const u8, cb: ?*anyopaque, arg: ?*anyopaque, err: ?*?[*:0]u8) c_int;
 pub extern fn sqlite3_prepare_v2(db: ?*Db, sql: [*]const u8, nByte: c_int, ppStmt: *?*Stmt, pzTail: *?[*]const u8) c_int;
 pub extern fn sqlite3_step(stmt: ?*Stmt) c_int;
+pub extern fn sqlite3_reset(stmt: ?*Stmt) c_int;
+/// The last argument says who frees the bytes. Null is SQLite's SQLITE_STATIC:
+/// nobody does, because they outlive the step that reads them.
+pub extern fn sqlite3_bind_text(stmt: ?*Stmt, i: c_int, text: [*]const u8, n: c_int, free: ?*anyopaque) c_int;
+pub extern fn sqlite3_bind_int64(stmt: ?*Stmt, i: c_int, value: i64) c_int;
+pub extern fn sqlite3_bind_double(stmt: ?*Stmt, i: c_int, value: f64) c_int;
+pub extern fn sqlite3_bind_null(stmt: ?*Stmt, i: c_int) c_int;
 pub extern fn sqlite3_finalize(stmt: ?*Stmt) c_int;
 pub extern fn sqlite3_column_count(stmt: ?*Stmt) c_int;
 pub extern fn sqlite3_column_name(stmt: ?*Stmt, i: c_int) ?[*:0]const u8;

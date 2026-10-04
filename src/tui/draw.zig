@@ -258,7 +258,7 @@ fn connections(app: *App, size: Size, rows: usize) void {
         screen.style(.{ .fg = C.faint });
         // Inside the frame, not up to it: these ran into the right-hand border and
         // lost their last few words to it.
-        _ = write(app, "    a file path opens SQLite; a URL opens the engine it names", width -| 2);
+        _ = write(app, "    a file opens SQLite, or a .csv as a table; a URL opens its engine", width -| 2);
         line += 1;
         screen.moveTo(line, left);
         screen.style(.{ .fg = C.faint });
@@ -1749,7 +1749,7 @@ fn footerHints(app: *App) []const u8 {
         if (caps.schemas or caps.databases) {
             out.print(arena, "   # {s}", .{caps.schema_noun}) catch {};
         }
-        if (caps.no_ddl.len == 0) {
+        if (caps.no_ddl.len == 0 and caps.no_tables.len == 0) {
             out.appendSlice(arena, "   c create table") catch {};
         }
         out.appendSlice(arena, "   E export   ctrl+k commands   q quit") catch {};
@@ -1761,10 +1761,16 @@ fn footerHints(app: *App) []const u8 {
             " enter connect   t in a new tab   / filter   a add   e edit   d remove   r read-only   q quit",
             " enter connect   t new tab   / filter   a add   e edit   d remove   r read-only",
         ),
-        .structure => if (app.caps().no_ddl.len == 0)
-            " a alter   I index   K key   N rename   S data   ctrl+k commands"
+        // Only what the engine will do: a key in this line that answers with a
+        // refusal is a line that was wrong.
+        .structure => if (app.caps().no_ddl.len != 0)
+            " S data   ctrl+k commands"
+        else if (app.caps().no_tables.len != 0)
+            " a alter   S data   ctrl+k commands"
+        else if (app.caps().no_relations.len != 0)
+            " a alter   N rename   S data   ctrl+k commands"
         else
-            " S data   ctrl+k commands",
+            " a alter   I index   K key   N rename   S data   ctrl+k commands",
 
         .messages => " gm back   s sql   r reload   ctrl+k commands",
         // Handled above, from what the engine said can be done.

@@ -36,6 +36,7 @@ const usage =
     \\krtek - a database manager for the terminal
     \\
     \\usage: krtek [database.db]
+    \\       krtek data.csv                a CSV or TSV file, as one table
     \\       krtek postgres://user@host:port/database
     \\       krtek mysql://user@host:port/database
     \\       krtek mssql://user@host:port/database
@@ -53,6 +54,8 @@ const usage =
     \\
     \\With no argument it opens the list of saved connections.
     \\A SQLite file is opened in place and edits go straight to it.
+    \\A .csv or .tsv file is read into one table - its first line names the
+    \\columns - and written back when a row or a column changes.
     \\A password is asked for when the server wants one, and kept only where the
     \\connection says: nowhere, the config file, or the macOS keychain. An engine's
     \\own store - PGPASSWORD, ~/.pgpass, ~/.my.cnf - works as it always did.

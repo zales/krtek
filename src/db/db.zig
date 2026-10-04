@@ -39,6 +39,10 @@ pub const ws = @import("ws.zig");
 pub const tds = @import("tds.zig");
 pub const clock = @import("clock.zig");
 pub const targets = @import("targets.zig");
+/// Delimited files: read for an import, written for an export, and opened as
+/// a database of their own through `sheet`.
+pub const csv = @import("csv.zig");
+pub const sheet = @import("sheet.zig");
 pub const typed = @import("typed.zig");
 pub const random = @import("random.zig");
 pub const sigv4 = @import("s3/sigv4.zig");
@@ -173,6 +177,8 @@ comptime {
     _ = ssh;
     _ = clock;
     _ = targets;
+    _ = csv;
+    _ = sheet;
     _ = typed;
     _ = random;
     _ = sigv4;
@@ -403,6 +409,12 @@ pub const Caps = struct {
     /// foreign keys - so before this, four forms opened on Kafka that could only
     /// ever be cancelled.
     no_relations: []const u8 = "",
+    /// Why a table cannot be made, renamed, copied or dropped here - empty where
+    /// it can. For the connection that *is* one table: a CSV file. Its columns
+    /// are altered and its rows emptied like any other's, so it is not `no_ddl`;
+    /// but a second table would live in memory and be gone with the session, and
+    /// the one it has under another name is a file with nothing to write it.
+    no_tables: []const u8 = "",
     /// Why a row cannot be added, changed or removed here - empty where it can.
     ///
     /// These are the reason and the flag at once, because a screen that refuses

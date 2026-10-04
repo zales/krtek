@@ -10,7 +10,6 @@ comptime {
     _ = @import("app.zig");
     _ = @import("draw.zig");
     _ = @import("ddl.zig");
-    _ = @import("csv.zig");
     _ = @import("connections.zig");
     _ = @import("editor.zig");
     _ = @import("files.zig");
@@ -171,6 +170,29 @@ comptime {
     _ = @import("keychain.zig");
 }
 
+/// What a SQLite database may be asked. Not `caps(undefined)` like the others:
+/// this driver is two things, a database and a CSV file read into one, and has
+/// to look at itself to say which.
+fn sqliteCaps() db.Caps {
+    var plain = db.sqlite.Db{ .allocator = std.testing.allocator, .handle = null };
+    return plain.caps();
+}
+
+test "the connection list and the driver agree on which file is a CSV" {
+    // The rule is written twice - the list of connections reads no driver, and
+    // the driver no list - so this is what keeps the two from drifting: a name
+    // one of them took for a CSV and the other for a database would be opened
+    // as one and labelled as the other.
+    const conns = @import("connections.zig");
+    for ([_][]const u8{
+        "people.csv", "PEOPLE.CSV", "towns.tsv", "Towns.Tsv",      "/srv/data/a.b.csv",
+        "people.db",  "csv",        ".csv",      "people.csv.bak", "notes.txt",
+        "data.tab",   "",           "tsv",
+    }) |name| {
+        try std.testing.expectEqual(db.sheet.claims(name), conns.isSheet(name));
+    }
+}
+
 test "an engine that refuses a change says so in one place" {
     // The three texts are the flag and the reason at once, so a driver cannot
     // half-declare one: a refusal with no reason would reach the screen as a
@@ -179,14 +201,14 @@ test "an engine that refuses a change says so in one place" {
         db.k8s.Db.caps(undefined),
         db.kafka.Db.caps(undefined),
         db.rabbit.Db.caps(undefined),
-        db.sqlite.Db.caps(undefined),
+        sqliteCaps(),
         db.redis.Db.caps(undefined),
         db.s3.Db.caps(undefined),
         db.azure.Db.caps(undefined),
         db.sftp.Db.caps(undefined),
     };
     for (drivers) |caps| {
-        for ([_][]const u8{ caps.no_insert, caps.no_update, caps.no_delete, caps.no_ddl, caps.no_relations }) |why| {
+        for ([_][]const u8{ caps.no_insert, caps.no_update, caps.no_delete, caps.no_ddl, caps.no_relations, caps.no_tables }) |why| {
             // Either it is allowed, or it is refused with something worth reading.
             try std.testing.expect(why.len == 0 or why.len > 20);
         }
@@ -202,7 +224,7 @@ test "an engine that refuses a change says so in one place" {
     try std.testing.expect(db.kafka.Db.caps(undefined).no_ddl.len == 0);
     try std.testing.expect(db.rabbit.Db.caps(undefined).no_update.len != 0);
     // A database does all four, and nothing above should have changed that.
-    const sqlite = db.sqlite.Db.caps(undefined);
+    const sqlite = sqliteCaps();
     try std.testing.expect(sqlite.no_insert.len == 0 and sqlite.no_update.len == 0);
     try std.testing.expect(sqlite.no_delete.len == 0 and sqlite.no_ddl.len == 0);
 }
@@ -222,7 +244,7 @@ test "an engine is not offered what it cannot do" {
         // None of these has a schema statement of any kind, and each says why.
         try std.testing.expect(caps.no_ddl.len > 20);
         for (input.actions) |action| {
-            if (action.wants == .ddl or action.wants == .relations) {
+            if (action.wants == .ddl or action.wants == .tables or action.wants == .relations) {
                 try std.testing.expect(!input.offered(action, caps, false));
             }
         }
@@ -234,11 +256,33 @@ test "an engine is not offered what it cannot do" {
     try std.testing.expect(kafka.no_ddl.len == 0);
     try std.testing.expect(kafka.no_relations.len > 20);
     for (input.actions) |action| {
-        if (action.wants == .ddl) {
+        if (action.wants == .ddl or action.wants == .tables) {
             try std.testing.expect(input.offered(action, kafka, false));
         }
         if (action.wants == .relations) {
             try std.testing.expect(!input.offered(action, kafka, false));
+        }
+    }
+
+    // A CSV file is the other way round from everything else: one table that
+    // is altered and emptied like any other, and no room for a second one or
+    // for anything that hangs off it. SQLite itself, the same driver over a
+    // database, is offered all of it.
+    var memory = db.sqlite.Db{ .allocator = std.testing.allocator, .handle = null };
+    var held: db.sheet.Sheet = .{ .allocator = std.testing.allocator, .arena = .init(std.testing.allocator) };
+    memory.sheet = &held;
+    const csv = memory.caps();
+    try std.testing.expectEqualStrings("CSV", csv.label);
+    try std.testing.expect(csv.no_ddl.len == 0 and csv.no_insert.len == 0);
+    try std.testing.expect(csv.no_tables.len > 20 and csv.no_relations.len > 20);
+    for (input.actions) |action| {
+        switch (action.wants) {
+            .ddl => try std.testing.expect(input.offered(action, csv, false)),
+            .tables, .relations => try std.testing.expect(!input.offered(action, csv, false)),
+            else => {},
+        }
+        if (action.wants == .tables or action.wants == .relations) {
+            try std.testing.expect(input.offered(action, sqliteCaps(), false));
         }
     }
 
@@ -258,7 +302,7 @@ test "the editor is called what the engine would call it" {
     // The same key and the same panel everywhere - what it takes is that engine's
     // own commands - so it is offered everywhere, under the right name.
     try std.testing.expect(input.offered(editor, db.redis.Db.caps(undefined), false));
-    try std.testing.expectEqualStrings("write and run SQL", input.labelFor(editor, db.sqlite.Db.caps(undefined)));
+    try std.testing.expectEqualStrings("write and run SQL", input.labelFor(editor, sqliteCaps()));
     try std.testing.expectEqualStrings("write and run a command", input.labelFor(editor, db.redis.Db.caps(undefined)));
     // And with nothing open, the plain name is not guessed at.
     try std.testing.expectEqualStrings("write and run SQL", input.labelFor(editor, null));

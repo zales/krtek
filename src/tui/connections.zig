@@ -92,6 +92,9 @@ pub const Connection = struct {
 
 pub const Engine = enum {
     sqlite,
+    /// A delimited file, opened as a table. A path like SQLite's, and told from
+    /// one by how it ends.
+    csv,
     postgres,
     mysql,
     mssql,
@@ -108,6 +111,7 @@ pub const Engine = enum {
     pub fn label(self: Engine) []const u8 {
         return switch (self) {
             .sqlite => "SQLite",
+            .csv => "CSV",
             .postgres => "PostgreSQL",
             .mysql => "MySQL",
             .mssql => "SQL Server",
@@ -134,8 +138,8 @@ pub const Engine = enum {
 
 /// In the order the form offers them, most used first.
 pub const ENGINES = [_][]const u8{
-    "SQLite", "PostgreSQL", "MySQL",    "SQL Server", "Redis",      "Kafka",
-    "S3",     "Azure",      "RabbitMQ", "SFTP",       "Kubernetes", "target",
+    "SQLite", "PostgreSQL", "MySQL", "SQL Server", "Redis", "Kafka",  "S3",
+    "Azure",  "RabbitMQ",   "SFTP",  "Kubernetes", "CSV",   "target",
 };
 
 test "the engine list offers every engine there is" {
@@ -215,7 +219,14 @@ pub fn engineOf(target: []const u8) Engine {
     {
         return .postgres;
     }
-    return .sqlite;
+    return if (isSheet(target)) .csv else .sqlite;
+}
+
+/// Whether a path is a delimited file rather than a database. The name is all
+/// there is to go on, here and in the driver, which asks the same question the
+/// same way: `data.csv` and `data.tsv` are, whatever case they are written in.
+pub fn isSheet(target: []const u8) bool {
+    return std.ascii.endsWithIgnoreCase(target, ".csv") or std.ascii.endsWithIgnoreCase(target, ".tsv");
 }
 
 /// The parts of a target, as the form asks for them. One field per idea rather
@@ -229,7 +240,7 @@ pub const Shape = struct {
     host: []const u8 = "",
     port: []const u8 = "",
     name: []const u8 = "",
-    /// A file path for SQLite, and the whole target for `other`.
+    /// A file path for SQLite and for a CSV, and the whole target for `other`.
     path: []const u8 = "",
     /// S3 only.
     region: []const u8 = "",
@@ -244,7 +255,7 @@ pub const Shape = struct {
 /// The target these parts make.
 pub fn compose(arena: std.mem.Allocator, shape: Shape) ![]const u8 {
     switch (shape.engine) {
-        .sqlite, .other => return shape.path,
+        .sqlite, .csv, .other => return shape.path,
         else => {},
     }
     var out: std.ArrayList(u8) = .empty;
@@ -323,7 +334,7 @@ pub fn decompose(arena: std.mem.Allocator, target: []const u8) ?Shape {
     const engine = engineOf(target);
     var shape = Shape{ .engine = engine };
     switch (engine) {
-        .sqlite => shape.path = target,
+        .sqlite, .csv => shape.path = target,
         .other => return null,
         else => {
             const url = split(target);
@@ -1121,6 +1132,29 @@ test "a SQL Server target survives being taken apart and put back" {
     try std.testing.expectEqualStrings("objednavky", shape.name);
     try std.testing.expectEqualStrings(target, try compose(a, shape));
     try std.testing.expectEqualStrings("SQL Server", (Connection{ .name = "a", .target = target }).engine());
+}
+
+test "a delimited file is told from a database by its name" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    try std.testing.expectEqual(Engine.csv, engineOf("people.csv"));
+    try std.testing.expectEqual(Engine.csv, engineOf("/srv/data/Towns.TSV"));
+    try std.testing.expectEqual(Engine.sqlite, engineOf("people.db"));
+    try std.testing.expectEqual(Engine.sqlite, engineOf("csv"));
+    // A file somewhere else is that place's, however it ends.
+    try std.testing.expectEqual(Engine.sftp, engineOf("sftp://host/srv/people.csv"));
+    try std.testing.expectEqual(Engine.s3, engineOf("s3://bucket/people.csv"));
+    try std.testing.expectEqual(Engine.postgres, engineOf("host=h dbname=people.csv"));
+    try std.testing.expectEqualStrings("CSV", (Connection{ .name = "a", .target = "/tmp/people.csv" }).engine());
+
+    // It is a path and nothing else, so the form takes it apart and puts it
+    // back as it was.
+    const shape = decompose(a, "/tmp/people.csv").?;
+    try std.testing.expectEqual(Engine.csv, shape.engine);
+    try std.testing.expectEqualStrings("/tmp/people.csv", shape.path);
+    try std.testing.expectEqualStrings("/tmp/people.csv", try compose(a, shape));
 }
 
 test "every engine the form offers is one it knows" {
