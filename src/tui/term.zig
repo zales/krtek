@@ -172,6 +172,9 @@ pub const Term = struct {
     /// Set when the last pasted key was a carriage return, so the line feed that
     /// follows it in CRLF text does not become a second line break.
     paste_after_cr: bool = false,
+    /// The start of a character the last read of the terminal ended in the
+    /// middle of, until the next read brings the rest of it.
+    unfinished: Unfinished = .{},
     /// Which way round the colours go. The terminal is asked, and says so again
     /// whenever the user switches theme; `KRTEK_THEME` overrides both.
     scheme: Scheme = .dark,
@@ -530,13 +533,7 @@ pub const Term = struct {
                     // arrives as 'a' with shift held, and on a layout where `:`, `/`
                     // or `@` need shift, the same - so anything typed has to be read
                     // from `text`, which is what the terminal says was produced.
-                    // Walked with `Chars`, because only the first character of it
-                    // is known to be whole.
-                    if (printableText(key)) |text| {
-                        var points: Chars = .{ .rest = text };
-                        while (points.next()) |point| {
-                            try out.append(self.allocator, .{ .char = point });
-                        }
+                    if (try typed(&self.unfinished, self.allocator, out, key)) {
                         continue;
                     }
                     if (self.translate(key)) |mapped| {
@@ -575,7 +572,14 @@ pub const Term = struct {
                     self.pasting = true;
                     self.paste_after_cr = false;
                 },
-                .paste_end => self.pasting = false,
+                .paste_end => {
+                    // A paste that ends in the middle of a character is not
+                    // finished by whatever is typed after it.
+                    if (self.unfinished.drop()) |point| {
+                        try out.append(self.allocator, .{ .char = point });
+                    }
+                    self.pasting = false;
+                },
                 .tick => if (!ticked) {
                     ticked = true;
                     try out.append(self.allocator, .tick);
@@ -615,22 +619,50 @@ pub const Term = struct {
     ///
     /// A control key carries `text` too in the legacy encoding - a bare `\r` for
     /// enter - so anything below a space is left to `translate`, as is anything
-    /// with ctrl or alt held, which is a command and not text.
-    ///
-    /// So is text that does not start with a whole character, as the U+FFFD
-    /// vaxis read it as. Vaxis reads the terminal 1024 bytes at a time and does
-    /// not hold back a character a read ends in the middle of: a long paste of
-    /// anything but ASCII comes in with pieces of characters for keys.
+    /// with ctrl or alt held, which is a command and not text. It is the first
+    /// byte that says, not the first character: the text of a key is not always
+    /// whole characters, and the rest of one cut in two is text as well.
     fn printableText(key: vaxis.Key) ?[]const u8 {
         if (key.mods.ctrl or key.mods.alt or key.mods.super) {
             return null;
         }
         const text = key.text orelse return null;
-        const first = decode(text) orelse return null;
-        if (first.point < 0x20 or first.point == 0x7f) {
+        if (text.len == 0 or text[0] < 0x20 or text[0] == 0x7f) {
             return null;
         }
         return text;
+    }
+
+    /// Type the text of `key`, if it is text at all, and say whether it was.
+    ///
+    /// Vaxis reads the terminal 1024 bytes at a time and does not hold back a
+    /// character a read ends in the middle of. Its start comes as the end of the
+    /// text of one key, and the rest at the start of the next read as keys of
+    /// their own, a byte each. Read as they come, the pieces are two to four
+    /// U+FFFD in the middle of a long paste - and in the statement that is run
+    /// after it - so the start is held in `unfinished` until the rest arrives.
+    fn typed(unfinished: *Unfinished, allocator: std.mem.Allocator, out: *std.ArrayList(Key), key: vaxis.Key) !bool {
+        const text = printableText(key) orelse {
+            // Whatever this key is, it is not the rest of that character.
+            if (unfinished.drop()) |point| {
+                try out.append(allocator, .{ .char = point });
+            }
+            return false;
+        };
+        const taken = unfinished.take(text);
+        if (taken.finished) |point| {
+            try out.append(allocator, .{ .char = point });
+        }
+        var points: Chars = .{ .rest = taken.rest };
+        while (points.next()) |point| {
+            // A control character inside the text of a key is one vaxis read
+            // into the U+FFFD of a broken byte in front of it. It was never a key.
+            if (point < 0x20 or point == 0x7f) {
+                continue;
+            }
+            try out.append(allocator, .{ .char = point });
+        }
+        return true;
     }
 
     fn translate(self: *Term, key: vaxis.Key) ?Key {
@@ -798,48 +830,147 @@ const Chars = struct {
     }
 };
 
-const testing = std.testing;
+/// The start of a character, as much of it as has come. See `Term.typed`.
+const Unfinished = struct {
+    bytes: [4]u8 = undefined,
+    len: u3 = 0,
+    /// How many bytes the character has, by the first of them.
+    need: u3 = 0,
 
-test "a read of the terminal that ends inside a character is not read past" {
-    // A paste longer than one read of the terminal is cut wherever the read ends,
-    // and vaxis hands the piece of a character it ends with over as the text of a
-    // key of its own - or, behind an Arabic number sign, which joins whatever
-    // follows it into one grapheme, as the end of the text of a whole one. The
-    // rest of that character starts the next read as bytes no character starts
-    // with. Each of them is typed as U+FFFD, as `keys` would.
-    const reads = [_]struct { bytes: []const u8, typed: []const u21 }{
-        .{ .bytes = "ab\xc4", .typed = &.{ 'a', 'b', 0xfffd } },
-        .{ .bytes = "\xe2\x82", .typed = &.{0xfffd} },
-        .{ .bytes = "\xf0\x9f\x98", .typed = &.{0xfffd} },
-        .{ .bytes = "\x8d\x8d", .typed = &.{ 0xfffd, 0xfffd } },
-        .{ .bytes = "\u{600}\xc4", .typed = &.{ 0x600, 0xfffd } },
-        .{ .bytes = "čaj", .typed = &.{ 'č', 'a', 'j' } },
-    };
-    var parser: vaxis.Parser = .{};
-    // The one that is cut short behind a whole character is one key, so it is
-    // `keys` walking the text that has to stop at its end.
-    try testing.expectEqualStrings("\u{600}\xc4", (try parser.parse("\u{600}\xc4", null)).event.?.key_press.text.?);
-    for (reads) |read| {
-        var typed: [8]u21 = undefined;
-        var count: usize = 0;
-        var at: usize = 0;
-        while (at < read.bytes.len) {
-            const result = try parser.parse(read.bytes[at..], null);
-            at += result.n;
-            const key = result.event.?.key_press;
-            if (Term.printableText(key)) |text| {
-                var points: Chars = .{ .rest = text };
-                while (points.next()) |point| {
-                    typed[count] = point;
-                    count += 1;
-                }
-            } else {
-                typed[count] = key.codepoint;
-                count += 1;
+    /// What there is to type now that `text` has come: the character that was
+    /// held, if it is done with - finished by the continuation bytes `text`
+    /// starts with, or a U+FFFD when `text` goes on with something else - and
+    /// the rest of `text`. A character `text` ends in the middle of is held in
+    /// its turn, and is not part of the rest.
+    fn take(self: *Unfinished, text: []const u8) struct { finished: ?u21, rest: []const u8 } {
+        var rest = text;
+        var finished: ?u21 = null;
+        if (self.len != 0) {
+            while (self.len < self.need and rest.len != 0 and rest[0] & 0xc0 == 0x80) {
+                self.bytes[self.len] = rest[0];
+                self.len += 1;
+                rest = rest[1..];
+            }
+            if (self.len < self.need and rest.len == 0) {
+                // All of it went into the character, which is still not whole:
+                // the rest of an emoji comes a byte a key.
+                return .{ .finished = null, .rest = rest };
+            }
+            finished = if (self.len < self.need)
+                replacement.point
+            else if (decode(self.bytes[0..self.need])) |char|
+                char.point
+            else
+                replacement.point;
+            self.len = 0;
+        }
+        // The start of a character with fewer continuation bytes after it than
+        // it has, at the very end, is where the read ended.
+        var at = rest.len;
+        while (at > 0 and rest.len - at < 3 and rest[at - 1] & 0xc0 == 0x80) {
+            at -= 1;
+        }
+        if (at > 0) {
+            const need = std.unicode.utf8ByteSequenceLength(rest[at - 1]) catch 0;
+            const have = rest.len - (at - 1);
+            if (need > have) {
+                @memcpy(self.bytes[0..have], rest[at - 1 ..]);
+                self.len = @intCast(have);
+                self.need = need;
+                rest = rest[0 .. at - 1];
             }
         }
-        try testing.expectEqualSlices(u21, read.typed, typed[0..count]);
+        return .{ .finished = finished, .rest = rest };
     }
+
+    /// What was held, as the U+FFFD it is once nothing is going to finish it.
+    fn drop(self: *Unfinished) ?u21 {
+        if (self.len == 0) {
+            return null;
+        }
+        self.len = 0;
+        return replacement.point;
+    }
+};
+
+const testing = std.testing;
+
+test "a character a read of the terminal cut in two is typed as one" {
+    // Each read is parsed on its own, as vaxis does. A key that is not text
+    // stands for itself by its code point, where `keys` would `translate` it.
+    const cases = [_]struct { reads: []const []const u8, typed: []const u21 }{
+        .{ .reads = &.{ "\xc4", "\x8daj" }, .typed = &.{ 'č', 'a', 'j' } },
+        .{ .reads = &.{ "\xe2", "\x82\xac" }, .typed = &.{'€'} },
+        .{ .reads = &.{ "\xe2\x82", "\xac" }, .typed = &.{'€'} },
+        .{ .reads = &.{ "\xf0", "\x9f", "\x98", "\x80" }, .typed = &.{0x1f600} },
+        // Behind an Arabic number sign, which joins whatever follows it into one
+        // grapheme, the start of a character is the end of a key whose first
+        // character is whole.
+        .{ .reads = &.{ "\u{600}\xc4", "\x8d" }, .typed = &.{ 0x600, 'č' } },
+        // Held until something comes after it, and a U+FFFD when that is not the
+        // rest of it - more text or a key that is not text.
+        .{ .reads = &.{"ab\xc4"}, .typed = &.{ 'a', 'b' } },
+        .{ .reads = &.{ "ab\xc4", "x" }, .typed = &.{ 'a', 'b', 0xfffd, 'x' } },
+        .{ .reads = &.{ "\xe2\x82", "\r" }, .typed = &.{ 0xfffd, vaxis.Key.enter } },
+        // Not the rest of anything: one U+FFFD a byte, as before.
+        .{ .reads = &.{"\x8d\x8d"}, .typed = &.{ 0xfffd, 0xfffd } },
+        // A byte that cannot start a character swallows the carriage return
+        // after it into its U+FFFD in vaxis, and the return is not typed.
+        .{ .reads = &.{"\xc4\r"}, .typed = &.{0xfffd} },
+    };
+    // And that one is a single key indeed, not one that happens to stop where
+    // the character it joins does.
+    var parser: vaxis.Parser = .{};
+    try testing.expectEqualStrings("\u{600}\xc4", (try parser.parse("\u{600}\xc4", null)).event.?.key_press.text.?);
+    for (cases) |case| {
+        const got = try typeReads(testing.allocator, case.reads);
+        defer testing.allocator.free(got);
+        try testing.expectEqualSlices(u21, case.typed, got);
+    }
+
+    // Whatever vaxis does with a grapheme, text cut into three reads anywhere at
+    // all comes out as the characters it went in as.
+    const text = "Příliš žluťoučký kůň € 日本 😀 👩\u{200d}🚀 e\u{301} \u{600}č";
+    var want: std.ArrayList(u21) = .empty;
+    defer want.deinit(testing.allocator);
+    var points: Chars = .{ .rest = text };
+    while (points.next()) |point| {
+        try want.append(testing.allocator, point);
+    }
+    for (0..text.len + 1) |i| {
+        for (i..text.len + 1) |j| {
+            const got = try typeReads(testing.allocator, &.{ text[0..i], text[i..j], text[j..] });
+            defer testing.allocator.free(got);
+            try testing.expectEqualSlices(u21, want.items, got);
+        }
+    }
+}
+
+/// What `keys` types from these reads of the terminal, with the code point of a
+/// key that is not text standing in for whatever `translate` makes of it.
+fn typeReads(allocator: std.mem.Allocator, reads: []const []const u8) ![]u21 {
+    var parser: vaxis.Parser = .{};
+    var unfinished: Unfinished = .{};
+    var keys: std.ArrayList(Key) = .empty;
+    defer keys.deinit(allocator);
+    var points: std.ArrayList(u21) = .empty;
+    errdefer points.deinit(allocator);
+    for (reads) |read| {
+        var at: usize = 0;
+        while (at < read.len) {
+            const result = try parser.parse(read[at..], null);
+            at += result.n;
+            const key = result.event.?.key_press;
+            keys.clearRetainingCapacity();
+            if (!try Term.typed(&unfinished, allocator, &keys, key)) {
+                try keys.append(allocator, .{ .char = key.codepoint });
+            }
+            for (keys.items) |one| {
+                try points.append(allocator, one.char);
+            }
+        }
+    }
+    return points.toOwnedSlice(allocator);
 }
 
 test "only a whole character decodes, from either end" {
