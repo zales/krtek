@@ -740,7 +740,15 @@ fn grid(app: *App, size: Size, side: usize, rows: usize) void {
         // An empty table and a filter that matches nothing look the same on
         // screen, so say which one it is and what undoes it.
         const filtered = app.isFiltered();
-        _ = write(app, if (filtered)
+        // And a table that could not be read is neither: the status line has
+        // the reason, and an invitation to insert a row is not what goes here.
+        // With a filter on it the filter may be the reason, so that is still
+        // what is offered.
+        _ = write(app, if (app.grid.failed and filtered)
+            "could not be read - W changes the filter, esc clears it"
+        else if (app.grid.failed)
+            "could not be read - r tries again"
+        else if (filtered)
             "nothing matches the filter - W changes it, esc clears it"
         else if (app.grid.editable and app.caps().no_insert.len == 0)
             "no rows yet - i inserts one"

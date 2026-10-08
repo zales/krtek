@@ -27,8 +27,15 @@
 //! scheme used to be taken off and thrown away: the target said encrypted, the
 //! connection was not, and the password went out in the clear to a server that
 //! then hung up on it.
+//!
+//! **A connection that is lost is made again**, when something is next asked
+//! for: the server restarted, or it was idle longer than something between here
+//! and there allows. It used to stay lost. Every count came back as nothing and
+//! every listing as empty, the screen said `reloaded` over a table of no rows,
+//! and the only way back was to start the program again. See `exchange`.
 
 const std = @import("std");
+const clock = @import("clock.zig");
 const db = @import("db.zig");
 const net = @import("net.zig");
 const typed = @import("typed.zig");
@@ -48,12 +55,30 @@ const READ_PATIENCE_MS: i64 = 60 * 1000;
 /// What a read says when the other end is no longer there.
 const CLOSED = "redis closed the connection";
 
+/// When making a lost connection again has failed, how long before it is tried
+/// once more - counted from the failure, so that a try which waited out a host
+/// that answers nothing has not used the time up by itself. One key is several
+/// questions, the count for the sidebar and the one for the header and the rows,
+/// and a server that is still away is no nearer for each of them finding that
+/// out in turn. Short, because nothing here asks unless somebody does.
+const REVIVE_EVERY_MS: f64 = 2000;
+
 pub const Db = struct {
     allocator: std.mem.Allocator,
-    /// The socket, with TLS on it when the target was `rediss://`.
+    /// The socket, with TLS on it when the target was `rediss://`. No descriptor
+    /// in it is no connection: one that was lost, until it is made again.
     stream: net.Stream,
-    /// Whether the certificate was looked at, for what `settings` says about it.
+    /// Whether the target asked for TLS, which is asked for again with it.
+    tls: bool = false,
+    /// Whether the certificate was looked at, for what `settings` says about it
+    /// and for looking at the next one the same way.
     verified: bool = true,
+    /// What the server was told to be let in, and is told again.
+    password: List = .empty,
+    /// Why there is no connection, when there is none.
+    lost: List = .empty,
+    /// When making it again last failed. Zero when it has not.
+    failed_at: f64 = 0,
     /// Everything received but not yet consumed.
     buffer: List = .empty,
     at: usize = 0,
@@ -70,12 +95,6 @@ pub const Db = struct {
     progress: ?db.Progress = null,
     /// Replies live here until the next statement.
     replies: std.heap.ArenaAllocator,
-    /// How many replies are still owed. Giving up in the middle of a pipeline
-    /// would leave the connection holding answers nobody is going to read, so
-    /// while this is not zero the spinner is drawn but the answer is not acted
-    /// on - the giving up waits for the end of the exchange, which is at most one
-    /// round trip away.
-    owed: usize = 0,
 
     pub fn open(allocator: std.mem.Allocator, target: []const u8, report: *List) !*Db {
         const parts = try parse(allocator, target);
@@ -108,15 +127,24 @@ pub const Db = struct {
         self.* = .{
             .allocator = allocator,
             .stream = stream,
+            .tls = parts.tls,
             .verified = parts.verify,
+            .port = parts.port,
             .index = parts.index,
             .replies = std.heap.ArenaAllocator.init(allocator),
         };
         errdefer self.close();
+        // All that a connection is made of, before anything is asked on this
+        // one: whatever is asked may find it gone and have to make another.
+        try self.host.appendSlice(allocator, parts.host);
+        try self.password.appendSlice(allocator, parts.password);
 
+        // The first two things are said once and on this connection only. One
+        // that goes away under them is a server that will not have this client,
+        // and making another to be turned away the same is not an answer.
         db.tell("waiting for {s} to answer", .{parts.host});
         if (parts.password.len != 0) {
-            const reply = self.command(&[_][]const u8{ "AUTH", parts.password }) catch {
+            const reply = self.first(&[_][]const u8{ "AUTH", parts.password }) catch {
                 try self.unanswered(report, parts);
                 return error.Driver;
             };
@@ -127,7 +155,7 @@ pub const Db = struct {
         }
         // PING first: a wrong password or a protected server says so here rather
         // than halfway through the first screen.
-        const ping = self.command(&[_][]const u8{"PING"}) catch {
+        const ping = self.first(&[_][]const u8{"PING"}) catch {
             try self.unanswered(report, parts);
             return error.Driver;
         };
@@ -139,8 +167,6 @@ pub const Db = struct {
             try self.useIndex(parts.index);
         }
         self.count = self.databaseCount();
-        try self.host.appendSlice(allocator, parts.host);
-        self.port = parts.port;
         self.relabel();
         try self.version_text.print(allocator, "Redis {s}", .{self.fact("redis_version") orelse "?"});
         return self;
@@ -177,8 +203,12 @@ pub const Db = struct {
     }
 
     pub fn close(self: *Db) void {
-        self.stream.close();
+        if (self.stream.fd >= 0) {
+            self.stream.close();
+        }
         self.host.deinit(self.allocator);
+        self.password.deinit(self.allocator);
+        self.lost.deinit(self.allocator);
         self.buffer.deinit(self.allocator);
         self.label.deinit(self.allocator);
         self.version_text.deinit(self.allocator);
@@ -234,16 +264,60 @@ pub const Db = struct {
         self.last_error.appendSlice(self.allocator, text) catch {};
     }
 
+    fn complain(self: *Db, comptime fmt: []const u8, args: anytype) void {
+        self.last_error.clearRetainingCapacity();
+        self.last_error.print(self.allocator, fmt, args) catch {};
+    }
+
     // ------------------------------------------------------------------ RESP
+
+    /// What can go wrong on the way to a reply: what the interface is told, and
+    /// the connection being gone, which is the one there is something to do about.
+    const Failure = db.Error || error{Gone};
+
+    /// Whether what is asked is asked a second time when the connection goes
+    /// away under it.
+    const Asking = enum { again, once };
 
     /// Send one command and read its reply. The reply is owned by `replies` and
     /// lives until the next statement clears it.
+    ///
+    /// For nearly everything this driver asks on its own account, which leaves
+    /// the same behind asked twice as asked once: it reads, it sets a key or
+    /// how long one lives, it deletes one. So it is asked again on a new
+    /// connection when the one it was asked on goes.
     fn command(self: *Db, args: []const []const u8) db.Error!Value {
+        return self.single(args, .again);
+    }
+
+    /// The same for what is not the same done twice, which is sent once: a line
+    /// somebody typed, which may be an `INCR` or an `RPUSH`, and a rename,
+    /// which the second time finds nothing to rename. A connection that goes
+    /// before the answer comes does not say whether the server got as far as
+    /// doing it.
+    fn commandOnce(self: *Db, args: []const []const u8) db.Error!Value {
+        return self.single(args, .once);
+    }
+
+    fn single(self: *Db, args: []const []const u8, asking: Asking) db.Error!Value {
         var out: List = .empty;
         defer out.deinit(self.allocator);
         append(&out, self.allocator, args) catch return error.OutOfMemory;
-        try self.writeAll(out.items);
-        return self.read(self.replies.allocator());
+        var reply: [1]Value = undefined;
+        try self.exchange(self.replies.allocator(), out.items, &reply, asking);
+        return reply[0];
+    }
+
+    /// One command on the connection as it stands, with nothing done about a
+    /// connection that is not there: for the first things said on one, by
+    /// whoever is making it.
+    fn first(self: *Db, args: []const []const u8) Failure!Value {
+        var out: List = .empty;
+        defer out.deinit(self.allocator);
+        append(&out, self.allocator, args) catch return error.OutOfMemory;
+        var reply: [1]Value = undefined;
+        try self.converse(self.replies.allocator(), out.items, &reply);
+        return reply[0];
     }
 
     /// One command, in the shape the wire wants it.
@@ -274,36 +348,224 @@ pub const Db = struct {
         for (commands) |args| {
             append(&out, self.allocator, args) catch return error.OutOfMemory;
         }
-        try self.writeAll(out.items);
         const replies = try arena.alloc(Value, commands.len);
-        self.owed = commands.len;
-        defer self.owed = 0;
-        for (replies, 0..) |*into, i| {
-            self.owed = commands.len - i;
-            into.* = try self.read(arena);
-        }
+        // What is asked in bulk is what a page of keys is and holds: all reads.
+        try self.exchange(arena, out.items, replies, .again);
         return replies;
     }
 
-    fn writeAll(self: *Db, bytes: []const u8) db.Error!void {
+    /// Ask, and be answered, on a connection that is there.
+    ///
+    /// A server that restarts, or anything on the way that drops a connection
+    /// nobody has used for a while, leaves this end holding a socket with nobody
+    /// on the other end of it. That used to be the end of the session: every
+    /// request after it failed, most of them into a count of nothing or an empty
+    /// list, and nothing ever dialled again.
+    ///
+    /// So the connection is looked at before anything is written, which is where
+    /// nearly every lost one is found - the server said it was going, and nothing
+    /// here was listening - and made again there, before the request can be in
+    /// doubt. One that goes later, between the question and the answer, is made
+    /// again as well, and the question asked once more: once, and not where
+    /// twice is not the same as once, because whether it was carried out before
+    /// the connection went is something this end cannot know.
+    fn exchange(self: *Db, arena: std.mem.Allocator, bytes: []const u8, into: []Value, asking: Asking) db.Error!void {
+        // Asked before anything is sent, which is where giving up costs
+        // nothing: no answer is owed yet, and the connection is as it was.
+        if (self.progress) |progress| {
+            if (!progress.call()) {
+                self.remember("given up on");
+                return error.Driver;
+            }
+        }
+        try self.ready();
+        self.attempt(arena, bytes, into) catch |err| switch (err) {
+            error.Gone => {
+                if (asking == .once) {
+                    self.complain("{s}, and the command is not sent a second time: it may have been carried out", .{self.lost.items});
+                    return error.Driver;
+                }
+                try self.revive();
+                return self.attempt(arena, bytes, into) catch |again| switch (again) {
+                    error.Gone => error.Driver,
+                    else => |other| other,
+                };
+            },
+            else => |other| return other,
+        };
+    }
+
+    /// A connection to ask on, or the reason there is none.
+    fn ready(self: *Db) db.Error!void {
+        if (self.stream.fd >= 0) {
+            if (!self.hungUp()) {
+                return;
+            }
+            self.drop(CLOSED);
+        }
+        return self.revive();
+    }
+
+    /// Whether the server hung up while nothing was being asked. An end is
+    /// something to read, so a connection that has one waiting on it is readable
+    /// and one that is only idle is not: asking costs one call that does not
+    /// wait, and reading - which is what tells an end from anything else, and
+    /// through TLS from the server's saying goodbye - is only done where there
+    /// is something there.
+    fn hungUp(self: *Db) bool {
+        var fds = [1]std.c.pollfd{.{ .fd = self.stream.fd, .events = std.c.POLL.IN, .revents = 0 }};
+        if (std.c.poll(&fds, 1, 0) <= 0) {
+            return false;
+        }
+        var chunk: [4096]u8 = undefined;
+        const got = self.stream.readNow(&chunk) catch return true;
+        // Bytes nobody asked for. Not this function's to make sense of: they are
+        // where the next read looks first, as they were before this looked.
+        self.buffer.appendSlice(self.allocator, chunk[0..got]) catch return true;
+        return false;
+    }
+
+    /// One try at it.
+    ///
+    /// Whatever goes wrong once something has been written leaves a connection
+    /// that is out of step: a reply still on its way, which nobody is going to
+    /// read, would be taken for the answer to whatever is asked next, and so
+    /// would every one after it. That is what giving up on a command did - the
+    /// answer it did not wait for was read as the next command's. So such a
+    /// connection is let go of, and what is asked next gets a new one.
+    fn attempt(self: *Db, arena: std.mem.Allocator, bytes: []const u8, into: []Value) Failure!void {
+        self.converse(arena, bytes, into) catch |err| {
+            self.drop(self.last_error.items);
+            return err;
+        };
+    }
+
+    /// Write what is asked and read as many replies as it has commands.
+    fn converse(self: *Db, arena: std.mem.Allocator, bytes: []const u8, into: []Value) Failure!void {
+        try self.writeAll(bytes);
+        for (into) |*reply| {
+            reply.* = try self.read(arena);
+        }
+    }
+
+    /// Let go of a connection that is no use any more, and keep why.
+    fn drop(self: *Db, why: []const u8) void {
+        if (self.stream.fd >= 0) {
+            self.stream.close();
+        }
+        self.buffer.clearRetainingCapacity();
+        self.at = 0;
+        self.lost.clearRetainingCapacity();
+        self.lost.appendSlice(self.allocator, if (why.len != 0) why else CLOSED) catch {};
+    }
+
+    /// Make the connection again, or say why not.
+    fn revive(self: *Db) db.Error!void {
+        if (self.failed_at != 0 and clock.steadyMs() - self.failed_at < REVIVE_EVERY_MS) {
+            // Said again and not tried again: `lost` is what the last try said.
+            self.remember(self.lost.items);
+            return error.Driver;
+        }
+        self.dial() catch |err| {
+            self.failed_at = clock.steadyMs();
+            self.lost.clearRetainingCapacity();
+            self.lost.appendSlice(self.allocator, self.last_error.items) catch {};
+            return err;
+        };
+        self.failed_at = 0;
+        self.lost.clearRetainingCapacity();
+        // What the old connection said on its way out is not about this one.
+        self.last_error.clearRetainingCapacity();
+    }
+
+    /// A new connection, put back the way the old one was: at the name the
+    /// target gave, which is looked up again because a server that came back may
+    /// have come back somewhere else; through TLS where the target asked for it,
+    /// checking what was checked the first time; let in with the same password;
+    /// and in the database that was in use, which a new connection is not.
+    fn dial(self: *Db) db.Error!void {
+        var stream = net.connect(self.allocator, self.host.items, self.port) catch {
+            self.complain("the connection to redis at {s}:{d} was lost, and it cannot be reached again", .{ self.host.items, self.port });
+            return error.Driver;
+        };
+        stream.setTimeout(READ_TIMEOUT_MS);
+        if (self.tls) {
+            var why: List = .empty;
+            defer why.deinit(self.allocator);
+            net.startTls(self.allocator, &stream, self.host.items, .{ .verify = self.verified }, &why) catch {
+                self.complain("the connection to redis at {s}:{d} was lost, and TLS could not be set up again{s}{s}", .{
+                    self.host.items,                      self.port,
+                    if (why.items.len != 0) ": " else "", why.items,
+                });
+                stream.close();
+                return error.Driver;
+            };
+            while (net.ssl.ERR_get_error() != 0) {}
+        }
+        self.stream = stream;
+        self.buffer.clearRetainingCapacity();
+        self.at = 0;
+        self.greet() catch |err| {
+            self.stream.close();
+            switch (err) {
+                error.Gone => {
+                    self.complain("the connection to redis at {s}:{d} was lost, and the server hangs up on a new one", .{ self.host.items, self.port });
+                    return error.Driver;
+                },
+                else => |other| return other,
+            }
+        };
+    }
+
+    /// What a new connection is told before it stands in for the old one. A
+    /// server that has changed its mind since - another password, fewer
+    /// databases - says so here, and that is the reason given: carrying on in
+    /// database 0 because 3 would not open is how a key gets written to the
+    /// wrong place.
+    fn greet(self: *Db) Failure!void {
+        if (self.password.items.len != 0) {
+            const reply = try self.first(&[_][]const u8{ "AUTH", self.password.items });
+            if (reply == .failure) {
+                self.complain("the connection to redis at {s}:{d} was lost, and the password is not taken again: {s}", .{
+                    self.host.items, self.port, reply.failure,
+                });
+                return error.Driver;
+            }
+        }
+        if (self.index != 0) {
+            var buf: [8]u8 = undefined;
+            const reply = try self.first(&[_][]const u8{
+                "SELECT", std.mem.print(&buf, "{d}", .{self.index}) catch "0",
+            });
+            if (reply == .failure) {
+                self.complain("the connection to redis at {s}:{d} was lost, and database {d} does not open again: {s}", .{
+                    self.host.items, self.port, self.index, reply.failure,
+                });
+                return error.Driver;
+            }
+        }
+    }
+
+    fn writeAll(self: *Db, bytes: []const u8) Failure!void {
         self.stream.write(bytes) catch {
             self.remember("the connection to redis is gone");
-            return error.Driver;
+            return error.Gone;
         };
     }
 
     /// One reply, reading more from the socket whenever the buffer runs out.
-    fn read(self: *Db, arena: std.mem.Allocator) db.Error!Value {
+    fn read(self: *Db, arena: std.mem.Allocator) Failure!Value {
         // Asked here rather than only where a read stalls. A hundred replies that
         // each arrive in twenty milliseconds never stall once, so nothing was ever
         // asked and nothing was ever drawn - the screen sat still for half a minute
         // with no spinner and no way to stop it. What makes an operation long is
         // how many replies it waits for, not how long any one of them took.
+        //
+        // Asked for the drawing, and the answer left alone: the place to give up
+        // is before a question is sent or while its answer is not coming, and
+        // between two replies that are arriving is neither.
         if (self.progress) |progress| {
-            if (!progress.call() and self.owed == 0) {
-                self.remember("given up on");
-                return error.Driver;
-            }
+            _ = progress.call();
         }
         while (true) {
             // Where this reply begins. A parse that runs out of bytes has already
@@ -331,7 +593,11 @@ pub const Db = struct {
                     self.at = start;
                     try self.fill();
                 },
-                else => return error.Driver,
+                error.OutOfMemory => return error.OutOfMemory,
+                error.Malformed => {
+                    self.remember("redis answered with something that is not a reply");
+                    return error.Driver;
+                },
             }
         }
     }
@@ -340,7 +606,7 @@ pub const Db = struct {
     /// reply that is slow to arrive gets to ask whether the user is still waiting -
     /// without it, a server that stopped answering held the whole program and
     /// ctrl+c could do nothing about it.
-    fn fill(self: *Db) db.Error!void {
+    fn fill(self: *Db) Failure!void {
         var chunk: [16 * 1024]u8 = undefined;
         var waiting: i64 = 0;
         while (true) {
@@ -348,7 +614,7 @@ pub const Db = struct {
             // or a broken connection is an error, in the clear or through TLS.
             const got = self.stream.readNow(&chunk) catch {
                 self.remember(CLOSED);
-                return error.Driver;
+                return error.Gone;
             };
             if (got != 0) {
                 try self.buffer.appendSlice(self.allocator, chunk[0..got]);
@@ -604,7 +870,7 @@ pub const Db = struct {
 
     /// A key renamed, which is what changing the key of a row means.
     fn rename(self: *Db, from: []const u8, to: []const u8) db.Error!void {
-        const reply = try self.command(&[_][]const u8{ "RENAME", from, to });
+        const reply = try self.commandOnce(&[_][]const u8{ "RENAME", from, to });
         if (reply == .failure) {
             self.remember(reply.failure);
             return error.Driver;
@@ -632,7 +898,7 @@ pub const Db = struct {
         if (std.ascii.eqlIgnoreCase(args[0], "SELECT")) {
             return self.oneText("reply", "use # to switch database, so the interface follows");
         }
-        const reply = try self.command(args);
+        const reply = try self.commandOnce(args);
         if (reply == .failure) {
             self.remember(reply.failure);
             return error.Driver;
@@ -972,6 +1238,13 @@ pub const Db = struct {
 
     pub fn settings(self: *Db, arena: std.mem.Allocator) db.Error![]db.Setting {
         var list: std.ArrayList(db.Setting) = .empty;
+        // Made again here if it can be, so that what follows is about a server.
+        // Where it cannot, that is the one thing there is to say: every line
+        // below would be a guess, and "encryption: none" a wrong one.
+        self.ready() catch {
+            try list.append(arena, .{ .label = "connection", .value = try arena.print("lost: {s}", .{self.lost.items}) });
+            return list.items;
+        };
         const FACTS = [_][2][]const u8{
             .{ "version", "redis_version" },
             .{ "mode", "redis_mode" },
@@ -1463,8 +1736,8 @@ test "many commands go out together and their answers come back in order" {
     try std.testing.expectEqualStrings("string", said[0].text.?);
     try std.testing.expectEqual(@as(i64, -1), said[1].number);
     try std.testing.expectEqualStrings("ahoj", said[2].text.?);
-    // And nothing is left owing, so the next exchange starts clean.
-    try std.testing.expectEqual(@as(usize, 0), self.owed);
+    // And nothing is left over, so the next exchange starts clean.
+    try std.testing.expectEqual(@as(usize, 0), self.buffer.items.len);
 
     // What went out is three commands in one write, in the order given.
     var sent: [256]u8 = undefined;
@@ -1594,4 +1867,404 @@ test "a reply that arrives in pieces is read from its start" {
     try std.testing.expectEqualStrings("SHORT", keys[1].text.?);
     // And the buffer is left with nothing owing, so the next reply starts clean.
     try std.testing.expectEqual(@as(usize, 0), self.at);
+}
+
+// ------------------------------------------------- a server for the tests
+
+/// A server for the tests, on a port of its own. It answers the few commands
+/// they send, writes down what it heard and on which connection, and hangs up
+/// when it is told to - which is what a socket pair cannot stand in for: an end
+/// that goes away, and somewhere to dial afterwards.
+const Stand = struct {
+    listener: std.c.fd_t,
+    port: u16,
+    thread: ?std.Thread = null,
+    mutex: std.c.pthread_mutex_t = .{},
+    done: bool = false,
+    /// Whoever is connected now, and how many have been.
+    client: std.c.fd_t = -1,
+    connections: usize = 0,
+    /// A line for each command: the connection it came on, and its words.
+    heard: List = .empty,
+    /// The command to hang up on in place of answering, once.
+    hang_up_on: []const u8 = "",
+    /// What AUTH is answered with.
+    password_is: []const u8 = "hunter2",
+
+    const a = std.testing.allocator;
+
+    fn start() !*Stand {
+        return startAt(0);
+    }
+
+    /// On a port of the caller's choosing: the one another of these has just
+    /// left, for a server that comes back where it was.
+    fn startAt(port: u16) !*Stand {
+        const listener = std.c.socket(std.c.AF.INET, std.c.SOCK.STREAM, 0);
+        if (listener < 0) {
+            return error.SkipZigTest;
+        }
+        errdefer _ = std.c.close(listener);
+        // Or a port that was in use a moment ago is refused for a while.
+        const yes: c_int = 1;
+        _ = std.c.setsockopt(listener, std.c.SOL.SOCKET, std.c.SO.REUSEADDR, &yes, @sizeOf(c_int));
+        // Port 0 is whichever one is free, and the system says which it was.
+        var address = std.c.sockaddr.in{ .port = std.mem.nativeToBig(u16, port), .addr = @bitCast([4]u8{ 127, 0, 0, 1 }) };
+        var size: std.c.socklen_t = @sizeOf(std.c.sockaddr.in);
+        if (std.c.bind(listener, @ptrCast(&address), size) != 0 or
+            std.c.listen(listener, 8) != 0 or
+            std.c.getsockname(listener, @ptrCast(&address), &size) != 0)
+        {
+            return error.SkipZigTest;
+        }
+        const self = try a.create(Stand);
+        self.* = .{ .listener = listener, .port = std.mem.bigToNative(u16, address.port) };
+        self.thread = try std.Thread.spawn(.{}, run, .{self});
+        return self;
+    }
+
+    fn stop(self: *Stand) void {
+        self.hold();
+        self.done = true;
+        self.release();
+        if (self.thread) |thread| {
+            thread.join();
+        }
+        _ = std.c.close(self.listener);
+        self.heard.deinit(a);
+        a.destroy(self);
+    }
+
+    fn hold(self: *Stand) void {
+        _ = std.c.pthread_mutex_lock(&self.mutex);
+    }
+
+    fn release(self: *Stand) void {
+        _ = std.c.pthread_mutex_unlock(&self.mutex);
+    }
+
+    fn finished(self: *Stand) bool {
+        self.hold();
+        defer self.release();
+        return self.done;
+    }
+
+    /// Something to read on this descriptor before the test is over, or not.
+    fn waitFor(self: *Stand, fd: std.c.fd_t) bool {
+        while (!self.finished()) {
+            var fds = [1]std.c.pollfd{.{ .fd = fd, .events = std.c.POLL.IN, .revents = 0 }};
+            if (std.c.poll(&fds, 1, 10) > 0) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    fn run(self: *Stand) void {
+        while (self.waitFor(self.listener)) {
+            const client = std.c.accept(self.listener, null, null);
+            if (client < 0) {
+                continue;
+            }
+            self.hold();
+            self.client = client;
+            self.connections += 1;
+            const number = self.connections;
+            self.release();
+            self.serve(client, number);
+            self.hold();
+            self.client = -1;
+            self.release();
+            _ = std.c.close(client);
+        }
+    }
+
+    /// Hang up on whoever is connected, the way a server that restarts does.
+    fn hangUp(self: *Stand) void {
+        self.hold();
+        defer self.release();
+        if (self.client >= 0) {
+            _ = std.c.shutdown(self.client, 2);
+        }
+    }
+
+    fn serve(self: *Stand, client: std.c.fd_t, number: usize) void {
+        var bytes: [4096]u8 = undefined;
+        while (self.waitFor(client)) {
+            const got = std.c.recv(client, &bytes, bytes.len, 0);
+            if (got <= 0) {
+                return;
+            }
+            // Every command the tests send is short and arrives whole, and no
+            // word of one has a line break in it: a count, and then a length
+            // and a word for each.
+            var lines = std.mem.splitSequence(u8, bytes[0..@intCast(got)], "\r\n");
+            while (lines.next()) |head| {
+                if (head.len < 2 or head[0] != '*') {
+                    continue;
+                }
+                const count = std.fmt.parseInt(usize, head[1..], 10) catch return;
+                var words: [8][]const u8 = undefined;
+                for (0..@min(count, words.len)) |i| {
+                    _ = lines.next();
+                    words[i] = lines.next() orelse return;
+                }
+                if (!self.answer(client, number, words[0..@min(count, words.len)])) {
+                    return;
+                }
+            }
+        }
+    }
+
+    /// Answer one command. False is hanging up.
+    fn answer(self: *Stand, client: std.c.fd_t, number: usize, words: []const []const u8) bool {
+        const name = words[0];
+        self.hold();
+        self.heard.print(a, "{d}", .{number}) catch {};
+        for (words) |word| {
+            self.heard.print(a, " {s}", .{word}) catch {};
+        }
+        self.heard.append(a, '\n') catch {};
+        const hang_up = self.hang_up_on.len != 0 and std.ascii.eqlIgnoreCase(name, self.hang_up_on);
+        if (hang_up) {
+            self.hang_up_on = "";
+        }
+        const password = self.password_is;
+        self.release();
+        if (hang_up) {
+            return false;
+        }
+
+        const is = std.ascii.eqlIgnoreCase;
+        const reply: []const u8 = if (is(name, "AUTH"))
+            (if (std.mem.eql(u8, words[words.len - 1], password)) "+OK\r\n" else "-WRONGPASS invalid username-password pair\r\n")
+        else if (is(name, "PING"))
+            "+PONG\r\n"
+        else if (is(name, "SELECT"))
+            (if (std.mem.eql(u8, words[1], "99")) "-ERR DB index is out of range\r\n" else "+OK\r\n")
+        else if (is(name, "CONFIG"))
+            "*2\r\n$9\r\ndatabases\r\n$2\r\n16\r\n"
+        else if (is(name, "INFO"))
+            "$21\r\nredis_version:7.0.0\r\n\r\n"
+        else if (is(name, "DBSIZE"))
+            ":2\r\n"
+        else if (is(name, "INCR"))
+            ":1\r\n"
+        else if (is(name, "GET"))
+            "$5\r\nfresh\r\n"
+        else if (is(name, "BLPOP")) late: {
+            // Answered after whoever asked has stopped waiting.
+            clock.sleep(250);
+            break :late "$5\r\nstale\r\n";
+        } else "+OK\r\n";
+        _ = std.c.send(client, reply.ptr, reply.len, 0);
+        return true;
+    }
+
+    /// What was heard so far, as the caller's to free.
+    fn said(self: *Stand) ![]u8 {
+        self.hold();
+        defer self.release();
+        return a.dupe(u8, self.heard.items);
+    }
+
+    fn connected(self: *Stand) usize {
+        self.hold();
+        defer self.release();
+        return self.connections;
+    }
+
+    /// Open the driver on this server. `rest` is what follows the port.
+    fn open(self: *Stand, comptime rest: []const u8) !*Db {
+        var report: List = .empty;
+        defer report.deinit(a);
+        var target: [96]u8 = undefined;
+        return Db.open(a, try std.mem.print(&target, "redis://:hunter2@127.0.0.1:{d}" ++ rest, .{self.port}), &report);
+    }
+
+    /// Wait until the driver's end has been told that the other one is gone.
+    fn untilHungUp(conn: *Db) void {
+        var waited: usize = 0;
+        while (waited < 200) : (waited += 1) {
+            var fds = [1]std.c.pollfd{.{ .fd = conn.stream.fd, .events = std.c.POLL.IN, .revents = 0 }};
+            if (std.c.poll(&fds, 1, 5) > 0) {
+                return;
+            }
+        }
+    }
+};
+
+test "a connection the server hung up on is made again, and put back as it was" {
+    // What a restart looks like from here: the server says it is going while
+    // nothing is being asked, and the next thing asked finds a socket with
+    // nobody on the other end. It used to fail, and so did everything after it.
+    const stand = try Stand.start();
+    defer stand.stop();
+    const conn = try stand.open("/3");
+    defer conn.close();
+    try std.testing.expectEqual(@as(usize, 1), stand.connected());
+
+    stand.hangUp();
+    Stand.untilHungUp(conn);
+
+    // Found gone before anything was written, so even what somebody typed -
+    // which is never sent twice - goes out on the new connection, once.
+    var rows = (try conn.query("INCR n", null)).?;
+    rows.close();
+    try std.testing.expectEqual(@as(usize, 2), stand.connected());
+
+    const heard = try stand.said();
+    defer std.testing.allocator.free(heard);
+    // The password first, then the database that was in use, and only then
+    // the question: a new connection is in database 0 and has said nothing.
+    try std.testing.expect(std.mem.find(u8, heard, "2 AUTH hunter2\n2 SELECT 3\n2 INCR n\n") != null);
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, heard, "INCR n"));
+    try std.testing.expectEqualStrings("", conn.message());
+    try std.testing.expectEqual(@as(usize, 0), conn.lost.items.len);
+}
+
+test "what the driver asks for itself is asked again when the connection goes under it" {
+    // Not found gone beforehand: the server hangs up with the question in its
+    // hand. A read comes to the same asked twice, so it is.
+    const stand = try Stand.start();
+    defer stand.stop();
+    const conn = try stand.open("");
+    defer conn.close();
+
+    stand.hold();
+    stand.hang_up_on = "DBSIZE";
+    stand.release();
+    try std.testing.expectEqual(@as(?i64, 2), conn.rowCount(.{ .name = TABLE }));
+
+    const heard = try stand.said();
+    defer std.testing.allocator.free(heard);
+    try std.testing.expect(std.mem.find(u8, heard, "1 DBSIZE\n2 AUTH hunter2\n2 DBSIZE\n") != null);
+}
+
+test "what somebody typed is not sent twice" {
+    // The same, with a command that is not the same done twice. Whether the
+    // server carried it out before it went is not known here, so it is said
+    // and not repeated - and the next thing asked has a connection again.
+    const stand = try Stand.start();
+    defer stand.stop();
+    const conn = try stand.open("");
+    defer conn.close();
+
+    stand.hold();
+    stand.hang_up_on = "INCR";
+    stand.release();
+    try std.testing.expectError(error.Driver, conn.query("INCR n", null));
+    try std.testing.expect(std.mem.find(u8, conn.message(), CLOSED) != null);
+    try std.testing.expect(std.mem.find(u8, conn.message(), "not sent a second time") != null);
+
+    var rows = (try conn.query("GET k", null)).?;
+    defer rows.close();
+    try std.testing.expect(try rows.next());
+    try std.testing.expectEqualStrings("fresh", rows.value(0).text);
+
+    const heard = try stand.said();
+    defer std.testing.allocator.free(heard);
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, heard, "INCR n"));
+    try std.testing.expect(std.mem.find(u8, heard, "2 GET k\n") != null);
+}
+
+test "an answer that was given up on is not read as the next one" {
+    // Giving up on a command left its answer on the way, and whatever was
+    // asked next read that one for its own - and so on, one behind, for as
+    // long as the program ran. The connection is let go of with the wait.
+    const stand = try Stand.start();
+    defer stand.stop();
+    const conn = try stand.open("");
+    defer conn.close();
+
+    const Patience = struct {
+        var asked: usize = 0;
+        fn keepGoing(_: *anyopaque) bool {
+            asked += 1;
+            // Before it is sent, before its reply is read, and then - nothing
+            // having come - the one that counts.
+            return asked < 3;
+        }
+        fn begin(_: *anyopaque) void {
+            asked = 0;
+        }
+    };
+    var nothing: u8 = 0;
+    conn.stream.setTimeout(40);
+    conn.watch(.{ .context = &nothing, .keep_going = Patience.keepGoing, .begin = Patience.begin });
+    try std.testing.expectError(error.Driver, conn.query("BLPOP fronta 8", null));
+    try std.testing.expectEqualStrings("given up on", conn.message());
+
+    conn.watch(null);
+    var rows = (try conn.query("GET k", null)).?;
+    defer rows.close();
+    try std.testing.expect(try rows.next());
+    try std.testing.expectEqualStrings("fresh", rows.value(0).text);
+    try std.testing.expectEqual(@as(usize, 2), stand.connected());
+}
+
+test "a server that stays away is said, once for all that one key asks" {
+    const stand = try Stand.start();
+    const port = stand.port;
+    const conn = stand.open("/3") catch |err| {
+        stand.stop();
+        return err;
+    };
+    defer conn.close();
+    // Gone, and nothing listening where it was.
+    stand.stop();
+    Stand.untilHungUp(conn);
+
+    // The counts say nothing, as they do for a server that will not count...
+    try std.testing.expectEqual(@as(?i64, null), conn.rowCount(.{ .name = TABLE }));
+    const failed_at = conn.failed_at;
+    try std.testing.expect(failed_at != 0);
+    // ...and the rows say why, without having dialled again to find out.
+    try std.testing.expectError(error.Driver, conn.select(.{ .table = .{ .name = TABLE } }));
+    try std.testing.expect(std.mem.find(u8, conn.message(), "was lost, and it cannot be reached again") != null);
+    try std.testing.expectEqual(failed_at, conn.failed_at);
+
+    // The info screen has one thing to say, and it is not "encryption: none".
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const settings = try conn.settings(arena.allocator());
+    try std.testing.expectEqual(@as(usize, 1), settings.len);
+    try std.testing.expectEqualStrings("connection", settings[0].label);
+    try std.testing.expect(std.mem.startsWith(u8, settings[0].value, "lost: "));
+
+    // And it comes back. Asked at once, the answer is still the last one:
+    // nothing has looked. Asked after the wait, it is found, and the
+    // connection is the old one in everything but the socket.
+    const back = Stand.startAt(port) catch return error.SkipZigTest;
+    defer back.stop();
+    try std.testing.expectEqual(@as(?i64, null), conn.rowCount(.{ .name = TABLE }));
+    try std.testing.expectEqual(@as(usize, 0), back.connected());
+    conn.failed_at -= REVIVE_EVERY_MS;
+    try std.testing.expectEqual(@as(?i64, 2), conn.rowCount(.{ .name = TABLE }));
+    try std.testing.expectEqual(@as(f64, 0), conn.failed_at);
+    const heard = try back.said();
+    defer std.testing.allocator.free(heard);
+    try std.testing.expectEqualStrings("1 AUTH hunter2\n1 SELECT 3\n1 DBSIZE\n", heard);
+}
+
+test "a server that will not have the new connection says why" {
+    // The password changed while the server was away. What is asked next is
+    // not asked in a session nobody was let into, and not in database 0.
+    const stand = try Stand.start();
+    defer stand.stop();
+    const conn = try stand.open("/3");
+    defer conn.close();
+
+    stand.hold();
+    stand.password_is = "jine";
+    stand.release();
+    stand.hangUp();
+    Stand.untilHungUp(conn);
+
+    try std.testing.expectError(error.Driver, conn.select(.{ .table = .{ .name = TABLE } }));
+    try std.testing.expect(std.mem.find(u8, conn.message(), "the password is not taken again: WRONGPASS") != null);
+    const heard = try stand.said();
+    defer std.testing.allocator.free(heard);
+    try std.testing.expect(std.mem.find(u8, heard, "2 AUTH hunter2\n") != null);
+    try std.testing.expect(std.mem.find(u8, heard, "2 SCAN") == null);
 }

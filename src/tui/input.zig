@@ -1105,7 +1105,11 @@ fn perform(app: *App, does: Does) !void {
         .reload => {
             try app.loadObjects();
             try app.reload();
-            app.say("reloaded", .{});
+            // A table that could not be read has said why, and "reloaded" over
+            // that was the only thing a lost connection ever showed.
+            if (!app.grid.failed) {
+                app.say("reloaded", .{});
+            }
         },
         .follow => try toggleFollow(app),
         .sort => try sort(app),

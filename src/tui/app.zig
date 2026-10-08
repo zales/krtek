@@ -2408,6 +2408,9 @@ pub const App = struct {
     }
 
     pub fn reload(self: *App) !void {
+        // Before either way of reading again: `failed` is about the last one,
+        // and what a statement left on the grid is not a table that failed.
+        self.grid.failed = false;
         const table = self.currentTable() orelse return self.reloadStatement();
         const counted = if (!self.isFiltered())
             self.conn.rowCount(table)
@@ -2449,7 +2452,6 @@ pub const App = struct {
         request.limit = self.grid.limit;
         request.offset = self.firstRow() - 1;
 
-        self.grid.failed = false;
         self.loadSelect(request, table, hidden_key) catch {
             self.grid.cols.clearRetainingCapacity();
             self.grid.rows.clearRetainingCapacity();
@@ -2846,6 +2848,8 @@ pub const App = struct {
         self.grid.widths.clearRetainingCapacity();
         self.grid.rows.clearRetainingCapacity();
         self.grid.editable = false;
+        // Whatever is on the grid from here on is something that was answered.
+        self.grid.failed = false;
 
         var raw: std.ArrayList([]Cell) = .empty;
         var origins: std.ArrayList([]const u8) = .empty;

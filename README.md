@@ -394,6 +394,20 @@ which is how Redis comes once TLS is on, until `tls-auth-clients no` - refuses,
 and the refusal is quoted: `tlsv13 alert certificate required`. And a target
 that says `redis://` to a port that only takes TLS is told to try the other.
 
+**A connection that is lost is made again.** A server that restarts, or an idle
+timeout somewhere on the way, used to end the session without saying so: `r`
+answered `reloaded` over a table of no rows, and went on answering it. The
+connection is now looked at before each request, and where the server has hung
+up it is dialled again - through TLS if the target said so, with the password,
+into the database that was open - before the request is sent, so nothing is in
+doubt. One that goes between a question and its answer is made again too and
+the question asked once more, unless asking twice is not the same as asking
+once: a line typed in the console and a rename are said to have been cut off
+instead, and the next thing asked has a connection again. A server that cannot
+be reached is said on the status line - `the connection to redis at
+cache.example:6379 was lost, and it cannot be reached again` - the table says
+`could not be read` and not that it is empty, and `r` tries again.
+
 ## Kafka
 
 A topic is a table whose columns are `partition`, `offset`, `timestamp`, `key`,
@@ -1375,7 +1389,10 @@ what has to survive the encryption: a value of 300 000 bytes compared with what
 went in, three thousand keys counted and paged, a password, an answer that
 arrives after several read timeouts, and a value changed in the grid and read
 back by `redis-cli` in the clear. A second server wants a certificate from the
-client, which there is none to give, and has to be quoted saying so.
+client, which there is none to give, and has to be quoted saying so. And then
+what a session has to survive: every client thrown out with the server still
+up and a password on it, the server restarted under an open connection, and the
+server stopped for good, which has to be said and not called `reloaded`.
 
 ```sh
 zig build && ./tests/redis.sh
@@ -1514,9 +1531,10 @@ with `psql` doing the same.
   time a screen of a hundred took four hundred round trips - fine on a socket
   in the same machine, half a minute on a link with twenty-five milliseconds of
   latency. They go out together and the answers come back in order, which is
-  what Redis promises about a pipeline. Giving up waits for the end of an
-  exchange rather than the end of a command, because a pipeline abandoned
-  halfway leaves answers nobody is going to read.
+  what Redis promises about a pipeline. Giving up is asked about before an
+  exchange is sent and while its answer is not coming, and a connection given
+  up on in the middle of one is let go of: it holds answers nobody is going to
+  read, and the next thing asked used to read them as its own.
 * **Redis is mapped, not modelled.** The interface asks for rows in SQL, so the
   driver recognises the four shapes this app itself writes - SELECT, UPDATE,
   INSERT, DELETE over `data` - and passes everything else to Redis as a command.

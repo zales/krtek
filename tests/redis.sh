@@ -232,4 +232,62 @@ grep -q "^cache	rediss://127.0.0.1:$TLS_PORT/5\$" "$CONFIG/krtek/connections" ||
 }
 echo "ok: changing another field keeps it"
 
+# --- a connection that is lost ---
+
+# Sixteen waits: long enough for whatever is done to the server behind them to
+# be over before the next key is pressed.
+LATER="{wait} {wait} {wait} {wait} {wait} {wait} {wait} {wait} {wait} {wait} {wait} {wait} {wait} {wait} {wait} {wait}"
+
+# Hung up on, with the server still there: every client but the one that asks
+# is thrown out, which is what an idle timeout does and a restart does not -
+# the data stays, and so does the password, so what comes next is only let in
+# by a connection that said it again. Through TLS, in database 3, and by way of
+# the console, whose commands are never sent twice: the connection has to be
+# found gone before the command is written, and made again there. The command
+# is one that shows if it was done more than once, or somewhere else.
+cli CONFIG SET requirepass 'ta&j=ne' >/dev/null
+secret() { cli -a 'ta&j=ne' --no-auth-warning "$@"; }
+(sleep 3; secret CLIENT KILL TYPE normal >/dev/null; secret -n 3 SET po:odpojeni ano >/dev/null) &
+cutting=$!
+# shellcheck disable=SC2086
+screen "$SECURE/3?insecure=1&password=ta%26j%3Dne" $LATER s 'INCR z:pocet' '{ctrl-s}' '{tab}' '{enter}' '{wait}' '{keep}'
+wait "$cutting"
+test "$(secret -n 3 GET z:pocet)" = "1" ||
+	fail "a command typed after the connection was cut was not done once in database 3 (it holds '$(secret -n 3 GET z:pocet)', and database 0 '$(secret GET z:pocet)')"
+echo "ok: a command typed after the connection was cut is done once, in the database that was open"
+shows "and what was written meanwhile is read over the new connection, password and TLS and all" 'po:odpojeni +string +-1 +ano'
+secret CONFIG SET requirepass '' >/dev/null
+
+# The server goes away under an open connection and comes back, and `r` is
+# pressed: the case this was written for, where the screen said `reloaded` over
+# a table of no rows and went on saying it. The server keeps nothing on disk,
+# so it comes back empty, and what the reload shows is what was put in after
+# the restart - in database 3, which a connection made again is only in if it
+# was told so again.
+#
+# Nothing waits on the clock for the server to be back: the restart is over
+# before the reload is pressed.
+(sleep 3; docker restart -t 1 "$NAME" >/dev/null; until cli PING >/dev/null 2>&1; do sleep 0.2; done
+	cli -n 3 SET po:restartu ano >/dev/null) &
+restarting=$!
+# shellcheck disable=SC2086
+screen "$CLEAR/3" $LATER r '{wait}' '{keep}'
+wait "$restarting"
+shows "a reload after the server restarted reads what it holds now" 'po:restartu +string +-1 +ano'
+shows "and says that it did" '^ reloaded'
+grep -q "pozdrav" "$SCREEN" && fail "the screen still shows a key the server lost in the restart"
+echo "ok: and what it held before is gone from the screen"
+
+# And one that does not come back. The counts have nothing to say and the rows
+# have a reason, which is what the screen is left with - not `reloaded`.
+(sleep 3; docker stop -t 1 "$NAME" >/dev/null) &
+stopping=$!
+# shellcheck disable=SC2086
+screen "$CLEAR/3" $LATER r '{wait}' '{keep}'
+wait "$stopping"
+shows "a server that is gone and stays gone is said to be" "the connection to redis at 127.0.0.1:$PORT was lost, and it cannot be reached again"
+shows "and the table is not called empty" 'could not be read - r tries again'
+grep -q "reloaded" "$SCREEN" && fail "the screen says reloaded over a server that is not there"
+echo "ok: and nothing says reloaded"
+
 echo "all good"
