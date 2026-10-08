@@ -1,0 +1,235 @@
+#!/bin/sh
+# Bring up a Redis and check the driver against it:
+#
+#     zig build && ./tests/redis.sh
+#
+# The protocol reader is tested without a server - the unit tests hand it bytes
+# on a socket pair. What they cannot hand it is a TLS session, which is what
+# this is here for: one Redis with two ports, one in the clear and one that
+# only speaks TLS, so that whatever arrives through the second arrived
+# encrypted or did not arrive at all. `redis-cli` from the same image is the
+# other side of every exchange, and it reads in the clear what krtek wrote
+# through TLS.
+#
+# The certificate is signed by an authority made here and issued to
+# `localhost`, which gives the three answers a certificate can get: refused
+# when nobody knows who signed it, accepted when the authority is trusted and
+# the name is the one on it, and refused again for the same server under a
+# name that is not.
+#
+# And a second server beside it that wants a certificate from the client as
+# well, which is how Redis comes once TLS is turned on and nothing else is
+# said. This driver has none to give, so what is checked there is that the
+# refusal says so.
+set -e
+cd "$(dirname "$0")/.."
+
+NAME=${NAME:-krtek-redis-test}
+IMAGE=${IMAGE:-redis:7-alpine}
+PORT=${PORT:-6390}
+TLS_PORT=${TLS_PORT:-6391}
+MUTUAL_PORT=${MUTUAL_PORT:-6392}
+
+BIN=zig-out/bin/krtek
+test -x "$BIN" || { echo "$BIN is not there - zig build first" >&2; exit 1; }
+
+# A configuration of its own: the app remembers every connection it opens.
+CONFIG=$(mktemp -d)
+trap 'docker rm -f "$NAME" >/dev/null 2>&1 || true; rm -rf "$CONFIG"' EXIT
+export XDG_CONFIG_HOME="$CONFIG"
+
+# An authority, and a certificate it signs for `localhost` and nothing else.
+# Made here because the image has no openssl in it, and good for a day.
+{
+	openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj "/CN=krtek test CA" \
+		-keyout "$CONFIG/ca.key" -out "$CONFIG/ca.crt" &&
+	openssl req -newkey rsa:2048 -nodes -subj "/CN=localhost" \
+		-keyout "$CONFIG/server.key" -out "$CONFIG/server.csr" &&
+	printf 'subjectAltName=DNS:localhost\n' > "$CONFIG/san.ext" &&
+	openssl x509 -req -in "$CONFIG/server.csr" -CA "$CONFIG/ca.crt" -CAkey "$CONFIG/ca.key" \
+		-CAcreateserial -days 1 -extfile "$CONFIG/san.ext" -out "$CONFIG/server.crt"
+} >/dev/null 2>&1 || { echo "openssl could not make a certificate" >&2; exit 1; }
+
+echo "starting $IMAGE"
+docker rm -f "$NAME" >/dev/null 2>&1 || true
+# The certificate goes in through the environment and is written by the user
+# that will read it: a key somebody else owns is one the server may not open.
+# Without `tls-auth-clients no` Redis wants a certificate from the client too,
+# which is what the second server is left wanting; the authority it would check
+# one against only has to be a certificate, so it is the server's own.
+docker run -d --name "$NAME" -p "$PORT:6379" -p "$TLS_PORT:6380" -p "$MUTUAL_PORT:6381" \
+	-e "TLS_CERT=$(cat "$CONFIG/server.crt")" -e "TLS_KEY=$(cat "$CONFIG/server.key")" \
+	"$IMAGE" sh -c '
+	umask 077
+	printf "%s\n" "$TLS_CERT" > /tmp/server.crt
+	printf "%s\n" "$TLS_KEY" > /tmp/server.key
+	redis-server --port 0 --tls-port 6381 --daemonize yes \
+		--tls-cert-file /tmp/server.crt --tls-key-file /tmp/server.key \
+		--tls-ca-cert-file /tmp/server.crt --save "" --appendonly no
+	exec redis-server --port 6379 --tls-port 6380 \
+		--tls-cert-file /tmp/server.crt --tls-key-file /tmp/server.key \
+		--tls-auth-clients no --save "" --appendonly no' >/dev/null
+
+# The other client, always in the clear.
+cli() { docker exec "$NAME" redis-cli "$@"; }
+
+printf 'waiting for the server'
+until cli PING >/dev/null 2>&1; do
+	printf .
+	sleep 1
+done
+echo " up"
+
+cli SET user:1 ada >/dev/null
+cli SET user:2 grace EX 3600 >/dev/null
+cli HSET cart:7 apples 3 pears 2 >/dev/null
+cli RPUSH queue a b c >/dev/null
+# One key in a database of its own, so that the first row of the grid is it.
+cli -n 3 SET pozdrav ahoj >/dev/null
+# A value of many TLS records and several reads, none of which ends where a
+# reply does: 300 000 bytes, and not all one letter, so that a piece lost or
+# read twice is a different value.
+big() { awk 'BEGIN { for (i = 0; i < 37500; i++) printf "%07d;", i }'; }
+docker exec "$NAME" sh -c "awk 'BEGIN { for (i = 0; i < 37500; i++) printf \"%07d;\", i }' | redis-cli -n 4 -x SET big" >/dev/null
+# And a listing that is one: three thousand keys.
+docker exec "$NAME" sh -c 'i=0; while [ $i -lt 3000 ]; do echo "SET klic:$i hodnota-$i"; i=$((i+1)); done | redis-cli -n 5' >/dev/null
+
+CLEAR="redis://127.0.0.1:$PORT"
+SECURE="rediss://127.0.0.1:$TLS_PORT"
+NAMED="rediss://localhost:$TLS_PORT"
+
+# --- and now the driver ---
+
+fail() {
+	echo "FAIL: $1" >&2
+	exit 1
+}
+
+check() {
+	what=$1
+	target=$2
+	wanted=$3
+	out=$(zig build dbcheck -- "$target" 2>&1 || true)
+	printf '%s' "$out" | grep -qE "$wanted" || {
+		echo "--- what came back:" >&2
+		printf '%s\n' "$out" | cut -c1-300 >&2
+		fail "$what"
+	}
+	echo "ok: $what"
+}
+
+check "it connects, and the server says what it is" "$CLEAR" "connected: 127.0.0.1:$PORT/0 / Redis [0-9]"
+check "the keys are one table" "$CLEAR" 'table 0\.data rows~4 '
+check "and the connection is said not to be encrypted" "$CLEAR" 'encryption = none'
+
+# Over TLS: on a port that takes nothing else, so connecting at all is the
+# proof that the handshake was made and everything after it went through it.
+check "TLS, to a certificate the target says not to check" "$SECURE?insecure=1" "connected: 127.0.0.1:$TLS_PORT/0 / Redis [0-9]"
+check "and the same keys arrive through it" "$SECURE?insecure=1" 'table 0\.data rows~4 '
+check "which the settings say, and that nobody looked at the certificate" "$SECURE?insecure=1" 'encryption = TLSv1\.[23], certificate not checked'
+check "the database in the target is the one opened" "$SECURE/3?insecure=1" "connected: 127.0.0.1:$TLS_PORT/3"
+
+check "a certificate signed by nobody known is refused" "$NAMED" "open failed: .*(certificate|TLS)"
+export SSL_CERT_FILE="$CONFIG/ca.crt"
+check "with its authority trusted and its own name asked for, it is accepted" "$NAMED" "connected: localhost:$TLS_PORT/0"
+check "and then the settings say TLS and nothing more" "$NAMED" 'encryption = TLSv1\.[23]$'
+check "the same server under a name the certificate does not carry is refused" "$SECURE" "open failed: .*(certificate|TLS)"
+unset SSL_CERT_FILE
+
+# The scheme used to be thrown away, so this is what a rediss:// target got:
+# a conversation in the clear with a port that only speaks TLS.
+check "the clear on a port that wants TLS says what to try" "redis://127.0.0.1:$TLS_PORT" "redis closed the connection - if it wants TLS, that is rediss://"
+check "nothing listening says so, whichever was asked for" "rediss://127.0.0.1:1" "cannot reach redis at 127.0.0.1:1"
+# The handshake is let through and the refusal comes after it, as an alert:
+# without that alert in the message this was a connection closed for no reason.
+check "a server that wants a certificate from the client is quoted saying so" "rediss://127.0.0.1:$MUTUAL_PORT?insecure=1" "open failed: redis closed the connection: .*certificate required"
+
+# What dbcheck prints of the first rows is the whole value, so this is every
+# byte of it as it came through the encryption.
+came=$(zig build dbcheck -- "$SECURE/4?insecure=1" 2>&1 | sed -n 's/^  row key=big  type=string  ttl=-1  value=\(.*\)  $/\1/p')
+test "$(printf '%s' "$came" | cksum)" = "$(big | cksum)" ||
+	fail "a value of 300 000 bytes is not what it was after coming through TLS (${#came} bytes came)"
+echo "ok: a value of 300 000 bytes comes through TLS as it went in"
+check "three thousand keys are counted through TLS" "$SECURE/5?insecure=1" 'table 5\.data rows~3000 '
+check "and paged through it, each of them once" "$SECURE/5?insecure=1" 'paged: 200 records, 200 distinct'
+
+# A password, which is the thing that went out in the clear when the second s
+# was ignored. With characters a URL has other uses for.
+cli CONFIG SET requirepass 'ta&j=ne' >/dev/null
+check "a server that wants a password says so through TLS" "$SECURE?insecure=1" "open failed: NOAUTH"
+check "a wrong one is refused" "rediss://:spatne@127.0.0.1:$TLS_PORT?insecure=1" "open failed: WRONGPASS"
+check "the right one in the address" "rediss://:ta%26j%3Dne@127.0.0.1:$TLS_PORT?insecure=1" "connected: 127.0.0.1:$TLS_PORT/0"
+check "and beside the option, where the app puts the one it was typed" "$SECURE/3?insecure=1&password=ta%26j%3Dne" "connected: 127.0.0.1:$TLS_PORT/3"
+
+# --- the screen ---
+
+SCREEN="$CONFIG/screen.txt"
+screen() {
+	python3 tests/screen.py "$@" > "$SCREEN" 2>/dev/null || fail "the harness could not run: $*"
+}
+shows() {
+	grep -qE "$2" "$SCREEN" || {
+		cat "$SCREEN" >&2
+		fail "$1"
+	}
+	echo "ok: $1"
+}
+
+# The password asked for and typed, on a target that already has an option.
+screen "$SECURE/3?insecure=1" '{wait}' 'ta&j=ne' '{enter}' '{wait}' '{keep}'
+shows "a password typed at the prompt opens it, through TLS" 'pozdrav +string +-1 +ahoj'
+cli -a 'ta&j=ne' --no-auth-warning CONFIG SET requirepass '' >/dev/null
+
+# With a wait, because nothing is typed that would take the time for it: the
+# first start of a binary and a handshake are both in front of the first frame.
+screen "$SECURE/3?insecure=1" '{wait}' '{wait}' '{keep}'
+shows "the first screen is the keys, through TLS" 'pozdrav +string +-1 +ahoj'
+shows "and the server's version is in the header" "127.0.0.1:$TLS_PORT/3 .*Redis [0-9]"
+
+# In through TLS, and read back by a client that is not this one and does not
+# use it. Four letters out, six in.
+screen "$SECURE/3?insecure=1" '{tab}' '{right}' '{right}' '{right}' e '{bs}' '{bs}' '{bs}' '{bs}' 'nazdar' '{enter}' '{keep}'
+shows "a value changed in the grid is written" ' updated'
+test "$(cli -n 3 GET pozdrav)" = "nazdar" || fail "the changed value is not what the server holds"
+echo "ok: and the server holds the new one"
+
+screen "$SECURE/3?insecure=1" s 'SET z:konzole ano' '{ctrl-s}' '{keep}'
+test "$(cli -n 3 GET z:konzole)" = "ano" || fail "a command typed in the console did not reach the server"
+echo "ok: a command from the console reaches the server through TLS"
+
+# An answer that takes its time. The socket gives up waiting every 400 ms so
+# that the app can be asked whether to carry on, and through TLS that giving
+# up looks like something else than it does on a bare socket: mistaken for a
+# failure, the connection would be called lost a moment into any wait.
+(sleep 2; cli -n 3 RPUSH fronta prisel >/dev/null) &
+screen "$SECURE/3?insecure=1" s 'BLPOP fronta 8' '{ctrl-s}' '{wait}' '{wait}' '{wait}' '{wait}' '{wait}' '{wait}' '{wait}' '{wait}' '{keep}'
+wait
+shows "an answer that arrives after several waits is still read" 'prisel'
+
+# The form. A saved connection is taken apart into its fields and put together
+# again on saving, and TLS is one of them: five fields down from the name.
+connections() {
+	printf '# krtek connections\n%s\t%s\n' "$1" "$2" > "$CONFIG/krtek/connections"
+}
+mkdir -p "$CONFIG/krtek"
+connections cache "redis://127.0.0.1:$PORT/3"
+screen '' e '{keep}'
+shows "the form for a Redis has a TLS toggle, off for redis://" '\[ \] TLS'
+screen '' e '{tab}' '{tab}' '{tab}' '{tab}' '{tab}' ' ' '{ctrl-s}' '{keep}'
+grep -q "^cache	rediss://127.0.0.1:$PORT/3\$" "$CONFIG/krtek/connections" || {
+	cat "$CONFIG/krtek/connections" >&2
+	fail "turning TLS on in the form did not save a rediss:// target"
+}
+echo "ok: turning it on saves the target as rediss://"
+
+connections cache "rediss://127.0.0.1:$TLS_PORT/3"
+screen '' e '{keep}'
+shows "and it is on for rediss://" '\[x\] TLS'
+screen '' e '{tab}' '{tab}' '{tab}' '{tab}' '{bs}' '5' '{ctrl-s}' '{keep}'
+grep -q "^cache	rediss://127.0.0.1:$TLS_PORT/5\$" "$CONFIG/krtek/connections" || {
+	cat "$CONFIG/krtek/connections" >&2
+	fail "changing the database in the form lost the TLS of a rediss:// target"
+}
+echo "ok: changing another field keeps it"
+
+echo "all good"

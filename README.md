@@ -70,6 +70,7 @@ zig build -Doptimize=safe
 ./zig-out/bin/krtek mysql://user@host:3306/database
 ./zig-out/bin/krtek mssql://user@host:1433/database
 ./zig-out/bin/krtek redis://host:6379/0
+./zig-out/bin/krtek rediss://host:6380/0    # the same over TLS
 ./zig-out/bin/krtek kafka://host:9092
 ./zig-out/bin/krtek s3://bucket
 ./zig-out/bin/krtek s3+http://key:secret@localhost:9000/bucket
@@ -372,6 +373,26 @@ anything this mapping does not cover belongs.
 
 The protocol is spoken directly: RESP is a handful of prefixes, so there is no
 client library, no dependency and no licence to think about.
+
+**TLS** is the second `s`, which is how `redis-cli` spells it and what a hosted
+Redis expects:
+
+```sh
+krtek rediss://cache.example:6380/0              # asks for the password if there is one
+krtek "rediss://cache.example:6380?insecure=1"   # a certificate of its own making
+```
+
+It goes through the OpenSSL that is already linked in. The certificate is
+checked against the authorities this machine trusts and against the name in the
+target, and `?insecure=1` is for a server whose certificate nobody signed. The
+port is 6379 unless the target says otherwise: there is no other one TLS is by
+custom found on. The form has a TLS toggle, and database information (`gb`)
+says what the connection is: `TLSv1.3`, or `none`.
+
+There is no client certificate to offer, so a server that insists on one -
+which is how Redis comes once TLS is on, until `tls-auth-clients no` - refuses,
+and the refusal is quoted: `tlsv13 alert certificate required`. And a target
+that says `redis://` to a port that only takes TLS is told to try the other.
 
 ## Kafka
 
@@ -1342,6 +1363,22 @@ suite adds is a real one, and a restart of it under an open connection.
 
 ```sh
 zig build && ./tests/mqtt.sh
+```
+
+[tests/redis.sh](tests/redis.sh) is there for TLS, which no unit test can
+bring: one Redis with a port in the clear and a port that speaks nothing else,
+under a certificate signed by an authority made on the spot and issued to
+`localhost`. That gives a certificate all three of its answers - refused when
+nobody knows who signed it, accepted when the authority is trusted and the name
+is the one on it, refused again for the same server under another name. Then
+what has to survive the encryption: a value of 300 000 bytes compared with what
+went in, three thousand keys counted and paged, a password, an answer that
+arrives after several read timeouts, and a value changed in the grid and read
+back by `redis-cli` in the clear. A second server wants a certificate from the
+client, which there is none to give, and has to be quoted saying so.
+
+```sh
+zig build && ./tests/redis.sh
 ```
 
 [tests/postgres.sh](tests/postgres.sh) and [tests/mysql.sh](tests/mysql.sh) came

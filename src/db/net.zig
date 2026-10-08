@@ -387,10 +387,7 @@ pub fn connect(allocator: std.mem.Allocator, host: []const u8, port: u16) !Strea
 }
 
 /// Resolve a name and connect to the first address that answers, as a plain
-/// descriptor. For the one caller that wants a socket and not a `Stream`: the
-/// Redis driver keeps its own read buffer and has no TLS to put on top, and what
-/// it had instead was a second copy of this - identical down to the order of the
-/// arguments.
+/// descriptor.
 ///
 /// A name that resolves to both an IPv6 and an IPv4 address is what the loop is
 /// for: taking only the first would leave a host unreachable on a machine whose

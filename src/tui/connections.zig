@@ -270,7 +270,7 @@ pub fn compose(arena: std.mem.Allocator, shape: Shape) ![]const u8 {
         .postgres => "postgres://",
         .mysql => "mysql://",
         .mssql => "mssql://",
-        .redis => "redis://",
+        .redis => if (shape.tls) "rediss://" else "redis://",
         .kafka => if (shape.tls) "kafka+ssl://" else "kafka://",
         // S3 and Azure are TLS unless somebody says otherwise, which is the other
         // way round from the rest: a bucket on the open internet is the usual case.
@@ -353,6 +353,7 @@ pub fn decompose(arena: std.mem.Allocator, target: []const u8) ?Shape {
             shape.tls = switch (engine) {
                 .kafka, .rabbit => !std.mem.eql(u8, url.scheme, "kafka") and !std.mem.eql(u8, url.scheme, "rabbit"),
                 .mqtt => !std.mem.eql(u8, url.scheme, "mqtt"),
+                .redis => !std.mem.eql(u8, url.scheme, "redis"),
                 .s3 => !std.mem.eql(u8, url.scheme, "s3+http"),
                 .azure => !std.mem.eql(u8, url.scheme, "azure+http"),
                 else => false,
@@ -1109,6 +1110,13 @@ test "the parts make the target back" {
     }));
     // Nothing but a host is a target too: the engine's own defaults do the rest.
     try std.testing.expectEqualStrings("redis://cache", try compose(a, .{ .engine = .redis, .host = "cache" }));
+    try std.testing.expectEqualStrings("rediss://cache:6380/2", try compose(a, .{
+        .engine = .redis,
+        .host = "cache",
+        .port = "6380",
+        .name = "2",
+        .tls = true,
+    }));
     try std.testing.expectEqualStrings("s3://photos", try compose(a, .{ .engine = .s3, .name = "photos", .tls = true }));
     try std.testing.expectEqualStrings("rabbits://admin@broker/prod", try compose(a, .{
         .engine = .rabbit,
@@ -1174,6 +1182,32 @@ test "a broker is taken apart into what the form asks for, and put back" {
     try std.testing.expect(decompose(a, "mqtt://broker?client=kuchyn") == null);
     // And the password typed at the prompt comes off again without the filter.
     try std.testing.expectEqualStrings("mqtt://ada@broker/dum/#", try withoutPassword(a, "mqtt://ada@broker/dum/#?password=tajne"));
+}
+
+test "a Redis over TLS keeps its second s through the form" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    try std.testing.expectEqual(Engine.redis, engineOf("rediss://cache"));
+    {
+        // The form had no field for it, so this could not be put back together
+        // and was shown as the one line `other` has.
+        const target = "rediss://cache.example:6380/2";
+        const shape = decompose(a, target).?;
+        try std.testing.expectEqual(Engine.redis, shape.engine);
+        try std.testing.expect(shape.tls);
+        try std.testing.expectEqualStrings("cache.example", shape.host);
+        try std.testing.expectEqualStrings("6380", shape.port);
+        try std.testing.expectEqualStrings("2", shape.name);
+        try std.testing.expectEqualStrings(target, try compose(a, shape));
+    }
+    {
+        const shape = decompose(a, "redis://cache/0").?;
+        try std.testing.expect(!shape.tls);
+    }
+    // An option the form has no field for stays the one field it was.
+    try std.testing.expect(decompose(a, "rediss://cache?insecure=1") == null);
 }
 
 test "a delimited file is told from a database by its name" {

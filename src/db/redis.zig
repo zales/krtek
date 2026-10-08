@@ -21,9 +21,16 @@
 //! What the user types in the editor is still passed to Redis as a command line,
 //! which is what makes it a Redis console: `KEYS user:*`, `HGETALL cart:7`,
 //! `INFO memory`.
+//!
+//! **`rediss://` is TLS**, the spelling redis-cli has for it, and the socket is
+//! `net.Stream` so that it is one branch here rather than a second reader. The
+//! scheme used to be taken off and thrown away: the target said encrypted, the
+//! connection was not, and the password went out in the clear to a server that
+//! then hung up on it.
 
 const std = @import("std");
 const db = @import("db.zig");
+const net = @import("net.zig");
 const typed = @import("typed.zig");
 
 const List = std.ArrayList(u8);
@@ -38,18 +45,15 @@ const PAGE = 1000;
 const READ_TIMEOUT_MS: i64 = 400;
 const READ_PATIENCE_MS: i64 = 60 * 1000;
 
-/// Wait this long for something to arrive, then come back either way.
-fn setTimeout(socket: std.c.fd_t, ms: i64) void {
-    const timeout = std.c.timeval{
-        .sec = @intCast(@divFloor(ms, 1000)),
-        .usec = @intCast(@mod(ms, 1000) * 1000),
-    };
-    _ = std.c.setsockopt(socket, std.c.SOL.SOCKET, std.c.SO.RCVTIMEO, &timeout, @sizeOf(std.c.timeval));
-}
+/// What a read says when the other end is no longer there.
+const CLOSED = "redis closed the connection";
 
 pub const Db = struct {
     allocator: std.mem.Allocator,
-    socket: std.c.fd_t,
+    /// The socket, with TLS on it when the target was `rediss://`.
+    stream: net.Stream,
+    /// Whether the certificate was looked at, for what `settings` says about it.
+    verified: bool = true,
     /// Everything received but not yet consumed.
     buffer: List = .empty,
     at: usize = 0,
@@ -77,25 +81,43 @@ pub const Db = struct {
         const parts = try parse(allocator, target);
         defer parts.deinit(allocator);
 
-        const socket = db.net.dial(allocator, parts.host, parts.port) catch {
+        var stream = net.connect(allocator, parts.host, parts.port) catch {
             try report.print(allocator, "cannot reach redis at {s}:{d}", .{ parts.host, parts.port });
             return error.Driver;
         };
+        // Before the handshake and not after it: a port that is not TLS says
+        // nothing back to one, and without this that is a wait with no end.
+        stream.setTimeout(READ_TIMEOUT_MS);
+        if (parts.tls) {
+            net.startTls(allocator, &stream, parts.host, .{ .verify = parts.verify }, report) catch {
+                if (report.items.len == 0) {
+                    try report.print(allocator, "TLS to {s}:{d} could not be set up", .{ parts.host, parts.port });
+                }
+                stream.close();
+                return error.Driver;
+            };
+            // Whatever OpenSSL noted on the way here is not about what comes
+            // next, and `unanswered` reads what it says as the reason.
+            while (net.ssl.ERR_get_error() != 0) {}
+        }
 
-        const self = try allocator.create(Db);
+        const self = allocator.create(Db) catch |err| {
+            stream.close();
+            return err;
+        };
         self.* = .{
             .allocator = allocator,
-            .socket = socket,
+            .stream = stream,
+            .verified = parts.verify,
             .index = parts.index,
             .replies = std.heap.ArenaAllocator.init(allocator),
         };
         errdefer self.close();
-        setTimeout(socket, READ_TIMEOUT_MS);
 
         db.tell("waiting for {s} to answer", .{parts.host});
         if (parts.password.len != 0) {
             const reply = self.command(&[_][]const u8{ "AUTH", parts.password }) catch {
-                try report.appendSlice(allocator, self.message());
+                try self.unanswered(report, parts);
                 return error.Driver;
             };
             if (reply == .failure) {
@@ -106,7 +128,7 @@ pub const Db = struct {
         // PING first: a wrong password or a protected server says so here rather
         // than halfway through the first screen.
         const ping = self.command(&[_][]const u8{"PING"}) catch {
-            try report.appendSlice(allocator, self.message());
+            try self.unanswered(report, parts);
             return error.Driver;
         };
         if (ping == .failure) {
@@ -124,6 +146,30 @@ pub const Db = struct {
         return self;
     }
 
+    /// Why the first thing said got no answer. A server that only takes TLS hangs
+    /// up on one that does not speak it, which from this end is a connection
+    /// closed and nothing else - so the one thing worth trying is said with it.
+    ///
+    /// Through TLS the server can say why before it goes, and the one that does
+    /// is the one most likely to be met: Redis wants a certificate from the
+    /// client unless it is told not to, lets the handshake finish without one,
+    /// and then refuses with an alert. That alert is the whole of the reason.
+    fn unanswered(self: *Db, report: *List, parts: Parts) !void {
+        try report.appendSlice(self.allocator, self.message());
+        if (!std.mem.eql(u8, self.message(), CLOSED)) {
+            return;
+        }
+        if (!parts.tls) {
+            try report.appendSlice(self.allocator, " - if it wants TLS, that is rediss://");
+            return;
+        }
+        var buffer: [256]u8 = undefined;
+        const said = net.ssl.lastError(&buffer);
+        if (said.len != 0) {
+            try report.print(self.allocator, ": {s}", .{said});
+        }
+    }
+
     /// `host:port/index`, as the header shows it.
     fn relabel(self: *Db) void {
         self.label.clearRetainingCapacity();
@@ -131,7 +177,7 @@ pub const Db = struct {
     }
 
     pub fn close(self: *Db) void {
-        _ = std.c.close(self.socket);
+        self.stream.close();
         self.host.deinit(self.allocator);
         self.buffer.deinit(self.allocator);
         self.label.deinit(self.allocator);
@@ -240,15 +286,10 @@ pub const Db = struct {
     }
 
     fn writeAll(self: *Db, bytes: []const u8) db.Error!void {
-        var sent: usize = 0;
-        while (sent < bytes.len) {
-            const wrote = std.c.send(self.socket, bytes[sent..].ptr, bytes.len - sent, 0);
-            if (wrote <= 0) {
-                self.remember("the connection to redis is gone");
-                return error.Driver;
-            }
-            sent += @intCast(wrote);
-        }
+        self.stream.write(bytes) catch {
+            self.remember("the connection to redis is gone");
+            return error.Driver;
+        };
     }
 
     /// One reply, reading more from the socket whenever the buffer runs out.
@@ -303,20 +344,15 @@ pub const Db = struct {
         var chunk: [16 * 1024]u8 = undefined;
         var waiting: i64 = 0;
         while (true) {
-            const got = std.c.recv(self.socket, &chunk, chunk.len, 0);
-            if (got > 0) {
-                try self.buffer.appendSlice(self.allocator, chunk[0..@intCast(got)]);
+            // Nothing is the timeout running out, which is not a failure; an end
+            // or a broken connection is an error, in the clear or through TLS.
+            const got = self.stream.readNow(&chunk) catch {
+                self.remember(CLOSED);
+                return error.Driver;
+            };
+            if (got != 0) {
+                try self.buffer.appendSlice(self.allocator, chunk[0..got]);
                 return;
-            }
-            if (got == 0) {
-                self.remember("redis closed the connection");
-                return error.Driver;
-            }
-            const code = std.c._errno().*;
-            const timed_out = code == @backingInt(std.c.E.AGAIN) or code == @backingInt(std.c.E.INTR);
-            if (!timed_out) {
-                self.remember("redis closed the connection");
-                return error.Driver;
             }
             if (self.progress) |progress| {
                 if (!progress.call()) {
@@ -952,6 +988,18 @@ pub const Db = struct {
             const value = self.fact(entry[1]) orelse continue;
             try list.append(arena, .{ .label = entry[0], .value = try arena.dupe(u8, value) });
         }
+        // Said either way, because the answer that matters is the one nobody
+        // would think to look for: that it is not.
+        try list.append(arena, .{
+            .label = "encryption",
+            .value = if (self.stream.ssl) |session|
+                try arena.print("{s}{s}", .{
+                    std.mem.span(net.ssl.SSL_get_version(session)),
+                    if (self.verified) "" else ", certificate not checked",
+                })
+            else
+                "none",
+        });
         try list.append(arena, .{
             .label = "keys in this database",
             .value = try arena.print("{d}", .{self.dbSize() orelse 0}),
@@ -1027,7 +1075,7 @@ const PREVIEW: usize = 50;
 pub fn parseReply(allocator: std.mem.Allocator, arena: std.mem.Allocator, bytes: []const u8) !Value {
     var self = Db{
         .allocator = allocator,
-        .socket = -1,
+        .stream = .{ .fd = -1 },
         .replies = std.heap.ArenaAllocator.init(allocator),
     };
     defer {
@@ -1189,6 +1237,11 @@ const Parts = struct {
     password: []const u8,
     port: u16,
     index: u8,
+    tls: bool = false,
+    /// Whether the certificate is checked. Only `?insecure=1` turns it off: a
+    /// server under a certificate of its own making is common enough to need a
+    /// way in, and not so common that it should be the way in for everybody.
+    verify: bool = true,
 
     fn deinit(self: Parts, allocator: std.mem.Allocator) void {
         allocator.free(self.host);
@@ -1196,14 +1249,17 @@ const Parts = struct {
     }
 };
 
-/// `redis://[:password@]host[:port][/index]`, the URL redis-cli takes.
+/// `redis://[:password@]host[:port][/index]`, the URL redis-cli takes, and
+/// `rediss://` for the same over TLS. The port is 6379 either way: there is no
+/// other one that TLS is by custom found on, and redis-cli assumes none.
 fn parse(allocator: std.mem.Allocator, target: []const u8) !Parts {
     var rest = target;
-    for ([_][]const u8{ "redis://", "rediss://" }) |prefix| {
-        if (std.ascii.startsWithIgnoreCase(rest, prefix)) {
-            rest = rest[prefix.len..];
-            break;
-        }
+    var tls = false;
+    if (std.ascii.startsWithIgnoreCase(rest, "rediss://")) {
+        rest = rest["rediss://".len..];
+        tls = true;
+    } else if (std.ascii.startsWithIgnoreCase(rest, "redis://")) {
+        rest = rest["redis://".len..];
     }
     var password: []const u8 = "";
     if (std.mem.findScalarLast(u8, rest, '@')) |at| {
@@ -1220,11 +1276,15 @@ fn parse(allocator: std.mem.Allocator, target: []const u8) !Parts {
     // database on it - `redis://host`, which is what somebody types - kept its
     // `?password=…` as part of the host name, and the app said it could not reach
     // `host?password=hunter2:6379`. Which also put the password on the screen.
+    var verify = true;
     if (std.mem.findScalar(u8, rest, '?')) |question| {
         var parameters = std.mem.tokenizeAny(u8, rest[question + 1 ..], "&");
         while (parameters.next()) |parameter| {
             if (std.ascii.startsWithIgnoreCase(parameter, "password=")) {
                 password = parameter["password=".len..];
+            } else if (std.ascii.startsWithIgnoreCase(parameter, "insecure=")) {
+                // The word every other engine here has for it.
+                verify = std.mem.eql(u8, parameter["insecure=".len..], "0");
             }
         }
         rest = rest[0..question];
@@ -1245,6 +1305,8 @@ fn parse(allocator: std.mem.Allocator, target: []const u8) !Parts {
         .password = try unescape(allocator, password),
         .port = port,
         .index = index,
+        .tls = tls,
+        .verify = verify,
     };
 }
 
@@ -1318,7 +1380,49 @@ test "a redis target is taken apart" {
         try std.testing.expectEqualStrings("hunter2", parts.password);
         try std.testing.expectEqual(@as(u16, 6380), parts.port);
     }
+    {
+        // Nothing asked for, nothing assumed.
+        const parts = try parse(a, "redis://cache.example");
+        defer parts.deinit(a);
+        try std.testing.expect(!parts.tls);
+    }
+    {
+        // The second s is TLS, and it used to be read as a spelling of the first:
+        // taken off with the rest of the scheme, and the connection made in the
+        // clear. The certificate is checked unless the target says otherwise.
+        const parts = try parse(a, "rediss://:hunter2@cache.example:6380/2");
+        defer parts.deinit(a);
+        try std.testing.expect(parts.tls);
+        try std.testing.expect(parts.verify);
+        try std.testing.expectEqualStrings("cache.example", parts.host);
+        try std.testing.expectEqualStrings("hunter2", parts.password);
+        try std.testing.expectEqual(@as(u16, 6380), parts.port);
+        try std.testing.expectEqual(@as(u8, 2), parts.index);
+    }
+    {
+        // The port does not follow the scheme, and neither does a capital letter.
+        const parts = try parse(a, "REDISS://cache.example");
+        defer parts.deinit(a);
+        try std.testing.expect(parts.tls);
+        try std.testing.expectEqualStrings("cache.example", parts.host);
+        try std.testing.expectEqual(@as(u16, 6379), parts.port);
+    }
+    {
+        // Not checking is asked for, beside the password the app adds.
+        const parts = try parse(a, "rediss://cache.example?insecure=1&password=hunter2");
+        defer parts.deinit(a);
+        try std.testing.expect(parts.tls);
+        try std.testing.expect(!parts.verify);
+        try std.testing.expectEqualStrings("hunter2", parts.password);
+    }
+    {
+        const parts = try parse(a, "rediss://cache.example/1?insecure=0");
+        defer parts.deinit(a);
+        try std.testing.expect(parts.verify);
+        try std.testing.expectEqual(@as(u8, 1), parts.index);
+    }
     try std.testing.expect(owns("redis://localhost"));
+    try std.testing.expect(owns("rediss://localhost"));
     try std.testing.expect(!owns("mysql://localhost/demo"));
 }
 
@@ -1333,11 +1437,12 @@ test "many commands go out together and their answers come back in order" {
     }
     defer _ = std.c.close(pair[0]);
     defer _ = std.c.close(pair[1]);
-    setTimeout(pair[0], 50);
+    var stream = net.Stream{ .fd = pair[0] };
+    stream.setTimeout(50);
 
     var self = Db{
         .allocator = std.testing.allocator,
-        .socket = pair[0],
+        .stream = stream,
         .replies = std.heap.ArenaAllocator.init(std.testing.allocator),
     };
     defer self.buffer.deinit(std.testing.allocator);
@@ -1451,11 +1556,12 @@ test "a reply that arrives in pieces is read from its start" {
     }
     defer _ = std.c.close(pair[0]);
     defer _ = std.c.close(pair[1]);
-    setTimeout(pair[0], 50);
+    var stream = net.Stream{ .fd = pair[0] };
+    stream.setTimeout(50);
 
     var self = Db{
         .allocator = std.testing.allocator,
-        .socket = pair[0],
+        .stream = stream,
         .replies = std.heap.ArenaAllocator.init(std.testing.allocator),
     };
     defer self.buffer.deinit(std.testing.allocator);

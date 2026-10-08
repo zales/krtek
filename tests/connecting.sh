@@ -111,6 +111,14 @@ has "and says how to stop waiting" "esc gives up"
 has "the panel names what is being opened" "redis://127.0.0.1:$PORT/0"
 has "and the step it is waiting on" "waiting for 127.0.0.1 to answer"
 
+# With the second s the wait is one step earlier: a listener that says nothing
+# does not answer a handshake either. It is what a rediss:// target pointed at
+# a port in the clear looks like, for as long as nobody presses esc.
+out=$(drawn "rediss://127.0.0.1:$PORT/0" '{sleep}')
+has "over TLS the step it waits on is the handshake" "TLS handshake with 127.0.0.1"
+out=$(drawn "rediss://127.0.0.1:$PORT/0" '{sleep}' '{esc}' '{sleep}')
+has "and esc gives up on that as well" "gave up on rediss://127.0.0.1:$PORT/0"
+
 # libpq asks for encryption first and waits to hear whether it may, which is as
 # far as this one gets. Which kind it asks for is the build's business: TLS, or
 # GSSAPI where it was built with that and the machine holds a Kerberos ticket

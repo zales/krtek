@@ -1765,6 +1765,8 @@ pub const App = struct {
                 try form.text("port", shape.port, 6);
                 form.sameLine();
                 try form.text("database", shape.name, 6);
+                try form.toggle("TLS", shape.tls);
+                form.sameLine();
                 try form.note("the database is Redis's numbered one: 0 unless you know otherwise");
             },
             .kafka => {
