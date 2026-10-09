@@ -156,7 +156,10 @@ echo "ok: and the broker agrees about both"
 # because a queue is declared and not altered.
 screen "i on the queues declares one" "row inserted" "$ROOT/%2F" '{enter}' 'i' 'zgridu' '{ctrl-s}'
 queues | grep -qx zgridu || fail "the queue made from the form is not on the broker"
-screen "x removes the one under the cursor" "1 row(s) deleted" "$ROOT/%2F" '{enter}' 'G' 'x'
+# `x` and `x` again: one key on its own deletes nothing.
+screen "x asks for x again before it removes anything" "x again deletes this" "$ROOT/%2F" '{enter}' 'G' 'x'
+queues | grep -qx zgridu || fail "one x deleted the queue without being asked twice"
+screen "x x removes the one under the cursor" "1 row deleted" "$ROOT/%2F" '{enter}' 'G' 'x' 'x'
 queues | grep -qx zgridu && fail "x left the queue on the broker"
 echo "ok: and the broker agrees about both"
 screen "an edit is refused, in the driver's own words" "declared rather than altered" "$ROOT/%2F" '{enter}' 'e'

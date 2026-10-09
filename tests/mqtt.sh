@@ -175,7 +175,7 @@ test "$(held dum/kuchyn/teplota)" = "22" || fail "the changed payload is not wha
 echo "ok: and the broker holds the new one"
 
 # A new row through the form: a topic, a payload, and held.
-screen "$ROOT" '{tab}' i 'dum/novy' '{tab}' '{tab}' 'ano' '{tab}' '{tab}' 'yes' '{ctrl-s}' '{keep}'
+screen "$ROOT" '{tab}' i 'dum/novy' '{tab}' 'ano' '{tab}' 'yes' '{ctrl-s}' '{keep}'
 shows "a row inserted is a message published" 'row inserted'
 test "$(held dum/novy)" = "ano" || fail "the inserted row did not reach the broker"
 echo "ok: and it reached the broker"
@@ -183,7 +183,7 @@ echo "ok: and it reached the broker"
 # Deleting a topic clears what the broker holds for it. The list is in the
 # order of the names, so the first row is the kitchen's.
 screen "$ROOT" '{tab}' x y '{enter}' '{keep}'
-shows "a deleted topic is gone from the list" '1 row\(s\) deleted'
+shows "a deleted topic is gone from the list" '1 row deleted'
 test -z "$(held dum/kuchyn/teplota)" || fail "the retained message was not cleared"
 echo "ok: and the broker no longer holds it"
 
