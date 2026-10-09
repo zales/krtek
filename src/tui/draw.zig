@@ -740,7 +740,12 @@ fn grid(app: *App, size: Size, side: usize, rows: usize) void {
                 .italic = cell.kind == .nul,
             });
             screen.put(" ");
-            pad(app, cell.text, w, cell.kind == .int or cell.kind == .float);
+            if (cell.marks.len != 0) {
+                const bg: ?u8 = if (on_cell) C.accent else if (on_row) C.selected else null;
+                marks(app, cell.marks, w, bg, on_cell);
+            } else {
+                pad(app, cell.text, w, cell.kind == .int or cell.kind == .float);
+            }
         }
         screen.reset();
         screen.clearToEol();
@@ -2062,6 +2067,43 @@ fn write(app: *App, text: []const u8, max: usize) usize {
     app.screen.put(room.text);
     app.screen.put("…");
     return room.cols + 1;
+}
+
+/// What one mark is drawn as. Filled for the one that is up and hollow for
+/// every other, so that a row of them says how many are up to somebody who
+/// cannot tell the colours apart - and the colour says which kind of not up.
+fn markGlyph(mark: database.Mark) []const u8 {
+    return if (mark == .ok) "▪" else "▫";
+}
+
+fn markColour(mark: database.Mark) u8 {
+    return switch (mark) {
+        .ok => C.ok,
+        .waiting => C.warn,
+        .failed => C.danger,
+        .done => C.dim,
+    };
+}
+
+/// A cell that counts things, as a square for each of them, in a field of
+/// exactly `width` columns. Under the cursor they are all the one colour the
+/// cursor's text is: its background is a colour of its own, and a red square
+/// on it is a square nobody can see.
+fn marks(app: *App, all: []const database.Mark, width: usize, bg: ?u8, plain: bool) void {
+    if (width == 0) {
+        return;
+    }
+    // One column goes to the ellipsis when there are more than there is room for.
+    const shown = if (all.len > width) width - 1 else all.len;
+    for (all[0..shown]) |mark| {
+        app.screen.style(.{ .bg = bg, .fg = if (plain) 16 else markColour(mark) });
+        app.screen.put(markGlyph(mark));
+    }
+    app.screen.style(.{ .bg = bg, .fg = if (plain) 16 else C.dim });
+    if (shown != all.len) {
+        app.screen.put("…");
+    }
+    fill(app, ' ', width - shown - @intFromBool(shown != all.len));
 }
 
 /// Write `text` in a field of exactly `width` columns.

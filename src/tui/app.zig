@@ -114,10 +114,21 @@ pub const Cell = struct {
     /// grid's copy, with every newline already turned into a space.
     original: []const u8 = "",
     kind: Kind,
+    /// How the things this cell counts are doing, where the engine said: a pod's
+    /// `1/2` is two containers, and the grid draws a square for each instead of
+    /// the two numbers. Only the grid does. The text is still the value, and is
+    /// what gets filtered on, copied and written to a file.
+    marks: []const database.Mark = &.{},
 
     /// The value as it was, for anything that is not the grid.
     pub fn whole(self: Cell) []const u8 {
         return if (self.original.len != 0) self.original else self.text;
+    }
+
+    /// How many columns the grid needs to draw it: a square a mark, where it
+    /// has marks.
+    pub fn width(self: Cell) usize {
+        return if (self.marks.len != 0) self.marks.len else term.width(self.text);
     }
 
     pub fn colour(self: Cell) u8 {
@@ -2480,9 +2491,11 @@ pub const App = struct {
                 const cells = try arena.alloc(Cell, count);
                 for (0..count) |i| {
                     cells[i] = try formatCell(arena, cursor.value(i), cursor.isNumeric(i));
+                    // A copy, like the text: the engine's are gone with its reply.
+                    cells[i].marks = try arena.dupe(database.Mark, cursor.marks(i));
                 }
                 for (cells[skip..], 0..) |cell, i| {
-                    self.grid.widths.items[i] = @max(self.grid.widths.items[i], term.width(cell.text));
+                    self.grid.widths.items[i] = @max(self.grid.widths.items[i], cell.width());
                 }
                 try raw.append(arena, cells);
             }

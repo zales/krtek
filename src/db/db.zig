@@ -197,6 +197,19 @@ pub fn Built(comptime Owner: type, comptime Held: type) type {
             return at < self.numeric.len and self.numeric[at];
         }
 
+        /// How the things this cell counts are doing, where the driver's own
+        /// value says so. Nothing for every other cell - which is every cell of
+        /// a driver that has nothing of the kind.
+        pub fn marks(self: *Self, at: usize) []const Mark {
+            if (@hasDecl(Held, "asMarks") and self.at < self.rows.items.len) {
+                const row = self.rows.items[self.at];
+                if (at < row.len) {
+                    return row[at].asMarks();
+                }
+            }
+            return &.{};
+        }
+
         pub fn affected(self: *Self) i64 {
             return self.changed;
         }
@@ -335,6 +348,24 @@ pub fn tell(comptime fmt: []const u8, args: anytype) void {
 
 /// One cell. Text and blob point into the driver's memory and stay valid until
 /// the cursor moves on.
+/// How one of the things a cell counts is doing, for a cell that a grid may
+/// draw as a row of marks instead of as its text: a pod's containers are `1/3`,
+/// and are also three things, each of them up, on its way, broken or finished.
+///
+/// The text is still the cell's value - what is filtered on, put in order,
+/// copied and written to a file. The marks are a way of drawing it, for an
+/// interface that has colours; one that has none loses nothing.
+pub const Mark = enum {
+    /// Up, and doing what it is for.
+    ok,
+    /// Not there yet: being started, or up and not ready.
+    waiting,
+    /// Stopped by something going wrong, or waiting to be started again after it.
+    failed,
+    /// Finished, the way it was meant to.
+    done,
+};
+
 pub const Value = union(enum) {
     null: void,
     int: i64,
@@ -565,6 +596,20 @@ pub const Rows = union(enum) {
     pub fn isNumeric(self: *Rows, at: usize) bool {
         switch (self.*) {
             inline else => |*rows| return rows.isNumeric(at),
+        }
+    }
+
+    /// How the things the cell counts are doing, one mark each, where the engine
+    /// has something of the kind to say. Empty everywhere else, and then the
+    /// cell is its text and nothing more.
+    pub fn marks(self: *Rows, at: usize) []const Mark {
+        switch (self.*) {
+            inline else => |*rows| {
+                if (@hasDecl(@TypeOf(rows.*), "marks")) {
+                    return rows.marks(at);
+                }
+                return &.{};
+            },
         }
     }
 

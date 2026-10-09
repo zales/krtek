@@ -130,6 +130,14 @@ pub const Value = union(enum) {
     nil,
     number: i64,
     text: []const u8,
+    /// Text that counts things, with how each of them is doing beside it: a
+    /// pod's `1/2`, and its two containers.
+    marked: Marked,
+
+    pub const Marked = struct {
+        text: []const u8,
+        marks: []const db.Mark,
+    };
 
     /// What this means to the grid. The one thing a driver's own value type
     /// has to say for itself; the walking and holding is db.Built's.
@@ -138,6 +146,15 @@ pub const Value = union(enum) {
             .nil => .{ .null = {} },
             .number => |number| .{ .int = number },
             .text => |text| .{ .text = text },
+            .marked => |held| .{ .text = held.text },
+        };
+    }
+
+    /// And what it may be drawn as instead, which only the one kind has.
+    pub fn asMarks(self: @This()) []const db.Mark {
+        return switch (self) {
+            .marked => |held| held.marks,
+            else => &.{},
         };
     }
 };
@@ -1177,7 +1194,13 @@ pub const Db = struct {
                     .used => |what| api.usedText(arena, measured, what) catch "",
                     else => api.cell(arena, item, column, now) catch "",
                 };
-                cells[i] = if (written.len == 0) .nil else .{ .text = written };
+                const drawn = api.marks(arena, item, column) catch &.{};
+                cells[i] = if (written.len == 0)
+                    .nil
+                else if (drawn.len != 0)
+                    .{ .marked = .{ .text = written, .marks = drawn } }
+                else
+                    .{ .text = written };
             }
             if (!keeps(resource, cells, request)) {
                 continue;
@@ -2270,6 +2293,7 @@ fn numerics(arena: std.mem.Allocator, resource: api.Resource) ![]const bool {
 fn textOf(cell: Value) []const u8 {
     return switch (cell) {
         .text => |value| value,
+        .marked => |held| held.text,
         else => "",
     };
 }
@@ -2730,6 +2754,30 @@ test "pods are put in order by how much they use, and the unmeasured are the lea
     for ([_][]const u8{ "", "512B", "900.0Ki", "238.1Mi", "1.2Gi" }, 0..) |wanted, i| {
         try testing.expectEqualStrings(wanted, textOf(rows[i][memory]));
     }
+}
+
+test "a cell that counts things is its text, with a mark for each of them beside it" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var built = Rows{ .owner = undefined, .names = &.{ "name", "ready", "cpu" } };
+    try built.rows.append(arena.allocator(), &.{
+        .{ .text = "api-7c9" },
+        .{ .marked = .{ .text = "1/2", .marks = &.{ .ok, .failed } } },
+        .nil,
+    });
+    var rows: db.Rows = .{ .k8s = built };
+    try testing.expect(try rows.next());
+    // The value is the text, which is what is filtered on, put in order and
+    // written to a file - none of which draws anything.
+    try testing.expectEqualStrings("1/2", rows.value(1).text);
+    try testing.expectEqualStrings("1/2", textOf(built.rows.items[0][1]));
+    try testing.expectEqualSlices(db.Mark, &.{ .ok, .failed }, rows.marks(1));
+    // Every other cell is only its text, and one that is not there is nothing.
+    try testing.expectEqual(@as(usize, 0), rows.marks(0).len);
+    try testing.expectEqual(@as(usize, 0), rows.marks(2).len);
+    try testing.expectEqual(@as(usize, 0), rows.marks(9).len);
+    try testing.expect(!try rows.next());
+    try testing.expectEqual(@as(usize, 0), rows.marks(1).len);
 }
 
 test "a manifest comes apart at its document separators" {

@@ -13,11 +13,11 @@
 <text x="14.0" y="45.3" fill="#9a9aa6" xml:space="preserve" textLength="92.4" lengthAdjust="spacing"> NAMESPACE </text>
 <text x="106.4" y="45.3" fill="#8aa7f0" xml:space="preserve" textLength="67.2" lengthAdjust="spacing">payments</text>
 <text x="173.6" y="45.3" fill="#7c7c88" xml:space="preserve" textLength="58.8" lengthAdjust="spacing">     #│</text>
-<text x="232.4" y="45.3" fill="#8aa7f0" font-weight="600" xml:space="preserve" textLength="201.6" lengthAdjust="spacing"> billing-647fdb9fc-pzwrx</text>
+<text x="232.4" y="45.3" fill="#8aa7f0" font-weight="600" xml:space="preserve" textLength="201.6" lengthAdjust="spacing"> billing-647fdb9fc-hn6xz</text>
 <text x="434.0" y="45.3" fill="#9a9aa6" xml:space="preserve" textLength="453.6" lengthAdjust="spacing">   pods                                               </text>
 <text x="14.0" y="63.3" fill="#7c7c88" xml:space="preserve" textLength="218.4" lengthAdjust="spacing"> workloads               │</text>
 <text x="232.4" y="63.3" fill="#9a9aa6" xml:space="preserve" textLength="117.6" lengthAdjust="spacing">          name</text>
-<text x="350.0" y="63.3" fill="#e0e0e6" xml:space="preserve" textLength="210.0" lengthAdjust="spacing">  billing-647fdb9fc-pzwrx</text>
+<text x="350.0" y="63.3" fill="#e0e0e6" xml:space="preserve" textLength="210.0" lengthAdjust="spacing">  billing-647fdb9fc-hn6xz</text>
 <text x="14.0" y="81.3" fill="#e0e0e6" xml:space="preserve" textLength="201.6" lengthAdjust="spacing"> ▪ pods                 </text>
 <text x="215.6" y="81.3" fill="#9a9aa6" xml:space="preserve" textLength="8.4" lengthAdjust="spacing">?</text>
 <text x="224.0" y="81.3" fill="#7c7c88" xml:space="preserve" textLength="8.4" lengthAdjust="spacing">│</text>
@@ -26,7 +26,7 @@
 <text x="14.0" y="99.3" fill="#e0e0e6" xml:space="preserve" textLength="201.6" lengthAdjust="spacing"> ▪ deployments          </text>
 <text x="215.6" y="99.3" fill="#7c7c88" xml:space="preserve" textLength="16.8" lengthAdjust="spacing">?│</text>
 <text x="232.4" y="99.3" fill="#9a9aa6" xml:space="preserve" textLength="117.6" lengthAdjust="spacing">      restarts</text>
-<text x="350.0" y="99.3" fill="#e0e0e6" xml:space="preserve" textLength="537.6" lengthAdjust="spacing">  2                                                             </text>
+<text x="350.0" y="99.3" fill="#e0e0e6" xml:space="preserve" textLength="537.6" lengthAdjust="spacing">  1                                                             </text>
 <text x="14.0" y="117.3" fill="#e0e0e6" xml:space="preserve" textLength="201.6" lengthAdjust="spacing"> ▪ statefulsets         </text>
 <text x="215.6" y="117.3" fill="#7c7c88" xml:space="preserve" textLength="16.8" lengthAdjust="spacing">?│</text>
 <text x="232.4" y="117.3" fill="#9a9aa6" xml:space="preserve" textLength="117.6" lengthAdjust="spacing">           age</text>
@@ -34,7 +34,7 @@
 <text x="14.0" y="135.3" fill="#e0e0e6" xml:space="preserve" textLength="201.6" lengthAdjust="spacing"> ▪ daemonsets           </text>
 <text x="215.6" y="135.3" fill="#7c7c88" xml:space="preserve" textLength="16.8" lengthAdjust="spacing">?│</text>
 <text x="232.4" y="135.3" fill="#9a9aa6" xml:space="preserve" textLength="117.6" lengthAdjust="spacing">        status</text>
-<text x="350.0" y="135.3" fill="#e0e0e6" xml:space="preserve" textLength="537.6" lengthAdjust="spacing">  Error                                                         </text>
+<text x="350.0" y="135.3" fill="#e0e0e6" xml:space="preserve" textLength="537.6" lengthAdjust="spacing">  CrashLoopBackOff                                              </text>
 <text x="14.0" y="153.3" fill="#e0e0e6" xml:space="preserve" textLength="201.6" lengthAdjust="spacing"> ▪ replicasets          </text>
 <text x="215.6" y="153.3" fill="#7c7c88" xml:space="preserve" textLength="16.8" lengthAdjust="spacing">?│</text>
 <text x="232.4" y="153.3" fill="#9a9aa6" xml:space="preserve" textLength="117.6" lengthAdjust="spacing"> controlled by</text>
@@ -46,7 +46,7 @@
 <text x="14.0" y="189.3" fill="#e0e0e6" xml:space="preserve" textLength="201.6" lengthAdjust="spacing"> ▪ cronjobs             </text>
 <text x="215.6" y="189.3" fill="#7c7c88" xml:space="preserve" textLength="16.8" lengthAdjust="spacing">?│</text>
 <text x="232.4" y="189.3" fill="#9a9aa6" xml:space="preserve" textLength="117.6" lengthAdjust="spacing">          node</text>
-<text x="350.0" y="189.3" fill="#e0e0e6" xml:space="preserve" textLength="537.6" lengthAdjust="spacing">  a5cc0e4c2e9f                                                  </text>
+<text x="350.0" y="189.3" fill="#e0e0e6" xml:space="preserve" textLength="537.6" lengthAdjust="spacing">  d2eb715a5d83                                                  </text>
 <text x="14.0" y="207.3" fill="#7c7c88" xml:space="preserve" textLength="218.4" lengthAdjust="spacing"> network                 │</text>
 <text x="232.4" y="207.3" fill="#9a9aa6" xml:space="preserve" textLength="117.6" lengthAdjust="spacing">     namespace</text>
 <text x="350.0" y="207.3" fill="#e0e0e6" xml:space="preserve" textLength="537.6" lengthAdjust="spacing">  payments                                                      </text>
@@ -66,20 +66,20 @@
 <text x="14.0" y="297.3" fill="#e0e0e6" xml:space="preserve" textLength="201.6" lengthAdjust="spacing"> ▪ secrets              </text>
 <text x="215.6" y="297.3" fill="#7c7c88" xml:space="preserve" textLength="16.8" lengthAdjust="spacing">?│</text>
 <text x="232.4" y="297.3" fill="#9a9aa6" xml:space="preserve" textLength="117.6" lengthAdjust="spacing">         state</text>
-<text x="350.0" y="297.3" fill="#e0e0e6" xml:space="preserve" textLength="537.6" lengthAdjust="spacing">  terminated: Error (1) at 2026-10-09T19:21:06Z                 </text>
+<text x="350.0" y="297.3" fill="#e0e0e6" xml:space="preserve" textLength="537.6" lengthAdjust="spacing">  waiting: CrashLoopBackOff - back-off 10s restarting failed c… </text>
 <text x="14.0" y="315.3" fill="#7c7c88" xml:space="preserve" textLength="218.4" lengthAdjust="spacing"> storage                 │</text>
 <text x="232.4" y="315.3" fill="#9a9aa6" xml:space="preserve" textLength="117.6" lengthAdjust="spacing">      restarts</text>
-<text x="350.0" y="315.3" fill="#e0e0e6" xml:space="preserve" textLength="537.6" lengthAdjust="spacing">  2                                                             </text>
+<text x="350.0" y="315.3" fill="#e0e0e6" xml:space="preserve" textLength="537.6" lengthAdjust="spacing">  1                                                             </text>
 <text x="14.0" y="333.3" fill="#e0e0e6" xml:space="preserve" textLength="201.6" lengthAdjust="spacing"> ▪ persistentvolum      </text>
 <text x="215.6" y="333.3" fill="#7c7c88" xml:space="preserve" textLength="16.8" lengthAdjust="spacing">?│</text>
 <text x="232.4" y="333.3" fill="#9a9aa6" xml:space="preserve" textLength="117.6" lengthAdjust="spacing">     last exit</text>
-<text x="350.0" y="333.3" fill="#e0e0e6" xml:space="preserve" textLength="537.6" lengthAdjust="spacing">  terminated: Error (1) at 2026-10-09T19:20:53Z                 </text>
+<text x="350.0" y="333.3" fill="#e0e0e6" xml:space="preserve" textLength="537.6" lengthAdjust="spacing">  terminated: Error (1) at 2026-10-09T19:42:08Z                 </text>
 <text x="14.0" y="351.3" fill="#e0e0e6" xml:space="preserve" textLength="201.6" lengthAdjust="spacing"> ▪ persistentvolum      </text>
 <text x="215.6" y="351.3" fill="#7c7c88" xml:space="preserve" textLength="16.8" lengthAdjust="spacing">?│</text>
 <text x="14.0" y="369.3" fill="#e0e0e6" xml:space="preserve" textLength="201.6" lengthAdjust="spacing"> ▪ storageclasses       </text>
 <text x="215.6" y="369.3" fill="#7c7c88" xml:space="preserve" textLength="16.8" lengthAdjust="spacing">?│</text>
 <text x="232.4" y="369.3" fill="#9a9aa6" xml:space="preserve" textLength="117.6" lengthAdjust="spacing">     Scheduled</text>
-<text x="350.0" y="369.3" fill="#e0e0e6" xml:space="preserve" textLength="537.6" lengthAdjust="spacing">  Successfully assigned payments/billing-647fdb9fc-pzwrx to a5… </text>
+<text x="350.0" y="369.3" fill="#e0e0e6" xml:space="preserve" textLength="537.6" lengthAdjust="spacing">  Successfully assigned payments/billing-647fdb9fc-hn6xz to d2… </text>
 <text x="14.0" y="387.3" fill="#7c7c88" xml:space="preserve" textLength="218.4" lengthAdjust="spacing"> access                  │</text>
 <text x="232.4" y="387.3" fill="#9a9aa6" xml:space="preserve" textLength="117.6" lengthAdjust="spacing">        Pulled</text>
 <text x="350.0" y="387.3" fill="#e0e0e6" xml:space="preserve" textLength="537.6" lengthAdjust="spacing">  Container image "busybox:1.36" already present on machine     </text>

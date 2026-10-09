@@ -842,6 +842,20 @@ finished is phase `Succeeded` where kubectl says `Completed` - so a column that
 showed the phase would call the one broken pod in a namespace healthy, which is
 the single thing anybody scans a pod list for.
 
+**A pod's containers are a square each.** What kubectl writes as `1/2` is drawn as
+`▪▫`: filled for a container that is ready and hollow for one that is not, so
+the row says how many are up to somebody who cannot tell the colours apart, and
+the colour says which kind of not up - green for ready, amber for one that is
+being started or is up and not ready yet, red for one that died or is waiting to
+be started again after dying, grey for one that finished as it was meant to. A
+crash loop is red for all but the instant its container runs, although that
+container is `waiting` nearly all the time: what it is waiting for is to be
+started again. The value is still `1/2` - that is what the column is filtered on
+and put in order by, what `E` writes to a file and what is copied - and the
+squares are only how the grid draws it. Which is the engine's to say and the
+interface's to draw: a driver hands a mark for each thing a cell counts, and the
+grid knows nothing about what a container is.
+
 **A pod's `cpu` and `memory` are what it is using, not what it asked for.** A
 request is written once in a manifest and says nothing about the pod that is
 eating a node today, which is the one somebody opens a list of pods to find - so

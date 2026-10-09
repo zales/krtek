@@ -210,6 +210,15 @@ screen() {
 	python3 tests/screen.py "$1" "$2" "$3" "$4" "$5" '{sleep}' '{keep}' 2>&1
 }
 
+# And the grid alone: the sidebar and the rule that divides it off come first on
+# every line. The rule is spelled as the two it can be and not as a set of them,
+# because a sed that reads bytes reads such a set as a set of bytes - and the
+# first byte of a rule is the first byte of the squares a pod's containers are
+# drawn as, so everything up to the last square on the line went with it.
+grid() {
+	sed -E 's/^.*(┃|│)//'
+}
+
 ROOT=k8s://default/payments
 
 check "the admin's client certificate gets in" "$ROOT" "Kubernetes v1.31"
@@ -236,8 +245,20 @@ check "a context that is not there says which ones are" "k8s://staging" "there i
 # The status is the seventh thing on a row here and the third on kubectl's: what
 # a pod is using, how often it has restarted and how old it is come before it. A
 # cell with nothing in it still says NULL, so the count holds.
+#
+# And what kubectl writes as 1/2 is drawn here as a square a container, filled
+# for one that is ready and hollow for one that is not - so counting the two
+# kinds gives kubectl's two numbers back, which is what is compared.
 for _ in $(seq 1 10); do
-	mine=$(screen "$ROOT" '{keep}' | sed -n '4,16p' | sed 's/^.*[┃│]//' | awk 'NF >= 7 {print $1, $2, $7}' | sort)
+	mine=$(screen "$ROOT" '{keep}' | sed -n '4,16p' | grid |
+		awk 'NF >= 7 {
+			drawn = $2
+			up = gsub(/▪/, "", drawn)
+			down = gsub(/▫/, "", drawn)
+			# Anything left over is not a square, and is shown as it came so
+			# that the comparison fails on it rather than counting past it.
+			print $1, (drawn == "" ? up "/" (up + down) : $2), $7
+		}' | sort)
 	theirs=$(kubectl -n payments get pods --no-headers | awk '{print $1, $2, $3}' | sort)
 	if [ "$mine" = "$theirs" ] && printf '%s' "$theirs" | grep -q CrashLoopBackOff; then
 		break
@@ -251,6 +272,21 @@ if [ "$mine" != "$theirs" ]; then
 	fail "the pod list does not match kubectl"
 fi
 echo "ok: the pod list matches kubectl, name for name and state for state"
+
+# The squares themselves, and not only their count: every pod of the deployment
+# that works is one filled square, and the one that keeps dying is a hollow one.
+# Asked more than once, for the pod of the three that is last to be ready.
+for _ in $(seq 1 6); do
+	squares=$(screen "$ROOT" '{keep}' | grid |
+		awk '$1 ~ /^(api|broken)-/ {print substr($1, 1, 3), $2}' | sort -u)
+	[ "$squares" = "$(printf 'api ▪\nbro ▫')" ] && break
+	sleep 3
+done
+[ "$squares" = "$(printf 'api ▪\nbro ▫')" ] || {
+	printf '%s\n' "$squares" >&2
+	fail "a ready container should be a filled square and one that is not a hollow one"
+}
+echo "ok: a container is a square, filled where it is ready and hollow where it is not"
 
 # The two states that are not the phase, which is the whole point of the column.
 printf '%s' "$mine" | grep -q CrashLoopBackOff || fail "a crash-looping pod should not read as Running"
@@ -498,7 +534,7 @@ kubectl -n payments top pod hungry --no-headers >/dev/null 2>&1 ||
 
 # One row of the pod list, by the pod's name, without the sidebar in front of it.
 row_of() {
-	printf '%s\n' "$1" | sed 's/^.*[┃│]//' | awk -v pod="$2" '$1 ~ "^" pod {print; exit}'
+	printf '%s\n' "$1" | grid | awk -v pod="$2" '$1 ~ "^" pod {print; exit}'
 }
 
 # Against kubectl, to the megabyte. Asked more than once: the two are read a
@@ -559,7 +595,7 @@ printf '%s' "$sorted" | grep -q "order memory desc" || {
 	printf '%s\n' "$sorted" >&2
 	fail "o twice on the memory column should order by it, largest first"
 }
-[ "$(printf '%s\n' "$sorted" | sed -n '4p' | sed 's/^.*[┃│]//' | awk '{print $1}')" = "hungry" ] || {
+[ "$(printf '%s\n' "$sorted" | sed -n '4p' | grid | awk '{print $1}')" = "hungry" ] || {
 	printf '%s\n' "$sorted" >&2
 	fail "ordered by memory, the pod using the most should come first"
 }

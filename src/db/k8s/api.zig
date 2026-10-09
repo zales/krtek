@@ -824,6 +824,75 @@ pub fn epochOf(text: []const u8) ?i64 {
     return days * 86400 + hour * 3600 + minute * 60 + second;
 }
 
+/// The marks a cell may be drawn as, where its column is one that counts things.
+/// Only a pod's containers are, so far.
+pub fn marks(arena: std.mem.Allocator, object: Json, column: Column) ![]const db.Mark {
+    return switch (column.from) {
+        .ready => containerMarks(arena, object),
+        else => &.{},
+    };
+}
+
+/// How each of a pod's containers is doing, in the order the pod names them.
+///
+/// One for every container the pod asked for, as with the count beside it: a
+/// pod that has not been scheduled has containers and no statuses, and those are
+/// containers that are not there yet rather than no containers.
+///
+/// A container waiting to be started again after it died is broken, not on its
+/// way: that is what a crash loop is for all but the instant in which it runs,
+/// and a mark that said otherwise would be saying it of the one pod in the list
+/// somebody is looking for.
+fn containerMarks(arena: std.mem.Allocator, object: Json) ![]const db.Mark {
+    const wanted = at(object, "spec.containers") orelse return &.{};
+    if (wanted != .array) {
+        return &.{};
+    }
+    const statuses: []const Json = switch (at(object, "status.containerStatuses") orelse Json{ .null = {} }) {
+        .array => |list| list.items,
+        else => &.{},
+    };
+    const out = try arena.alloc(db.Mark, wanted.array.items.len);
+    for (wanted.array.items, 0..) |container, i| {
+        out[i] = .waiting;
+        const name = at(container, "name") orelse continue;
+        if (name != .string) {
+            continue;
+        }
+        for (statuses) |status| {
+            const called = at(status, "name") orelse continue;
+            if (called == .string and std.mem.eql(u8, called.string, name.string)) {
+                out[i] = containerMark(status);
+                break;
+            }
+        }
+    }
+    return out;
+}
+
+fn containerMark(status: Json) db.Mark {
+    if (at(status, "state.running") != null) {
+        const ready = at(status, "ready") orelse Json{ .bool = false };
+        return if (ready == .bool and ready.bool) .ok else .waiting;
+    }
+    if (at(status, "state.terminated")) |ended| {
+        return if (exitedCleanly(ended)) .done else .failed;
+    }
+    // Waiting, or nothing said yet. What it is waiting after is what tells a
+    // container being started from one being started again.
+    if (at(status, "lastState.terminated")) |before| {
+        if (!exitedCleanly(before)) {
+            return .failed;
+        }
+    }
+    return .waiting;
+}
+
+fn exitedCleanly(ended: Json) bool {
+    const code = at(ended, "exitCode") orelse return true;
+    return code != .integer or code.integer == 0;
+}
+
 /// Ready out of asked for. The denominator is `spec.containers`, not the
 /// statuses: a pod that has not been scheduled has containers and no statuses at
 /// all, and kubectl calls that `0/1` rather than nothing.
@@ -1168,6 +1237,59 @@ test "an object missing half of itself gives empty cells, not wrong ones" {
     const waiting = try parsed(a, "{\"spec\": {\"containers\": [{\"name\": \"a\"}]}, \"status\": {\"phase\": \"Pending\"}}");
     try testing.expectEqualStrings("0/1", try cell(a, waiting, .{ .name = "ready", .from = .ready }, now));
     try testing.expectEqualStrings("Pending", try cell(a, waiting, .{ .name = "s", .from = .pod_status }, now));
+}
+
+test "a pod's containers are a mark each, by what each is doing" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const column: Column = .{ .name = "ready", .from = .ready };
+    // One of every kind, named out of order in the statuses: the kubelet lists
+    // them as it likes and the pod's own order is the one somebody wrote.
+    const pod = try parsed(a,
+        \\{"spec": {"containers": [{"name": "up"}, {"name": "starting"}, {"name": "slow"},
+        \\                         {"name": "looping"}, {"name": "killed"}, {"name": "finished"},
+        \\                         {"name": "restarted"}, {"name": "unheard"}]},
+        \\ "status": {"containerStatuses": [
+        \\   {"name": "finished", "ready": false, "state": {"terminated": {"exitCode": 0, "reason": "Completed"}}},
+        \\   {"name": "up", "ready": true, "state": {"running": {}}},
+        \\   {"name": "starting", "ready": false, "state": {"waiting": {"reason": "ContainerCreating"}}},
+        \\   {"name": "slow", "ready": false, "state": {"running": {}}},
+        \\   {"name": "looping", "ready": false, "state": {"waiting": {"reason": "CrashLoopBackOff"}},
+        \\    "lastState": {"terminated": {"exitCode": 1, "reason": "Error"}}},
+        \\   {"name": "killed", "ready": false, "state": {"terminated": {"exitCode": 137, "reason": "OOMKilled"}}},
+        \\   {"name": "restarted", "ready": true, "state": {"running": {}},
+        \\    "lastState": {"terminated": {"exitCode": 1, "reason": "Error"}}}]}}
+    );
+    try testing.expectEqualSlices(db.Mark, &.{
+        .ok,
+        // Being started, and up but not ready: neither is there yet.
+        .waiting,
+        .waiting,
+        // Waiting to be started again after dying is broken, not on its way -
+        // which is what a crash loop is for all but the instant it runs.
+        .failed,
+        .failed,
+        .done,
+        // One that died once and is up again is up.
+        .ok,
+        // And one the kubelet has said nothing about is not there yet.
+        .waiting,
+    }, try marks(a, pod, column));
+    // The count beside them is the same pod read the same way: two are ready.
+    try testing.expectEqualStrings("2/8", try cell(a, pod, column, 0));
+
+    // A pod nobody has scheduled has containers and no statuses, and that is a
+    // mark for each of them rather than none.
+    const pending = try parsed(a, "{\"spec\": {\"containers\": [{\"name\": \"a\"}, {\"name\": \"b\"}]}}");
+    try testing.expectEqualSlices(db.Mark, &.{ .waiting, .waiting }, try marks(a, pending, column));
+    // Something that is not a pod has none, and neither has any other column.
+    try testing.expectEqual(@as(usize, 0), (try marks(a, try parsed(a, "{}"), column)).len);
+    for (find("pods").?.columns) |other| {
+        if (other.from != .ready) {
+            try testing.expectEqual(@as(usize, 0), (try marks(a, pod, other)).len);
+        }
+    }
 }
 
 test "a pod's status is what kubectl prints, which is not its phase" {
