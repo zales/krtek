@@ -1152,17 +1152,20 @@ pub const Db = struct {
             return .{ .k8s = try self.oneNumber("objects", @intCast(kept.items.len)) };
         }
 
+        // Last, because the filter and the order above find a column by where it
+        // is in a whole row.
+        const shape = try Shape.of(arena, resource, request.columns);
         var rows = Rows{
             .owner = self,
-            .names = try names(arena, resource),
-            .numeric = try numerics(arena, resource),
+            .names = shape.names,
+            .numeric = shape.numeric,
             .table = resource.name,
         };
         const from = @min(request.offset, kept.items.len);
         const wanted = if (request.limit != 0) request.limit else kept.items.len;
         const to = @min(from + wanted, kept.items.len);
         for (kept.items[from..to]) |row| {
-            try rows.rows.append(arena, row);
+            try rows.rows.append(arena, try shape.row(arena, row));
         }
         return .{ .k8s = rows };
     }
@@ -2136,21 +2139,63 @@ fn plural(word: []const u8) []const u8 {
     return word;
 }
 
-fn names(arena: std.mem.Allocator, resource: api.Resource) ![]const []const u8 {
-    const out = try arena.alloc([]const u8, resource.columns.len);
-    for (resource.columns, 0..) |column, i| {
-        out[i] = column.name;
-    }
-    return out;
-}
+/// The columns an answer has: every one the resource has, or the ones that were
+/// asked for, in the order they were asked for.
+///
+/// Whoever names its columns reads the answer by where it put them - the
+/// whole-value view asks for the one under the cursor and takes the first cell
+/// of what comes back. Given every column regardless, it showed a pod's name
+/// under the heading of whichever column it had asked for.
+const Shape = struct {
+    names: []const []const u8,
+    numeric: []const bool,
+    /// Where in a whole row each of them is. Null is a name the resource has no
+    /// column of, and empty is nothing asked for: the row as it stands.
+    from: []const ?usize = &.{},
 
-fn numerics(arena: std.mem.Allocator, resource: api.Resource) ![]const bool {
-    const out = try arena.alloc(bool, resource.columns.len);
-    for (resource.columns, 0..) |column, i| {
-        out[i] = column.numeric;
+    fn of(arena: std.mem.Allocator, resource: api.Resource, asked: []const []const u8) !Shape {
+        const whole = asked.len == 0;
+        const count = if (whole) resource.columns.len else asked.len;
+        const heading = try arena.alloc([]const u8, count);
+        const number = try arena.alloc(bool, count);
+        if (whole) {
+            for (resource.columns, 0..) |column, i| {
+                heading[i] = column.name;
+                number[i] = column.numeric;
+            }
+            return .{ .names = heading, .numeric = number };
+        }
+        const from = try arena.alloc(?usize, count);
+        for (asked, 0..) |name, i| {
+            from[i] = null;
+            for (resource.columns, 0..) |column, at| {
+                if (std.mem.eql(u8, column.name, name)) {
+                    from[i] = at;
+                }
+            }
+            // The resource's own copy of the name where it has one: what was
+            // asked with is the caller's, and may not last as long as the rows.
+            heading[i] = if (from[i]) |at| resource.columns[at].name else try arena.dupe(u8, name);
+            number[i] = if (from[i]) |at| resource.columns[at].numeric else false;
+        }
+        return .{ .names = heading, .numeric = number, .from = from };
     }
-    return out;
-}
+
+    /// A whole row, cut down to these columns. A column that is not there is an
+    /// empty cell and not a missing one, so that every cell stays where the
+    /// request put it.
+    fn row(self: Shape, arena: std.mem.Allocator, cells: []const Value) ![]const Value {
+        if (self.from.len == 0) {
+            return cells;
+        }
+        const out = try arena.alloc(Value, self.from.len);
+        for (self.from, 0..) |place, i| {
+            const at = place orelse cells.len;
+            out[i] = if (at < cells.len) cells[at] else .nil;
+        }
+        return out;
+    }
+};
 
 fn textOf(cell: Value) []const u8 {
     return switch (cell) {
@@ -2597,4 +2642,54 @@ test "APPLY takes the manifest under it, and nothing else does" {
     // And what it takes is everything after the word.
     try testing.expectEqualStrings("\nkind: Pod\n", afterVerb("APPLY\nkind: Pod\n"));
     try testing.expectEqualStrings("", afterVerb("APPLY"));
+}
+
+test "a request that names its columns gets those, in the order it named them" {
+    var scratch = std.heap.ArenaAllocator.init(testing.allocator);
+    defer scratch.deinit();
+    const arena = scratch.allocator();
+    const pods = api.find("pods").?;
+    // A whole row, each cell saying which column it is.
+    const cells = try arena.alloc(Value, pods.columns.len);
+    for (pods.columns, 0..) |column, i| {
+        cells[i] = .{ .text = column.name };
+    }
+
+    // Nothing named is everything, and the row is not so much as copied.
+    const all = try Shape.of(arena, pods, &.{});
+    try testing.expectEqual(pods.columns.len, all.names.len);
+    try testing.expectEqualStrings("name", all.names[0]);
+    try testing.expectEqual(cells.ptr, (try all.row(arena, cells)).ptr);
+
+    // One column is the whole-value view, which reads the first cell of what it
+    // gets: that was the pod's name whatever the cursor was on.
+    const one = try Shape.of(arena, pods, &.{"status"});
+    try testing.expectEqual(@as(usize, 1), one.names.len);
+    try testing.expectEqualStrings("status", one.names[0]);
+    const status = try one.row(arena, cells);
+    try testing.expectEqual(@as(usize, 1), status.len);
+    try testing.expectEqualStrings("status", status[0].text);
+
+    // The order asked for and not the resource's, with which of them are numbers
+    // following along.
+    const two = try Shape.of(arena, pods, &.{ "restarts", "name" });
+    try testing.expectEqualStrings("restarts", two.names[0]);
+    try testing.expectEqualStrings("name", two.names[1]);
+    try testing.expect(two.numeric[0]);
+    try testing.expect(!two.numeric[1]);
+    const pair = try two.row(arena, cells);
+    try testing.expectEqualStrings("restarts", pair[0].text);
+    try testing.expectEqualStrings("name", pair[1].text);
+
+    // A column the resource has not got is an empty cell in its place, so the
+    // one after it is still where the request put it. And a row shorter than
+    // the resource is not read past its end.
+    const odd = try Shape.of(arena, pods, &.{ "nic", "node" });
+    try testing.expectEqualStrings("nic", odd.names[0]);
+    const holed = try odd.row(arena, cells);
+    try testing.expect(holed[0] == .nil);
+    try testing.expectEqualStrings("node", holed[1].text);
+    const short = try odd.row(arena, cells[0..1]);
+    try testing.expect(short[0] == .nil);
+    try testing.expect(short[1] == .nil);
 }

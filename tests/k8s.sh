@@ -233,6 +233,24 @@ printf '%s' "$mine" | grep -q CrashLoopBackOff || fail "a crash-looping pod shou
 printf '%s' "$mine" | grep -q Completed || fail "a finished pod should not read as Succeeded"
 echo "ok: a broken pod says CrashLoopBackOff and a finished one says Completed"
 
+# The whole value of a cell is that cell's. `gv` asks the engine again for the
+# one column the cursor is on and shows the first cell of what comes back - and
+# what came back had every column in it, so the box said `status` along the top
+# and the pod's name inside. The third column of the first pod, then, against
+# what kubectl says of that pod; asked more than once for the reason the list
+# above is.
+pod=$(screen "$ROOT" '{keep}' | sed -n '4p' | sed 's/^.*[┃│]//' | awk '{print $1}')
+[ -n "$pod" ] || fail "there is no first pod to ask the whole value of"
+for _ in $(seq 1 6); do
+	whole=$(python3 tests/screen.py "$ROOT" '{tab}' '{right}{right}' 'g' 'v' '{sleep}' '{keep}' 2>&1 |
+		grep -A1 'status ─ enter/esc closes' | tail -1 | sed 's/ *│ *$//; s/^.*│ //')
+	theirs=$(kubectl -n payments get pod "$pod" --no-headers | awk '{print $3}')
+	[ "$whole" = "$theirs" ] && break
+	sleep 3
+done
+[ "$whole" = "$theirs" ] || fail "gv on the status of $pod should show $theirs, and shows '$whole'"
+echo "ok: gv shows the value under the cursor, and not the name of its row"
+
 # Writing: the two things this driver does, checked against the cluster itself.
 screen "$ROOT" 's' 'SCALE deployments api 5' '{ctrl-s}' >/dev/null
 sleep 2
