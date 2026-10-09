@@ -482,6 +482,98 @@ fn readChunked(arena: std.mem.Allocator, incoming: *Incoming, limit: usize) ![]c
     return body.items;
 }
 
+// -------------------------------------------------------------------- the date
+
+/// A moment as a header says it - `Sun, 06 Nov 1994 08:49:37 GMT` - part by
+/// part. `Last-Modified` is written so, and so is every time in an Azure
+/// listing, which is the header's text inside a tag.
+pub const Date = struct {
+    year: u32,
+    /// One to twelve.
+    month: u32,
+    day: u32,
+    hour: u32,
+    minute: u32,
+    /// Up to sixty: a leap second is a second, and a clock is allowed to say it.
+    second: u32,
+
+    /// Unix seconds. A leap second has no number of its own there and comes out
+    /// as the second after it.
+    pub fn seconds(self: Date) i64 {
+        return days(self.year, self.month, self.day) * 86400 +
+            @as(i64, self.hour) * 3600 + @as(i64, self.minute) * 60 + self.second;
+    }
+};
+
+/// The date in a header, or nothing for anything that is not one.
+///
+/// Fixed places, which is what RFC 9110 calls the form and the only one a
+/// server is allowed to send: day, month, year, time, and GMT said out loud.
+/// The two forms HTTP gave up on are not read, nor is another zone - a wrong
+/// time is worse than none. The day of the week in front says nothing the date
+/// does not, and is not looked at.
+pub fn parseDate(header: []const u8) ?Date {
+    const text = std.mem.trim(u8, header, " \t");
+    if (text.len != 29 or text[3] != ',' or text[19] != ':' or text[22] != ':' or
+        !std.mem.eql(u8, text[25..], " GMT"))
+    {
+        return null;
+    }
+    for ([_]usize{ 4, 7, 11, 16 }) |gap| {
+        if (text[gap] != ' ') {
+            return null;
+        }
+    }
+    const months = "JanFebMarAprMayJunJulAugSepOctNovDec";
+    var month: u32 = 0;
+    while (month < 12 and !std.ascii.eqlIgnoreCase(months[month * 3 ..][0..3], text[8..11])) {
+        month += 1;
+    }
+    const date = Date{
+        .year = number(text[12..16]) orelse return null,
+        .month = month + 1,
+        .day = number(text[5..7]) orelse return null,
+        .hour = number(text[17..19]) orelse return null,
+        .minute = number(text[20..22]) orelse return null,
+        .second = number(text[23..25]) orelse return null,
+    };
+    if (month == 12 or date.day == 0 or date.day > 31 or date.hour > 23 or date.minute > 59 or date.second > 60) {
+        return null;
+    }
+    return date;
+}
+
+/// The date in a header as unix seconds, and zero for anything that is not one:
+/// what `store.Entry.modified` asks for, where zero is a place that did not say.
+pub fn secondsOf(header: []const u8) i64 {
+    const date = parseDate(header) orelse return 0;
+    return date.seconds();
+}
+
+/// Days from 1970 to that date. The civil calendar arithmetic that every C
+/// library hides inside timegm, which is not portable enough to call.
+pub fn days(year: i64, month: i64, day: i64) i64 {
+    const shifted = year - @intFromBool(month <= 2);
+    const era = @divFloor(shifted, 400);
+    const of_era = shifted - era * 400;
+    const of_year = @divTrunc(153 * (month + (if (month > 2) @as(i64, -3) else 9)) + 2, 5) + day - 1;
+    const day_of_era = of_era * 365 + @divTrunc(of_era, 4) - @divTrunc(of_era, 100) + of_year;
+    return era * 146097 + day_of_era - 719468;
+}
+
+/// A run of digits as a number, and nothing for anything else: `parseInt` takes
+/// a sign and an underscore, neither of which is in a date.
+fn number(text: []const u8) ?u32 {
+    var out: u32 = 0;
+    for (text) |c| {
+        if (!std.ascii.isDigit(c)) {
+            return null;
+        }
+        out = out * 10 + (c - '0');
+    }
+    return out;
+}
+
 // ------------------------------------------------------------------- tests
 
 const testing = std.testing;
@@ -574,4 +666,79 @@ test "a status line without a reason is still a status" {
     const response = try read(arena, "HTTP/1.1 404\r\nContent-Length: 0\r\n\r\n", "GET");
     try testing.expectEqual(@as(u16, 404), response.status);
     try testing.expectEqualStrings("", response.reason);
+}
+
+test "the date in a header becomes a number" {
+    // The moment RFC 9110 writes its own examples with, and the one AWS uses.
+    try testing.expectEqual(@as(i64, 784111777), secondsOf("Sun, 06 Nov 1994 08:49:37 GMT"));
+    try testing.expectEqual(@as(i64, 1440938160), secondsOf("Sun, 30 Aug 2015 12:36:00 GMT"));
+    // What Azurite said of a blob whose line in the file manager had no time.
+    try testing.expectEqual(@as(i64, 1791581722), secondsOf("Fri, 09 Oct 2026 21:35:22 GMT"));
+    // The last second of a year and the first of the next, a leap day, the
+    // second after 32 bits run out, and the March after a February that a year
+    // divisible by four does not lengthen.
+    try testing.expectEqual(@as(i64, 1704067199), secondsOf("Sun, 31 Dec 2023 23:59:59 GMT"));
+    try testing.expectEqual(@as(i64, 1704067200), secondsOf("Mon, 01 Jan 2024 00:00:00 GMT"));
+    try testing.expectEqual(@as(i64, 1709208000), secondsOf("Thu, 29 Feb 2024 12:00:00 GMT"));
+    try testing.expectEqual(@as(i64, 2147483648), secondsOf("Tue, 19 Jan 2038 03:14:08 GMT"));
+    try testing.expectEqual(@as(i64, 4107542400), secondsOf("Mon, 01 Mar 2100 00:00:00 GMT"));
+    // Every month by its name, in whatever case. The day of the week is not
+    // looked at, so the twelve below all say Tuesday.
+    const names = [_][]const u8{ "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
+    const fifths = [_]i64{
+        1546668428, 1549346828, 1551766028, 1554444428, 1557036428, 1559714828,
+        1562306828, 1564985228, 1567663628, 1570255628, 1572934028, 1575526028,
+    };
+    for (names, fifths) |name, wanted| {
+        var room: [29]u8 = undefined;
+        const header = try std.fmt.bufPrint(&room, "Tue, 05 {s} 2019 06:07:08 GMT", .{name});
+        try testing.expectEqual(wanted, secondsOf(header));
+        try testing.expectEqual(wanted, secondsOf(std.ascii.upperString(&room, header)));
+    }
+    // A leap second is the second after it, and the space a header may have
+    // around it is not part of the date.
+    try testing.expectEqual(@as(i64, 1483228800), secondsOf("Sat, 31 Dec 2016 23:59:60 GMT"));
+    try testing.expectEqual(@as(i64, 1440938160), secondsOf(" Sun, 30 Aug 2015 12:36:00 GMT\t"));
+
+    // The parts as they stand, for whoever writes the date another way.
+    const date = parseDate("Sun, 06 Nov 1994 08:49:37 GMT").?;
+    try testing.expectEqual(@as(u32, 1994), date.year);
+    try testing.expectEqual(@as(u32, 11), date.month);
+    try testing.expectEqual(@as(u32, 6), date.day);
+    try testing.expectEqual(@as(u32, 8), date.hour);
+    try testing.expectEqual(@as(u32, 49), date.minute);
+    try testing.expectEqual(@as(u32, 37), date.second);
+
+    // The first second of 1970 is a date, and its number is the one that also
+    // means no date; before it the number is below zero. A file manager shows
+    // neither, and no store was there to write a blob then.
+    try testing.expectEqual(@as(i64, 0), parseDate("Thu, 01 Jan 1970 00:00:00 GMT").?.seconds());
+    try testing.expectEqual(@as(i64, -1), secondsOf("Wed, 31 Dec 1969 23:59:59 GMT"));
+
+    // Anything else is no date rather than a wrong one: no header at all, a time
+    // written as S3 lists it, the two forms HTTP gave up on, another zone, a
+    // month there is not, and numbers that are not numbers.
+    for ([_][]const u8{
+        "",
+        "yesterday",
+        "2015-08-30T12:36:00.000Z",
+        "Sunday, 30-Aug-15 12:36:00 GMT",
+        "Sun Aug 30 12:36:00 2015",
+        "Sun, 30 Aug 2015 12:36:00 CET",
+        "Sun, 30 Aug 2015 14:36:00 +0200",
+        "Sun, 30 Okt 2015 12:36:00 GMT",
+        "Sun, 00 Aug 2015 12:36:00 GMT",
+        "Sun, 32 Aug 2015 12:36:00 GMT",
+        "Sun, 30 Aug 2015 24:36:00 GMT",
+        "Sun, 30 Aug 2015 12:60:00 GMT",
+        "Sun, 30 Aug 2015 12:36:61 GMT",
+        "Sun, +3 Aug 2015 12:36:00 GMT",
+        "Sun, 30 Aug 2_15 12:36:00 GMT",
+        "Sun, 30 Aug 2015 12-36-00 GMT",
+        "Sun,x30 Aug 2015 12:36:00 GMT",
+        "Sun, 30 Aug 2015 12:36:00 GMT and more",
+    }) |odd| {
+        try testing.expect(parseDate(odd) == null);
+        try testing.expectEqual(@as(i64, 0), secondsOf(odd));
+    }
 }

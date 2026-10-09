@@ -198,4 +198,30 @@ whole=$(python3 tests/screen.py "$ROOT/photos" '{sleep}' 'q' '{tab}' '{right}{ri
 	fail "gv on the modified of 2015/soubor-01.txt should show ${listed%.*}Z as the grid has it, and shows '$whole'"
 echo "ok: gv writes a time the way the grid does"
 
+# --- and the file manager ---
+#
+# A bucket named in the target opens on it, this machine on the left and the
+# bucket on the right. An object says there when it was written, to the minute:
+# the time the listing gave, which for an object put there a moment ago is about
+# now - an hour out would be a zone read into a time that has none.
+out=$(python3 tests/screen.py "$ROOT/photos" '{sleep}' '{keep}' 2>&1 || true)
+facts=$(zig build dbcheck -- "$ROOT/photos" photos 2>&1 | grep 'file august trip.txt listed: ' || true)
+listed=$(printf '%s' "$facts" | sed -n 's/.* listed: size=5 modified=\([0-9]*\) asked: .*/\1/p')
+asked=$(printf '%s' "$facts" | sed -n 's/.* asked: size=5 modified=\([0-9]*\)$/\1/p')
+[ -n "$listed" ] && [ "$listed" -gt 0 ] || fail "a listing should say when an object was modified, and says: $facts"
+age=$(($(date +%s) - listed))
+[ "$age" -gt -1800 ] && [ "$age" -lt 1800 ] || fail "an object written just now is said to be $age seconds old"
+shown=$(printf '%s\n' "$out" | sed -n 's/.*august trip\.txt  *5 \([0-9-]* [0-9:]*\).*/\1/p' | head -1)
+wanted=$(python3 -c 'import sys, time; print(time.strftime("%Y-%m-%d %H:%M", time.gmtime(int(sys.argv[1]))))' "$listed")
+[ "$shown" = "$wanted" ] || {
+	printf '%s\n' "$out" >&2
+	fail "the file manager should say august trip.txt was modified $wanted, and says '$shown'"
+}
+echo "ok: an object says when it was modified in the file manager"
+# A copy asks about one object by name before it starts, which is a HEAD and
+# not a listing: the time comes in a header, written another way and to the
+# second. That is the same object and has to be the same second.
+[ "$asked" = "$listed" ] || fail "an object asked about by name should say $listed like the listing, and says '$asked'"
+echo "ok: and says the same when it is asked about by name"
+
 echo "all good"

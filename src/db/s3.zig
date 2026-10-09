@@ -1219,6 +1219,7 @@ pub const Db = struct {
                     .name = db.store.basename(path),
                     .kind = .file,
                     .size = std.fmt.parseInt(u64, response.get("content-length") orelse "0", 10) catch 0,
+                    .modified = http.secondsOf(response.get("last-modified") orelse ""),
                 };
             }
             // Not an object, so it is a folder if anything is under it. A prefix
@@ -1603,18 +1604,7 @@ fn whenever(text: []const u8) i64 {
     const hour = std.fmt.parseInt(i64, text[11..13], 10) catch return 0;
     const minute = std.fmt.parseInt(i64, text[14..16], 10) catch return 0;
     const second = std.fmt.parseInt(i64, text[17..19], 10) catch return 0;
-    return days(year, month, day) * 86400 + hour * 3600 + minute * 60 + second;
-}
-
-/// Days from 1970 to that date. The civil calendar arithmetic that every C
-/// library hides inside timegm, which is not portable enough to call.
-fn days(year: i64, month: i64, day: i64) i64 {
-    const shifted = year - @intFromBool(month <= 2);
-    const era = @divFloor(shifted, 400);
-    const of_era = shifted - era * 400;
-    const of_year = @divTrunc(153 * (month + (if (month > 2) @as(i64, -3) else 9)) + 2, 5) + day - 1;
-    const day_of_era = of_era * 365 + @divTrunc(of_era, 4) - @divTrunc(of_era, 100) + of_year;
-    return era * 146097 + day_of_era - 719468;
+    return http.days(year, month, day) * 86400 + hour * 3600 + minute * 60 + second;
 }
 
 /// The `Last-Modified` of a HEAD - `Sun, 30 Aug 2015 12:36:00 GMT` - written the
@@ -1633,51 +1623,10 @@ fn days(year: i64, month: i64, day: i64) i64 {
 /// Anything that is not such a date comes back as it came, for the reason
 /// `whenever` gives: an odd date is still something to show.
 fn asListed(arena: std.mem.Allocator, header: []const u8) db.Error![]const u8 {
-    const text = std.mem.trim(u8, header, " \t");
-    // Fixed places, which is what RFC 9110 calls the form and the only one a
-    // server is allowed to send: day, month, year, time, and GMT said out loud.
-    // The day of the week in front says nothing the date does not, and is not
-    // looked at.
-    if (text.len != 29 or text[3] != ',' or text[19] != ':' or text[22] != ':' or
-        !std.mem.eql(u8, text[25..], " GMT"))
-    {
-        return header;
-    }
-    for ([_]usize{ 4, 7, 11, 16 }) |gap| {
-        if (text[gap] != ' ') {
-            return header;
-        }
-    }
-    const months = "JanFebMarAprMayJunJulAugSepOctNovDec";
-    var month: usize = 0;
-    while (month < 12 and !std.ascii.eqlIgnoreCase(months[month * 3 ..][0..3], text[8..11])) {
-        month += 1;
-    }
-    const day = digits(text[5..7]) orelse return header;
-    const year = digits(text[12..16]) orelse return header;
-    const hour = digits(text[17..19]) orelse return header;
-    const minute = digits(text[20..22]) orelse return header;
-    // Sixty is a leap second, which a clock is allowed to say.
-    const second = digits(text[23..25]) orelse return header;
-    if (month == 12 or day == 0 or day > 31 or hour > 23 or minute > 59 or second > 60) {
-        return header;
-    }
+    const date = http.parseDate(header) orelse return header;
     return arena.print("{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}Z", .{
-        year, month + 1, day, hour, minute, second,
+        date.year, date.month, date.day, date.hour, date.minute, date.second,
     });
-}
-
-/// A run of digits as a number, and nothing for anything else: `parseInt` takes
-/// a sign and an underscore, neither of which is in a date.
-fn digits(text: []const u8) ?u32 {
-    var out: u32 = 0;
-    for (text) |c| {
-        if (!std.ascii.isDigit(c)) {
-            return null;
-        }
-        out = out * 10 + (c - '0');
-    }
-    return out;
 }
 
 /// A key as `encoding-type=url` sends it. That encoding is the one a form uses,
@@ -1986,6 +1935,9 @@ test "the date a HEAD gives is written the way a listing writes it" {
     // What it writes is what `whenever` reads, and reads as the same second the
     // listing's own text comes to.
     try testing.expectEqual(whenever("2015-08-30T12:36:00.000Z"), whenever(try asListed(arena, "Sun, 30 Aug 2015 12:36:00 GMT")));
+    // And the file manager is told the same second by a listing, which goes
+    // through `whenever`, and by a `stat`, which reads the header for itself.
+    try testing.expectEqual(whenever("2015-08-30T12:36:00.000Z"), http.secondsOf("Sun, 30 Aug 2015 12:36:00 GMT"));
 
     // Anything else is left as it came rather than turned into a wrong date: no
     // header at all, a date that is one already, the two forms HTTP gave up on,

@@ -175,6 +175,31 @@ printf '%s' "$out" | grep -q "2015 *<dir>" || {
 }
 echo "ok: a container lists, and names sharing a prefix fold into a directory"
 
+# And a blob says when it was written, as a file on this machine does. A listing
+# here writes that time the way a header does - Fri, 09 Oct 2026 21:35:22 GMT -
+# where S3 writes 2026-10-09T21:35:22.000Z, and only the second was read: the
+# size stood on the line with nothing after it. The time on the screen has to
+# be the one the account gave, to the minute, and for a blob put there a moment
+# ago that is about now: an hour out would be a zone read into a time that has
+# none.
+facts=$(zig build dbcheck -- "$ROOT/photos" photos 2>&1 | grep 'file 2015 august trip.txt listed: ' || true)
+listed=$(printf '%s' "$facts" | sed -n 's/.* listed: size=5 modified=\([0-9]*\) asked: .*/\1/p')
+asked=$(printf '%s' "$facts" | sed -n 's/.* asked: size=5 modified=\([0-9]*\)$/\1/p')
+[ -n "$listed" ] && [ "$listed" -gt 0 ] || fail "a listing should say when a blob was modified, and says: $facts"
+age=$(($(date +%s) - listed))
+[ "$age" -gt -1800 ] && [ "$age" -lt 1800 ] || fail "a blob written just now is said to be $age seconds old"
+shown=$(printf '%s\n' "$out" | sed -n 's/.*2015 august trip\.txt  *5 \([0-9-]* [0-9:]*\).*/\1/p' | head -1)
+wanted=$(python3 -c 'import sys, time; print(time.strftime("%Y-%m-%d %H:%M", time.gmtime(int(sys.argv[1]))))' "$listed")
+[ "$shown" = "$wanted" ] || {
+	printf '%s\n' "$out" >&2
+	fail "the file manager should say 2015 august trip.txt was modified $wanted, and says '$shown'"
+}
+echo "ok: a blob says when it was modified in the file manager"
+# A copy asks about one blob by name before it starts, which is a HEAD and not
+# a listing. That is the same blob and has to be the same second.
+[ "$asked" = "$listed" ] || fail "a blob asked about by name should say $listed like the listing, and says '$asked'"
+echo "ok: and says the same when it is asked about by name"
+
 # Up: a file from this machine into a container.
 tests/screen.py "$ROOT" "{sleep}f{sleep}/$LOCAL{enter}{sleep}{tab}{enter}{sleep}{tab}{down}c{sleep}{keep}" >/dev/null 2>&1 || true
 check "a file copied up arrives" "$ROOT/druhy" "jedna.txt" druhy
