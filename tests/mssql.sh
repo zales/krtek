@@ -239,7 +239,7 @@ screen "and the connection is still good afterwards" "po_zruseni" \
 # The two tests that need a server rather than a laptop: every data type read
 # back, and every schema statement this program writes run as written.
 echo "the unit tests that want a server"
-KRTEK_MSSQL="127.0.0.1:$PORT:sa:$PASSWORD" zig build test
+zig build test -Dagainst="KRTEK_MSSQL=127.0.0.1:$PORT:sa:$PASSWORD"
 
 # The screenshot on the website and in the README, which needs a server with
 # something interesting in it - so it is regenerated here rather than in

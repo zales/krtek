@@ -1217,6 +1217,10 @@ pub const AlterContext = struct {
     columns: []const Column = &.{},
     keys: []const ForeignKey = &.{},
     replay: []const []const u8 = &.{},
+    /// The columns as the table has them now, from an engine that alters in
+    /// place: what is the same in both is then not said again. Empty where the
+    /// engine did not look, and then everything is said.
+    before: []const Column = &.{},
 };
 
 /// Whether a SQL statement is one that only reads. The first word decides it,

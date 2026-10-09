@@ -52,6 +52,17 @@ pub fn build(b: *std.Build) void {
     // working tree says so, because "0.5.0" from an unknown commit is worse than
     // nothing when somebody reports a bug against it.
     const version = b.option([]const u8, "version", "the version this build calls itself") orelse "from source";
+    // A server for the drivers' unit tests that want one, as the variable the
+    // test reads and what to put in it: `-Dagainst=KRTEK_POSTGRES=postgres://…`.
+    //
+    // An option rather than the variable set in the shell, which is how it was
+    // done and which did nothing on a second run: a test run is kept and handed
+    // back for as long as the binary is the same, and what is in the
+    // environment is not part of what it is kept under. So a suite that ran
+    // `KRTEK_MSSQL=… zig build test` after anybody had run the tests once got
+    // the answer from before - every test that wants a server skipped - and
+    // called it a pass. Checked against a server that was not there at all.
+    const against = b.option([]const u8, "against", "NAME=value for the unit tests that want a server");
     const stamp = b.addOptions();
     stamp.addOption([]const u8, "version", version);
 
@@ -190,7 +201,15 @@ pub fn build(b: *std.Build) void {
 
     const test_step = b.step("test", "Unit tests of the terminal app and the drivers");
     test_step.dependOn(&b.addRunArtifact(tests).step);
-    test_step.dependOn(&b.addRunArtifact(db_tests).step);
+    const run_db_tests = b.addRunArtifact(db_tests);
+    if (against) |named| {
+        const equals = std.mem.findScalar(u8, named, '=') orelse
+            std.debug.panic("-Dagainst wants NAME=value, and got {s}", .{named});
+        run_db_tests.setEnvironmentVariable(named[0..equals], named[equals + 1 ..]);
+        // What a server answers is not something a kept result can know.
+        run_db_tests.has_side_effects = true;
+    }
+    test_step.dependOn(&run_db_tests.step);
 }
 
 fn linkPostgres(b: *std.Build, module: *std.Build.Module, target: std.Build.ResolvedTarget, prefix: ?[]const u8, options: Linking) void {

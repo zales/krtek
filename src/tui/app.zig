@@ -4501,16 +4501,21 @@ pub const App = struct {
                 }, context);
             },
             .view => try self.conn.ddl().createView(&sql, a, .{ .schema = self.grid.schema.items, .name = form.valueOf(0) }, form.valueOf(1)),
-            .trigger => {
-                try sql.appendSlice(a, "CREATE TRIGGER ");
-                try database.quoteName(&sql, a, form.valueOf(0));
-                try sql.print(a, " {s} {s} ON ", .{ form.valueOf(1), form.valueOf(2) });
-                try database.quoteName(&sql, a, form.valueOf(3));
-                if (form.valueOf(4).len != 0) {
-                    try sql.print(a, " WHEN {s}", .{form.valueOf(4)});
-                }
-                try sql.print(a, " BEGIN {s}; END", .{form.valueOf(5)});
-            },
+            // Written by the engine, like every other statement here. This one
+            // was written out in this file instead, the way SQLite takes it - so
+            // on SQLite it worked, and PostgreSQL, MySQL and SQL Server were each
+            // sent a statement in a dialect that is not theirs, while what they
+            // would have written for themselves sat in their drivers unused.
+            .trigger => try self.conn.ddl().createTrigger(
+                &sql,
+                a,
+                .{ .schema = self.grid.schema.items, .name = form.valueOf(3) },
+                form.valueOf(0),
+                form.valueOf(1),
+                form.valueOf(2),
+                form.valueOf(4),
+                form.valueOf(5),
+            ),
             .rename_table => try self.conn.ddl().renameTable(&sql, a, .{ .schema = self.grid.schema.items, .name = form.table }, form.valueOf(0)),
             .copy_table => try self.conn.ddl().copyTable(&sql, a, .{ .schema = self.grid.schema.items, .name = form.table }, form.valueOf(0), form.isOn(1)),
             .filter => {

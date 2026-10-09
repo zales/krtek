@@ -165,4 +165,16 @@ printf "SELECT count(*) FROM demo.zakaznici WHERE jmeno = 'Ludmila Čermáková-
 	| grep -qx 1 || fail "the accented value did not reach the table intact"
 echo "ok: and the server has it, character for character"
 
+# A trigger through the form, which is the engine's own statement: `FOR EACH
+# ROW` and no BEGIN. The form used to write SQLite's dialect whatever it was
+# talking to, and this server said so.
+printf 'CREATE TABLE demo.zaznam (co varchar(80));\n' | $MYSQL 2>/dev/null
+screen "a trigger made in the form is one the server takes" "1 statement(s), 0 row(s) affected" \
+	'{sleep}' 'T' 'hlidac' '{tab}' '{tab}' '{tab}' '{ctrl-u}' 'zakaznici' '{tab}' '{tab}' \
+	"INSERT INTO zaznam VALUES (NEW.jmeno)" '{ctrl-s}' '{sleep}'
+printf "INSERT INTO demo.zakaznici (jmeno) VALUES ('Hedvika');\n" | $MYSQL 2>/dev/null
+printf 'SELECT co FROM demo.zaznam\n' | $MYSQL -N 2>/dev/null | grep -qx 'Hedvika' \
+	|| fail "the trigger from the form did not fire"
+echo "ok: and it fires"
+
 echo "all good"

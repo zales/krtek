@@ -1420,6 +1420,17 @@ with `CHANGE COLUMN`. The MySQL one earned its keep on the first run: a
 `decimal(12,2)` was going through a float on the way to the screen, so `2499.50`
 arrived as `2499.5`.
 
+The PostgreSQL one also runs the unit test that wants a server: every schema
+statement the driver writes, run as written, in a schema of its own. A statement
+compared only with a string the same file wrote says nothing about whether a
+server would take it - a trigger was a syntax error for as long as that was the
+only check - so it is handed one with `zig build test
+-Dagainst=KRTEK_POSTGRES=postgres://…`. An option and not a variable in the
+shell: a test run is kept and handed back while the binary is the same, whatever
+is in the environment, so the variable alone got yesterday's answer, with every
+test that wants a server skipped. Both suites make a trigger through the form
+and then check that it fires.
+
 ```sh
 zig build && ./tests/postgres.sh
 zig build && ./tests/mysql.sh
