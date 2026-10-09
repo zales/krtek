@@ -1068,6 +1068,23 @@ pub const Ddl = union(enum) {
         }
     }
 
+    /// What to run when a script written here stopped half way, or nothing.
+    ///
+    /// A transaction takes back what a script did inside one, and the caller
+    /// sees to that. This is for what it did outside: a setting it changed at
+    /// its first line and was going to put back at its last. Only an engine
+    /// whose scripts do that has anything to say.
+    pub fn afterFailure(self: Ddl, script: []const u8) []const u8 {
+        switch (self) {
+            inline else => |driver| {
+                if (@hasDecl(@TypeOf(driver), "afterFailure")) {
+                    return driver.afterFailure(script);
+                }
+                return "";
+            },
+        }
+    }
+
     /// Apply a new column list to an existing table, renames included.
     pub fn alterTable(self: Ddl, out: *List, a: std.mem.Allocator, table: Table, new_name: []const u8, cols: []const Column, context: AlterContext) !void {
         switch (self) {
@@ -1313,6 +1330,10 @@ pub const SplitOptions = struct {
     brackets: bool = false,
     /// `identifier`
     backticks: bool = false,
+    /// Asked at a semicolon whether a statement ends there, by an engine that
+    /// has statements with semicolons inside them. Null means every semicolon
+    /// outside a string or a comment is the end of one.
+    whole: ?*const fn (arena: std.mem.Allocator, text: []const u8) bool = null,
 };
 
 /// Split a batch on the semicolons that are not inside a string, an identifier,
@@ -1373,6 +1394,12 @@ pub fn splitStatements(arena: std.mem.Allocator, sql: []const u8, options: Split
                 }
             },
             ';' => {
+                if (options.whole) |whole| {
+                    if (!whole(arena, sql[start .. i + 1])) {
+                        i += 1;
+                        continue;
+                    }
+                }
                 const text = std.mem.trim(u8, sql[start..i], " \t\r\n;");
                 if (text.len != 0) {
                     try list.append(arena, .{ .sql = text });

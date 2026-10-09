@@ -603,7 +603,28 @@ pub const Db = struct {
     /// Textual, not through the tokenizer: a batch may create a table and then
     /// use it, and a statement cannot be prepared before the one before it ran.
     pub fn split(_: *Db, arena: std.mem.Allocator, sql: []const u8) db.Error![]db.Statement {
-        return db.splitStatements(arena, sql, .{ .brackets = true, .backticks = true });
+        return db.splitStatements(arena, sql, .{ .brackets = true, .backticks = true, .whole = whole });
+    }
+
+    /// Whether a statement ends at the semicolon this text ends with.
+    ///
+    /// It does, except inside the body of a trigger, which is statements of its
+    /// own between BEGIN and END. Cut at the first of those, `CREATE TRIGGER`
+    /// was `incomplete input` and its `END` a statement by itself - typed into
+    /// the editor, written by the trigger form, and replayed by the rebuild of
+    /// any table that had one, which is how a table with a trigger came to be a
+    /// table that could not be altered.
+    ///
+    /// SQLite has the answer and gives it without needing the tables to exist.
+    /// It wants the text as a C string, so only a statement that names a
+    /// trigger is copied to be asked about: a script of a million inserts is
+    /// not held a second time for the sake of the one statement that needs it.
+    fn whole(arena: std.mem.Allocator, so_far: []const u8) bool {
+        if (std.ascii.findIgnoreCase(so_far, "TRIGGER") == null) {
+            return true;
+        }
+        const zero = arena.dupeSentinel(u8, so_far, 0) catch return true;
+        return c.sqlite3_complete(zero.ptr) != 0;
     }
 
     pub fn ddl(_: *Db) db.Ddl {
@@ -788,10 +809,27 @@ pub const Ddl = struct {
         try out.appendSlice(a, ";\n");
     }
 
+    /// How a rebuild begins, and how it ends. Foreign keys have to be off while
+    /// the table is dropped - with them on, dropping it deletes its rows first,
+    /// and every row elsewhere that cascades from one of them - and the setting
+    /// cannot be changed inside a transaction, so it is outside the one the
+    /// rebuild runs in and is not taken back with it.
+    const KEYS_OFF = "PRAGMA foreign_keys = off";
+    const KEYS_ON = "PRAGMA foreign_keys = on";
+
+    /// A rebuild that stopped half way never reached the line that turns the
+    /// keys back on. The rollback put the table back and left the session with
+    /// nothing enforced: a row could then be given a parent that does not
+    /// exist, and a parent deleted from under its rows, with no word about
+    /// either until the program was started again.
+    pub fn afterFailure(_: Ddl, script: []const u8) []const u8 {
+        return if (std.mem.startsWith(u8, script, KEYS_OFF)) KEYS_ON else "";
+    }
+
     /// SQLite cannot change a column, so the table is written again and the rows
     /// copied over. See https://sqlite.org/lang_altertable.html.
     pub fn alterTable(_: Ddl, out: *List, a: std.mem.Allocator, table: db.Table, new_name: []const u8, cols: []const db.Column, context: db.AlterContext) !void {
-        try out.appendSlice(a, "PRAGMA foreign_keys = off;\nBEGIN;\nCREATE TABLE ");
+        try out.appendSlice(a, KEYS_OFF ++ ";\nBEGIN;\nCREATE TABLE ");
         try db.quoteName(out, a, TEMPORARY);
         try body(out, a, cols, context.keys);
         try out.appendSlice(a, ";\n");
@@ -842,7 +880,7 @@ pub const Ddl = struct {
             try out.appendSlice(a, statement);
             try out.appendSlice(a, ";\n");
         }
-        try out.appendSlice(a, "COMMIT;\nPRAGMA foreign_keys = on;\n");
+        try out.appendSlice(a, "COMMIT;\n" ++ KEYS_ON ++ ";\n");
     }
 
     /// Adding a key means the same rebuild, with the key in the new definition.
@@ -929,3 +967,644 @@ pub const Ddl = struct {
         try out.appendSlice(a, ";\n");
     }
 };
+
+// ------------------------------------------------------------------- tests
+//
+// Against the engine itself, in memory. Most of what is here is a question put
+// to SQLite's pragmas, and only SQLite can say whether it was the right
+// question: what the statements look like is tested where they are written,
+// and that tells nothing about what comes back.
+
+const testing = std.testing;
+
+/// A database in memory with these statements run in it, and somewhere to keep
+/// what it is asked until the test is over.
+const Bench = struct {
+    arena: std.heap.ArenaAllocator,
+    conn: *Db,
+
+    fn init(sql: []const u8) !Bench {
+        var report: List = .empty;
+        defer report.deinit(testing.allocator);
+        const conn = try Db.open(testing.allocator, ":memory:", &report);
+        errdefer conn.close();
+        try conn.exec(sql);
+        return .{ .arena = .init(testing.allocator), .conn = conn };
+    }
+
+    fn deinit(self: *Bench) void {
+        self.conn.close();
+        self.arena.deinit();
+    }
+
+    fn a(self: *Bench) std.mem.Allocator {
+        return self.arena.allocator();
+    }
+
+    /// The first column of every row, joined with a space - which is short
+    /// enough to read in an expectation and says what order they came in.
+    fn column(self: *Bench, sql: []const u8) ![]const u8 {
+        var out: List = .empty;
+        var rows = (try self.conn.ask(sql)) orelse return "";
+        defer rows.close();
+        while (try rows.next()) {
+            if (out.items.len != 0) {
+                try out.append(self.a(), ' ');
+            }
+            try out.appendSlice(self.a(), try Db.text(self.a(), rows.value(0)));
+        }
+        return out.items;
+    }
+};
+
+test "the list is the tables and the views by name, without SQLite's own" {
+    // AUTOINCREMENT makes `sqlite_sequence`, which is SQLite's and is left out.
+    // `sqlitedata` only starts the same way: the underscore in the pattern is
+    // an underscore, not LIKE's any-one-character.
+    var bench = try Bench.init(
+        \\CREATE TABLE b (id INTEGER PRIMARY KEY AUTOINCREMENT);
+        \\CREATE TABLE "A" (x);
+        \\CREATE TABLE sqlitedata (x);
+        \\CREATE VIEW c AS SELECT x FROM "A";
+    );
+    defer bench.deinit();
+    const found = try bench.conn.objects(bench.a(), "");
+    try testing.expectEqual(@as(usize, 4), found.len);
+    try testing.expectEqualStrings("A", found[0].name);
+    try testing.expectEqualStrings("b", found[1].name);
+    try testing.expectEqualStrings("c", found[2].name);
+    try testing.expectEqualStrings("sqlitedata", found[3].name);
+    try testing.expectEqual(db.Kind.table, found[0].kind);
+    try testing.expectEqual(db.Kind.view, found[2].kind);
+    // Never an estimate: SQLite has none, and a wrong one is worse than none.
+    try testing.expectEqual(@as(?i64, null), found[0].rows);
+}
+
+test "a column says its type, whether it may be empty, its default and its key" {
+    var bench = try Bench.init(
+        \\CREATE TABLE books (
+        \\  id INTEGER PRIMARY KEY,
+        \\  title TEXT NOT NULL,
+        \\  isbn TEXT UNIQUE,
+        \\  year INTEGER DEFAULT 1900,
+        \\  note,
+        \\  shelf TEXT, room TEXT,
+        \\  UNIQUE (shelf, room)
+        \\);
+    );
+    defer bench.deinit();
+    const cols = try bench.conn.columns(bench.a(), .{ .name = "books" });
+    try testing.expectEqual(@as(usize, 7), cols.len);
+
+    try testing.expectEqualStrings("id", cols[0].name);
+    try testing.expectEqualStrings("INTEGER", cols[0].type);
+    try testing.expect(cols[0].pk);
+    try testing.expect(!cols[0].unique);
+
+    try testing.expect(cols[1].notnull);
+    try testing.expect(!cols[1].pk);
+    try testing.expectEqual(@as(?[]const u8, null), cols[1].dflt);
+
+    // A column's own UNIQUE is an index SQLite made, and the only place it is
+    // written down - a rebuild that did not carry it would lose it.
+    try testing.expect(cols[2].unique);
+    try testing.expectEqualStrings("1900", cols[3].dflt.?);
+    // A column with no type has none, rather than one made up for it.
+    try testing.expectEqualStrings("", cols[4].type);
+    // Two columns unique together are neither of them unique alone.
+    try testing.expect(!cols[5].unique);
+    try testing.expect(!cols[6].unique);
+    // What a column was called before a form touched it is what it is called.
+    try testing.expectEqualStrings("title", cols[1].original);
+}
+
+test "an index says what made it and what it is on" {
+    var bench = try Bench.init(
+        \\CREATE TABLE t (code TEXT PRIMARY KEY, a, b UNIQUE, c);
+        \\CREATE INDEX plain ON t (a, c);
+        \\CREATE UNIQUE INDEX one ON t (c);
+        \\CREATE INDEX some ON t (a) WHERE a > 0;
+        \\CREATE INDEX folded ON t (lower(a));
+    );
+    defer bench.deinit();
+    const found = try bench.conn.indexes(bench.a(), .{ .name = "t" });
+    try testing.expectEqual(@as(usize, 6), found.len);
+    var seen: usize = 0;
+    for (found) |index| {
+        if (std.mem.eql(u8, index.name, "plain")) {
+            try testing.expectEqualStrings("INDEX", index.kind);
+            try testing.expectEqualStrings("a, c", index.columns);
+            try testing.expect(!index.partial);
+            seen += 1;
+        } else if (std.mem.eql(u8, index.name, "one")) {
+            try testing.expectEqualStrings("UNIQUE", index.kind);
+            seen += 1;
+        } else if (std.mem.eql(u8, index.name, "some")) {
+            try testing.expect(index.partial);
+            seen += 1;
+        } else if (std.mem.eql(u8, index.name, "folded")) {
+            // No column to name: it is on what an expression comes to.
+            try testing.expectEqualStrings("(expression)", index.columns);
+            seen += 1;
+        } else if (std.mem.eql(u8, index.columns, "code")) {
+            // The two SQLite made for itself have names nobody chose.
+            try testing.expectEqualStrings("PRIMARY", index.kind);
+            seen += 1;
+        } else if (std.mem.eql(u8, index.columns, "b")) {
+            try testing.expectEqualStrings("UNIQUE", index.kind);
+            seen += 1;
+        }
+    }
+    try testing.expectEqual(@as(usize, 6), seen);
+}
+
+test "a foreign key says where it points and what it does when that changes" {
+    var bench = try Bench.init(
+        \\CREATE TABLE authors (id INTEGER PRIMARY KEY);
+        \\CREATE TABLE shelves (id INTEGER PRIMARY KEY);
+        \\CREATE TABLE books (
+        \\  id INTEGER PRIMARY KEY,
+        \\  author INTEGER REFERENCES authors(id) ON DELETE CASCADE ON UPDATE SET NULL,
+        \\  shelf INTEGER REFERENCES shelves(id)
+        \\);
+    );
+    defer bench.deinit();
+    const keys = try bench.conn.foreignKeys(bench.a(), .{ .name = "books" });
+    try testing.expectEqual(@as(usize, 2), keys.len);
+    for (keys) |key| {
+        if (std.mem.eql(u8, key.column, "author")) {
+            try testing.expectEqualStrings("authors", key.target_table);
+            try testing.expectEqualStrings("id", key.target_column);
+            try testing.expectEqualStrings("CASCADE", key.on_delete);
+            try testing.expectEqualStrings("SET NULL", key.on_update);
+        } else {
+            try testing.expectEqualStrings("shelf", key.column);
+            try testing.expectEqualStrings("shelves", key.target_table);
+            // Said in the words the generator leaves out, so one that was not
+            // written does not come back written.
+            try testing.expectEqualStrings("NO ACTION", key.on_delete);
+            try testing.expectEqualStrings("NO ACTION", key.on_update);
+        }
+    }
+    // And a table with none has none, rather than an error.
+    try testing.expectEqual(@as(usize, 0), (try bench.conn.foreignKeys(bench.a(), .{ .name = "authors" })).len);
+}
+
+test "a row is addressed by its rowid, by its key where it has none, and not at all in a view" {
+    var bench = try Bench.init(
+        \\CREATE TABLE plain (name TEXT);
+        \\CREATE TABLE keyed (b TEXT, a TEXT, x, PRIMARY KEY (a, b)) WITHOUT ROWID;
+        \\CREATE VIEW seen AS SELECT name FROM plain;
+    );
+    defer bench.deinit();
+
+    const hidden = try bench.conn.rowKey(bench.a(), .{ .name = "plain" });
+    try testing.expect(hidden.usable());
+    try testing.expect(hidden.hidden);
+    try testing.expectEqualStrings("rowid", hidden.expression);
+
+    // In the order of the key, which is not the order of the columns.
+    const keyed = try bench.conn.rowKey(bench.a(), .{ .name = "keyed" });
+    try testing.expect(!keyed.hidden);
+    try testing.expectEqual(@as(usize, 2), keyed.columns.len);
+    try testing.expectEqualStrings("a", keyed.columns[0]);
+    try testing.expectEqualStrings("b", keyed.columns[1]);
+
+    // Nothing addresses a row of a view, so nothing offers to change one.
+    const view = try bench.conn.rowKey(bench.a(), .{ .name = "seen" });
+    try testing.expect(!view.usable());
+}
+
+test "a value comes back as what SQLite holds, and a column says where it is from" {
+    var bench = try Bench.init(
+        \\CREATE TABLE t (n INTEGER, f REAL, s TEXT, b BLOB, e, price DECIMAL(10,2));
+        \\INSERT INTO t VALUES (42, 1.5, 'žluť', x'00ff', NULL, '12.50');
+    );
+    defer bench.deinit();
+    var rows = (try bench.conn.query("SELECT n, f, s, b, e, price, n + 1 AS more, s AS label FROM t", null)).?;
+    defer rows.close();
+    try testing.expect(try rows.next());
+    try testing.expectEqual(@as(usize, 8), rows.columnCount());
+    try testing.expectEqual(@as(i64, 42), rows.value(0).int);
+    try testing.expectEqual(@as(f64, 1.5), rows.value(1).float);
+    try testing.expectEqualStrings("žluť", rows.value(2).text);
+    // Bytes, a zero among them: by length, not up to the first zero.
+    try testing.expectEqualSlices(u8, &.{ 0x00, 0xff }, rows.value(3).blob);
+    try testing.expect(rows.value(4) == .null);
+
+    // By the declared type, because SQLite decides per value: a DECIMAL
+    // column holding text is still a column of numbers.
+    try testing.expect(rows.isNumeric(0));
+    try testing.expect(rows.isNumeric(1));
+    try testing.expect(!rows.isNumeric(2));
+    try testing.expect(rows.isNumeric(5));
+    try testing.expect(!rows.isNumeric(6));
+
+    // A column of a table says which, under its own name whatever it was
+    // called here; something worked out belongs to no table, and that is
+    // what keeps it from being offered for editing.
+    try testing.expectEqualStrings("t", rows.sourceTable(0));
+    try testing.expectEqualStrings("more", rows.name(6));
+    try testing.expectEqualStrings("", rows.sourceTable(6));
+    try testing.expectEqualStrings("label", rows.name(7));
+    try testing.expectEqualStrings("s", rows.sourceColumn(7));
+
+    try testing.expect(!try rows.next());
+}
+
+test "a batch is walked a statement at a time, and each says what it changed" {
+    var bench = try Bench.init("CREATE TABLE t (n INTEGER);");
+    defer bench.deinit();
+    const batch = "INSERT INTO t VALUES (1), (2), (3); -- three of them\nSELECT count(*) FROM t;  ";
+    var rest: []const u8 = batch;
+
+    var first = (try bench.conn.query(rest, &rest)).?;
+    try testing.expect(!try first.next());
+    try testing.expectEqual(@as(i64, 3), first.affected());
+    first.close();
+    try testing.expect(std.mem.startsWith(u8, rest, " -- three of them"));
+
+    var second = (try bench.conn.query(rest, &rest)).?;
+    try testing.expect(try second.next());
+    try testing.expectEqual(@as(i64, 3), second.value(0).int);
+    try testing.expect(!try second.next());
+    // A statement that only read changed nothing, whatever the one before did.
+    try testing.expectEqual(@as(i64, 0), second.affected());
+    second.close();
+
+    // What is left is space, which is not a statement and not an error.
+    try testing.expectEqual(@as(?db.Rows, null), try bench.conn.query(rest, &rest));
+    try testing.expectEqual(@as(usize, 0), rest.len);
+}
+
+test "what SQLite refuses is what the message says" {
+    var bench = try Bench.init("CREATE TABLE t (n INTEGER NOT NULL);");
+    defer bench.deinit();
+    try testing.expectError(error.Driver, bench.conn.exec("SELECT * FROM missing"));
+    try testing.expect(std.mem.find(u8, bench.conn.message(), "no such table: missing") != null);
+    try testing.expectError(error.Driver, bench.conn.query("SELEC 1", null));
+    try testing.expect(std.mem.find(u8, bench.conn.message(), "syntax error") != null);
+    // Refused while running rather than while being read: the cursor says so.
+    var rows = (try bench.conn.query("INSERT INTO t VALUES (NULL)", null)).?;
+    defer rows.close();
+    try testing.expectError(error.Driver, rows.next());
+    try testing.expect(std.mem.find(u8, bench.conn.message(), "NOT NULL") != null);
+}
+
+test "a statement that will not end can be given up on, and the connection is still good" {
+    var bench = try Bench.init("CREATE TABLE t (n INTEGER);");
+    defer bench.deinit();
+    const Watcher = struct {
+        begun: usize = 0,
+        asked: usize = 0,
+
+        fn keepGoing(context: *anyopaque) bool {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.asked += 1;
+            return false;
+        }
+
+        fn begin(context: *anyopaque) void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.begun += 1;
+        }
+    };
+    var watcher = Watcher{};
+    bench.conn.watch(.{ .context = &watcher, .keep_going = Watcher.keepGoing, .begin = Watcher.begin });
+
+    var rows = (try bench.conn.query(
+        "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n) SELECT count(*) FROM n",
+        null,
+    )).?;
+    try testing.expectError(error.Driver, rows.next());
+    rows.close();
+    try testing.expect(std.mem.find(u8, bench.conn.message(), "interrupted") != null);
+    // Told once that a statement began, and asked at least once whether to go on.
+    try testing.expectEqual(@as(usize, 1), watcher.begun);
+    try testing.expect(watcher.asked >= 1);
+
+    // Nobody watching: the next one runs to its end.
+    bench.conn.watch(null);
+    try bench.conn.exec("INSERT INTO t VALUES (1)");
+    try testing.expectEqual(@as(?i64, 1), bench.conn.rowCount(.{ .name = "t" }));
+}
+
+test "a transaction is open from BEGIN until it is ended" {
+    var bench = try Bench.init("CREATE TABLE t (n INTEGER);");
+    defer bench.deinit();
+    try testing.expect(!bench.conn.inTransaction());
+    try bench.conn.exec("BEGIN");
+    try bench.conn.exec("INSERT INTO t VALUES (1)");
+    try testing.expect(bench.conn.inTransaction());
+    try bench.conn.exec("ROLLBACK");
+    try testing.expect(!bench.conn.inTransaction());
+    try testing.expectEqual(@as(?i64, 0), bench.conn.rowCount(.{ .name = "t" }));
+    // A table that is not there has no count, which is not a count of none.
+    try testing.expectEqual(@as(?i64, null), bench.conn.rowCount(.{ .name = "missing" }));
+}
+
+test "the definition is the statement as it was written" {
+    var bench = try Bench.init(
+        \\CREATE TABLE t (n INTEGER);
+        \\CREATE VIEW v AS SELECT n FROM t WHERE n > 0;
+    );
+    defer bench.deinit();
+    try testing.expectEqualStrings("CREATE TABLE t (n INTEGER)", (try bench.conn.definition(bench.a(), .{ .name = "t" })).?);
+    try testing.expectEqualStrings("CREATE VIEW v AS SELECT n FROM t WHERE n > 0", (try bench.conn.definition(bench.a(), .{ .name = "v" })).?);
+    try testing.expectEqual(@as(?[]const u8, null), try bench.conn.definition(bench.a(), .{ .name = "missing" }));
+}
+
+test "a rebuild keeps the rows, the indexes, the trigger and the keys, and a renamed column takes its index with it" {
+    var bench = try Bench.init(
+        \\CREATE TABLE authors (id INTEGER PRIMARY KEY);
+        \\INSERT INTO authors VALUES (1);
+        \\CREATE TABLE log (what TEXT);
+        \\CREATE TABLE books (
+        \\  id INTEGER PRIMARY KEY,
+        \\  title TEXT NOT NULL,
+        \\  isbn TEXT UNIQUE,
+        \\  year INTEGER,
+        \\  author INTEGER REFERENCES authors(id) ON DELETE CASCADE
+        \\);
+        \\CREATE INDEX by_title ON books (title);
+        \\CREATE INDEX recent ON books (year) WHERE year > 1950;
+        \\CREATE TRIGGER noted AFTER INSERT ON books BEGIN INSERT INTO log VALUES ('added'); END;
+        \\INSERT INTO books VALUES (1, 'RUR', 'x-1', 1920, 1), (2, 'Žert', 'x-2', 1967, 1);
+        \\DELETE FROM log;
+    );
+    defer bench.deinit();
+    const table = db.Table{ .name = "books" };
+
+    // What the alter form does: the columns as they are, one of them renamed
+    // and one that was not there before.
+    const before = try bench.conn.columns(bench.a(), table);
+    var cols: std.ArrayList(db.Column) = .empty;
+    try cols.appendSlice(bench.a(), before);
+    cols.items[1].name = "name";
+    try cols.append(bench.a(), .{ .name = "pages", .type = "INTEGER", .dflt = "0" });
+
+    const context = try bench.conn.alterContext(bench.a(), table, cols.items);
+    var script: List = .empty;
+    try (Ddl{}).alterTable(&script, bench.a(), table, "", cols.items, context);
+    try bench.conn.exec(script.items);
+
+    // Every row, under the new name, with the default in the new column.
+    try testing.expectEqualStrings("RUR Žert", try bench.column("SELECT name FROM books ORDER BY id"));
+    try testing.expectEqualStrings("0 0", try bench.column("SELECT pages FROM books ORDER BY id"));
+    try testing.expectEqualStrings("", try bench.column("SELECT name FROM sqlite_master WHERE name = 'krtek_rebuild'"));
+
+    // The plain index was written again for the column's new name; the
+    // partial one and the trigger were put back as they were written.
+    const after = try bench.conn.indexes(bench.a(), table);
+    var named: usize = 0;
+    for (after) |index| {
+        if (std.mem.eql(u8, index.name, "by_title")) {
+            try testing.expectEqualStrings("name", index.columns);
+            named += 1;
+        } else if (std.mem.eql(u8, index.name, "recent")) {
+            try testing.expect(index.partial);
+            named += 1;
+        }
+    }
+    try testing.expectEqual(@as(usize, 2), named);
+    try bench.conn.exec("INSERT INTO books (name, isbn, author) VALUES ('Krakatit', 'x-3', 1)");
+    try testing.expectEqualStrings("added", try bench.column("SELECT what FROM log"));
+
+    // The column's own UNIQUE and NOT NULL, which live nowhere but in the
+    // table that was dropped, are in the one that replaced it.
+    try testing.expectError(error.Driver, bench.conn.exec("INSERT INTO books (name, isbn) VALUES ('again', 'x-1')"));
+    try testing.expectError(error.Driver, bench.conn.exec("INSERT INTO books (isbn) VALUES ('x-9')"));
+
+    // The key is still a key and keys are being enforced again: the script
+    // turns them off to move the rows, and has to turn them back on.
+    const keys = try bench.conn.foreignKeys(bench.a(), table);
+    try testing.expectEqual(@as(usize, 1), keys.len);
+    try testing.expectEqualStrings("CASCADE", keys[0].on_delete);
+    try testing.expectEqualStrings("1", try bench.column("PRAGMA foreign_keys"));
+    try testing.expectError(error.Driver, bench.conn.exec("INSERT INTO books (name, author) VALUES ('orphan', 99)"));
+    try bench.conn.exec("DELETE FROM authors");
+    try testing.expectEqualStrings("0", try bench.column("SELECT count(*) FROM books"));
+}
+
+test "adding a key is the same rebuild with the key in it" {
+    var bench = try Bench.init(
+        \\CREATE TABLE authors (id INTEGER PRIMARY KEY);
+        \\INSERT INTO authors VALUES (1);
+        \\CREATE TABLE books (id INTEGER PRIMARY KEY, author INTEGER);
+        \\INSERT INTO books VALUES (1, 1);
+    );
+    defer bench.deinit();
+    const table = db.Table{ .name = "books" };
+    const cols = try bench.conn.columns(bench.a(), table);
+    const context = try bench.conn.alterContext(bench.a(), table, cols);
+    var script: List = .empty;
+    try (Ddl{}).addForeignKey(&script, bench.a(), table, .{
+        .column = "author",
+        .target_table = "authors",
+        .target_column = "id",
+        .on_delete = "SET NULL",
+    }, context);
+    try bench.conn.exec(script.items);
+
+    try testing.expectEqualStrings("1", try bench.column("SELECT author FROM books"));
+    try bench.conn.exec("DELETE FROM authors");
+    try testing.expectEqualStrings("", try bench.column("SELECT author FROM books"));
+}
+
+test "a page that is asked for is the page that comes back, and a change lands on its row" {
+    // The whole of the structured path, as the grid uses it: the request is
+    // put into SQL by the shared renderer and what comes back is SQLite's.
+    var bench = try Bench.init(
+        \\CREATE TABLE books (title TEXT, year INTEGER);
+        \\INSERT INTO books VALUES ('RUR', 1920), ('Žert', 1967), ('Krakatit', 1924), ('Saturnin', 1942);
+    );
+    defer bench.deinit();
+    const conn = db.Db{ .sqlite = bench.conn };
+    const table = db.Table{ .name = "books" };
+
+    var rows = (try conn.select(.{
+        .table = table,
+        .extra = "rowid",
+        .extra_as = "rowid",
+        .where = &.{.{ .column = "year", .op = .lt, .value = "1950" }},
+        .order = "year",
+        .descending = true,
+        .limit = 2,
+        .offset = 1,
+    })).?;
+    try testing.expect(try rows.next());
+    // The hidden key first, then the row: Krakatit is the third that was put in.
+    try testing.expectEqual(@as(i64, 3), rows.value(0).int);
+    try testing.expectEqualStrings("Krakatit", rows.value(1).text);
+    try testing.expect(try rows.next());
+    try testing.expectEqualStrings("RUR", rows.value(1).text);
+    try testing.expect(!try rows.next());
+    rows.close();
+
+    try testing.expectEqual(@as(?i64, 3), conn.count(.{
+        .table = table,
+        .where = &.{.{ .column = "year", .op = .lt, .value = "1950" }},
+        // Counting is of what matches, not of the page it would be shown on.
+        .limit = 2,
+        .offset = 1,
+    }));
+
+    try conn.apply(.{
+        .kind = .update,
+        .table = table,
+        .cells = &.{.{ .column = "year", .value = "1921" }},
+        .where = &.{.{ .column = "rowid", .value = "1" }},
+    });
+    try conn.apply(.{ .kind = .delete, .table = table, .where = &.{.{ .column = "rowid", .value = "2" }} });
+    try conn.apply(.{
+        .kind = .insert,
+        .table = table,
+        .cells = &.{ .{ .column = "title", .value = "it's" }, .{ .column = "year", .value = null } },
+    });
+    try testing.expectEqualStrings("RUR Krakatit Saturnin it's", try bench.column("SELECT title FROM books ORDER BY rowid"));
+    try testing.expectEqualStrings("1921", try bench.column("SELECT year FROM books WHERE title = 'RUR'"));
+    try testing.expectEqualStrings("1", try bench.column("SELECT count(*) FROM books WHERE year IS NULL"));
+}
+
+test "the settings say where the file is and that it is whole" {
+    var bench = try Bench.init("CREATE TABLE t (n INTEGER);");
+    defer bench.deinit();
+    const found = try bench.conn.settings(bench.a());
+    try testing.expectEqualStrings("file", found[0].label);
+    try testing.expectEqualStrings(":memory:", found[0].value);
+    try testing.expectEqualStrings("integrity", found[found.len - 1].label);
+    try testing.expectEqualStrings("ok", found[found.len - 1].value);
+    var keys_on = false;
+    for (found) |setting| {
+        if (std.mem.eql(u8, setting.label, "foreign_keys")) {
+            // Turned on when the file is opened, which SQLite does not do itself.
+            keys_on = std.mem.eql(u8, setting.value, "1");
+        }
+    }
+    try testing.expect(keys_on);
+}
+
+test "a file that is not a database is refused when it is opened, with the reason" {
+    var name: [64]u8 = undefined;
+    const path = try std.mem.printSentinel(&name, "/tmp/krtek-sqlite-test-{d}", .{std.c.getpid()}, 0);
+    const file = std.c.fopen(path, "wb") orelse return error.CannotCreate;
+    _ = std.c.fwrite("this is a letter, not a database", 1, 32, file);
+    _ = std.c.fclose(file);
+    defer _ = std.c.unlink(path);
+
+    var report: List = .empty;
+    defer report.deinit(testing.allocator);
+    try testing.expectError(error.Driver, Db.open(testing.allocator, path, &report));
+    try testing.expect(std.mem.find(u8, report.items, "not a database") != null);
+    try testing.expect(std.mem.find(u8, report.items, "krtek-sqlite-test") != null);
+}
+
+test "a trigger is one statement, with the semicolons its body has" {
+    var bench = try Bench.init(
+        \\CREATE TABLE books (id INTEGER PRIMARY KEY, title TEXT, state TEXT);
+        \\CREATE TABLE log (what TEXT);
+    );
+    defer bench.deinit();
+    const batch =
+        \\CREATE TRIGGER noted AFTER INSERT ON books BEGIN
+        \\  INSERT INTO log VALUES ('added');
+        \\  UPDATE books SET state = CASE WHEN NEW.title = '' THEN 'empty' ELSE 'ok' END WHERE id = NEW.id;
+        \\END;
+        \\INSERT INTO books (title) VALUES ('RUR'); -- which sets it off
+        \\SELECT 'a trigger; in a string' AS said
+    ;
+    const parts = try bench.conn.split(bench.a(), batch);
+    try testing.expectEqual(@as(usize, 3), parts.len);
+    // Up to its own END and no further: the END of a CASE is not it.
+    try testing.expect(std.mem.startsWith(u8, parts[0].sql, "CREATE TRIGGER noted"));
+    try testing.expect(std.mem.endsWith(u8, parts[0].sql, "WHERE id = NEW.id;\nEND"));
+    try testing.expectEqualStrings("INSERT INTO books (title) VALUES ('RUR')", parts[1].sql);
+    try testing.expect(std.mem.endsWith(u8, parts[2].sql, "AS said"));
+
+    // And each of them is a statement SQLite takes, in that order.
+    for (parts) |part| {
+        try bench.conn.exec(part.sql);
+    }
+    try testing.expectEqualStrings("added", try bench.column("SELECT what FROM log"));
+    try testing.expectEqualStrings("ok", try bench.column("SELECT state FROM books"));
+
+    // With no semicolon after its END, which is how the last statement of a
+    // batch is usually left.
+    const last = try bench.conn.split(bench.a(), "DROP TRIGGER noted; CREATE TRIGGER t AFTER DELETE ON books BEGIN DELETE FROM log; END");
+    try testing.expectEqual(@as(usize, 2), last.len);
+    try testing.expect(std.mem.endsWith(u8, last[1].sql, "DELETE FROM log; END"));
+
+    // A transaction's BEGIN and END are statements of their own, as they were.
+    const plain = try bench.conn.split(bench.a(), "BEGIN; DELETE FROM log; END;");
+    try testing.expectEqual(@as(usize, 3), plain.len);
+}
+
+test "the script a rebuild writes is run a statement at a time, trigger and all" {
+    // What the interface does with it: split by the driver, each piece run as
+    // a statement of its own. Handed to SQLite whole it always worked, which is
+    // why the test that did that said nothing was wrong.
+    var bench = try Bench.init(
+        \\CREATE TABLE log (what TEXT);
+        \\CREATE TABLE books (id INTEGER PRIMARY KEY, title TEXT);
+        \\CREATE TRIGGER noted AFTER INSERT ON books BEGIN INSERT INTO log VALUES ('added'); END;
+        \\INSERT INTO books (title) VALUES ('RUR');
+        \\DELETE FROM log;
+    );
+    defer bench.deinit();
+    const table = db.Table{ .name = "books" };
+    const cols = try bench.conn.columns(bench.a(), table);
+    var script: List = .empty;
+    try (Ddl{}).alterTable(&script, bench.a(), table, "", cols, try bench.conn.alterContext(bench.a(), table, cols));
+    for (try bench.conn.split(bench.a(), script.items)) |part| {
+        try bench.conn.exec(part.sql);
+    }
+    try testing.expect(!bench.conn.inTransaction());
+    try testing.expectEqualStrings("RUR", try bench.column("SELECT title FROM books"));
+    try bench.conn.exec("INSERT INTO books (title) VALUES ('Krakatit')");
+    try testing.expectEqualStrings("added", try bench.column("SELECT what FROM log"));
+}
+
+test "a rebuild that stops half way leaves the keys enforced" {
+    var bench = try Bench.init(
+        \\CREATE TABLE authors (id INTEGER PRIMARY KEY);
+        \\INSERT INTO authors VALUES (1);
+        \\CREATE TABLE books (id INTEGER PRIMARY KEY, title TEXT, author INTEGER REFERENCES authors(id));
+        \\INSERT INTO books VALUES (1, NULL, 1);
+    );
+    defer bench.deinit();
+    const table = db.Table{ .name = "books" };
+    // A column made NOT NULL over a row that has nothing in it: the copy into
+    // the new table is refused, which is the fifth statement of eight.
+    const cols = try bench.conn.columns(bench.a(), table);
+    cols[1].notnull = true;
+    var script: List = .empty;
+    try (Ddl{}).alterTable(&script, bench.a(), table, "", cols, try bench.conn.alterContext(bench.a(), table, cols));
+
+    // The way the interface runs it: a statement at a time, stopping at the
+    // first that fails, and rolling back whatever transaction is left open.
+    var failed = false;
+    for (try bench.conn.split(bench.a(), script.items)) |part| {
+        bench.conn.exec(part.sql) catch {
+            failed = true;
+            break;
+        };
+    }
+    try testing.expect(failed);
+    try testing.expect(bench.conn.inTransaction());
+    try bench.conn.exec("ROLLBACK");
+    // The table is as it was, and the setting is not: this is what was left.
+    try testing.expectEqualStrings("1", try bench.column("SELECT count(*) FROM books"));
+    try testing.expectEqualStrings("0", try bench.column("PRAGMA foreign_keys"));
+
+    const mend = (Ddl{}).afterFailure(script.items);
+    try testing.expectEqualStrings("PRAGMA foreign_keys = on", mend);
+    try bench.conn.exec(mend);
+    try testing.expectEqualStrings("1", try bench.column("PRAGMA foreign_keys"));
+    try testing.expectError(error.Driver, bench.conn.exec("INSERT INTO books VALUES (2, 'orphan', 99)"));
+
+    // A script that set nothing has nothing to put back.
+    try testing.expectEqualStrings("", (Ddl{}).afterFailure("CREATE INDEX i ON books (title);\n"));
+    // And an engine that has no word for it says nothing, through the union.
+    try testing.expectEqualStrings("", (db.Ddl{ .postgres = .{} }).afterFailure(script.items));
+    try testing.expectEqualStrings(mend, (db.Ddl{ .sqlite = .{} }).afterFailure(script.items));
+}

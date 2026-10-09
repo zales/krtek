@@ -4582,7 +4582,15 @@ pub const App = struct {
         try self.runBatchStopping(script, true);
         try self.loadObjects();
         if (self.report.list.items.len != 0 and self.report.list.items[self.report.list.items.len - 1].failure != null) {
-            // The rollback in runBatch has already undone the half done work.
+            // The rollback in runBatch has already undone the half done work -
+            // inside the transaction. What the script changed before it began
+            // one, and never got as far as putting back, is the engine's to say.
+            const mend = self.conn.ddl().afterFailure(script);
+            if (mend.len != 0) {
+                self.conn.exec(mend) catch {
+                    self.complain("the script failed, and what it had set could not be put back: {s}", .{self.conn.message()});
+                };
+            }
             self.reload() catch {};
             return;
         }

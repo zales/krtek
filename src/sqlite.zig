@@ -219,6 +219,9 @@ pub extern fn sqlite3_errmsg(db: ?*Db) [*:0]const u8;
 pub extern fn sqlite3_db_filename(db: ?*Db, name: [*:0]const u8) ?[*:0]const u8;
 pub extern fn sqlite3_busy_timeout(db: ?*Db, ms: c_int) c_int;
 pub extern fn sqlite3_exec(db: ?*Db, sql: [*:0]const u8, cb: ?*anyopaque, arg: ?*anyopaque, err: ?*?[*:0]u8) c_int;
+/// Whether the text ends where a statement does. It reads words, not tables, so
+/// it can be asked about a statement whose table does not exist yet.
+pub extern fn sqlite3_complete(sql: [*:0]const u8) c_int;
 pub extern fn sqlite3_prepare_v2(db: ?*Db, sql: [*]const u8, nByte: c_int, ppStmt: *?*Stmt, pzTail: *?[*]const u8) c_int;
 pub extern fn sqlite3_step(stmt: ?*Stmt) c_int;
 pub extern fn sqlite3_reset(stmt: ?*Stmt) c_int;
