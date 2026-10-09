@@ -1446,6 +1446,17 @@ up on neither holds up the next one nor writes on its panel.
 zig build && ./tests/connecting.sh
 ```
 
+[tests/saved.sh](tests/saved.sh) is about the file the list of connections is
+kept in, when it cannot be written. A connection saved from the form, one
+removed and one marked read-only each have to say that they did not reach the
+file - and still be saying it after the connection the form goes on to open has
+written its own line over the first - while opening one, which only moves it to
+the front of a list somebody may keep read-only on purpose, says nothing:
+
+```sh
+zig build && ./tests/saved.sh
+```
+
 [tests/mssql.sh](tests/mssql.sh) is worth more than the rest of these, because
 nothing in that driver is somebody else's code: the packet framing, the
 handshake, the login, the token stream and the types are all written here, and

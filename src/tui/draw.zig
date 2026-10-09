@@ -267,9 +267,14 @@ fn connections(app: *App, size: Size, rows: usize) void {
     }
     if (line <= rows and app.saved.path.items.len != 0) {
         screen.moveTo(line, left);
-        screen.style(.{ .fg = C.faint });
-        _ = write(app, "    saved in ", width -| 2);
-        _ = write(app, app.saved.path.items, if (width > 19) width - 19 else 0);
+        // Where the list is kept - or, while something in it has not reached
+        // the file, that it is not. The status line says so once and is then
+        // written over by whatever happens next; this is still here when
+        // somebody comes back to the list to find out why a connection is gone.
+        const lead = if (app.saved.unwritten) "    not written to " else "    saved in ";
+        screen.style(.{ .fg = if (app.saved.unwritten) C.danger else C.faint });
+        _ = write(app, lead, width -| 2);
+        _ = write(app, app.saved.path.items, width -| (lead.len + 6));
         line += 1;
     }
     screen.reset();

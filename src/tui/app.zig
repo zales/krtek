@@ -496,6 +496,12 @@ const Saved = struct {
     /// Which saved connection the open form is editing, so changing both its name
     /// and its target replaces that entry instead of adding a second one.
     editing: ?usize = null,
+    /// Something somebody asked for is in the list and not in its file, because
+    /// the file could not be written when it was put there. Kept rather than said
+    /// once: most of what changes the list goes on to open a connection, and what
+    /// that has to say is written over the line a moment later. So it stays until
+    /// the file has been written, and is said again wherever there is room to.
+    unwritten: bool = false,
 
     /// A page, and never zero: a page key that moves by nothing looks broken.
     pub fn page(self: Saved) usize {
@@ -967,6 +973,10 @@ pub const App = struct {
             try self.rememberConnection(target);
         }
         self.say("{s} - {s}", .{ self.conn.describe(), self.conn.version() });
+        // Every way of changing the list that goes on to connect ends here, so
+        // this is where a list that did not reach its file is said - after the
+        // line above, which would otherwise be written over it.
+        self.admitUnwritten();
         // A place that holds files opens on the files. The grid can show a
         // directory as a table and that is worth having, but it is not what
         // anybody connecting to a NAS came for, and nothing on that screen said
@@ -1420,10 +1430,49 @@ pub const App = struct {
         const clean = try conns.withoutPassword(scratch.allocator(), target);
         if (self.saved.list.find(clean)) |at| {
             self.saved.list.touch(at);
+            _ = self.writeList(.order);
         } else {
             try self.saved.list.add(try conns.suggestName(scratch.allocator(), clean), clean, null, "");
+            _ = self.writeList(.asked);
         }
-        conns.save(&self.saved.list, self.saved.path.items) catch {};
+        self.admitUnwritten();
+    }
+
+    /// Write the list to its file, and know whether it got there.
+    ///
+    /// Five places wrote it and looked away: a connection saved from the form,
+    /// one removed, a password said to be "now in" a file that had not been
+    /// written - each was on the screen as done and gone the next time the
+    /// program started, with nothing between the two to say why.
+    ///
+    /// What was changed says how much a failure matters. Opening a connection
+    /// moves it to the front, which nobody asked for and nobody misses: a list
+    /// somebody keeps read-only on purpose is still a list, and is not complained
+    /// about every time it is used. Anything else is somebody's own change, and
+    /// stays owed until a write goes through - which writes all of it, so one
+    /// that does clears whatever the ones before it left.
+    fn writeList(self: *App, changed: enum { asked, order }) bool {
+        conns.save(&self.saved.list, self.saved.path.items) catch {
+            if (changed == .asked) {
+                self.saved.unwritten = true;
+            }
+            return false;
+        };
+        self.saved.unwritten = false;
+        return true;
+    }
+
+    /// Say that the list is not in its file, where it is not - over whatever the
+    /// line says now, which is why this comes last wherever it is called.
+    fn admitUnwritten(self: *App) void {
+        if (!self.saved.unwritten) {
+            return;
+        }
+        if (self.saved.path.items.len == 0) {
+            self.complain("the connection list has nowhere to be kept: neither XDG_CONFIG_HOME nor HOME is set", .{});
+            return;
+        }
+        self.complain("the connection list could not be written, so it is as it was the next time this starts: {s}", .{self.saved.path.items});
     }
 
     /// Connect to the entry the cursor is on.
@@ -1483,7 +1532,7 @@ pub const App = struct {
         if (!entry.found) {
             self.saved.list.touch(chosen);
             self.saved.at = 0;
-            conns.save(&self.saved.list, self.saved.path.items) catch {};
+            _ = self.writeList(.order);
         }
         try self.connect(target, false);
     }
@@ -1514,8 +1563,9 @@ pub const App = struct {
             .ask => {},
             .file => {
                 try self.saved.list.keep(0, .file, password);
-                conns.save(&self.saved.list, self.saved.path.items) catch {};
-                self.say("connected, and the password is now in {s}", .{self.saved.path.items});
+                if (self.writeList(.asked)) {
+                    self.say("connected, and the password is now in {s}", .{self.saved.path.items});
+                }
             },
             .keychain, .touchid => {
                 const target_now = self.saved.list.items.items[0].target;
@@ -1526,6 +1576,7 @@ pub const App = struct {
                 }
             },
         }
+        self.admitUnwritten();
     }
 
     pub fn forgetSaved(self: *App) !void {
@@ -1547,8 +1598,9 @@ pub const App = struct {
         if (self.saved.at >= self.savedCount() and self.saved.at > 0) {
             self.saved.at -= 1;
         }
-        conns.save(&self.saved.list, self.saved.path.items) catch {};
+        _ = self.writeList(.asked);
         self.say("{s} removed from the list", .{label});
+        self.admitUnwritten();
     }
 
     /// The form for adding or editing a connection.
@@ -1577,10 +1629,10 @@ pub const App = struct {
         } else {
             self.saved.list.mark(chosen, now);
         }
-        conns.save(&self.saved.list, self.saved.path.items) catch {
-            self.complain("the connection list could not be written", .{});
+        if (!self.writeList(.asked)) {
+            self.admitUnwritten();
             return;
-        };
+        }
         // What is in force for a connection already open was read when it opened,
         // so say what this did and did not change rather than leaving somebody to
         // find out by trying to write.
@@ -4601,7 +4653,10 @@ pub const App = struct {
                 self.complain("the keychain would not take the password", .{});
             };
         }
-        conns.save(&self.saved.list, self.saved.path.items) catch {};
+        // Said by `enter` once there is a connection, and by the list itself
+        // where there is not: either of them comes after this and is what is on
+        // the screen by the time anybody reads it.
+        _ = self.writeList(.asked);
         self.saved.at = 0;
         // Connect with whatever was typed here, whether or not it is kept.
         const attempt = if (typed.len != 0)
