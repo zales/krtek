@@ -69,7 +69,7 @@ pub fn frame(app: *App, size: Size) !void {
     if (app.typing.form != null) {
         try formPanel(app, size, side, body_rows);
     }
-    if (app.typing.editor != null) {
+    if (app.typing.editor != null and (!app.typing.docked or app.view == .grid)) {
         editorPanel(app, size, side, body_rows);
     }
     if (app.detail) {
@@ -127,7 +127,7 @@ fn connections(app: *App, size: Size, rows: usize) void {
     const hints = [_][2][]const u8{
         .{ "enter", "connect to the one selected" },
         .{ "a", "add a connection" },
-        .{ "e / d", "edit, remove" },
+        .{ "e / x", "edit, remove" },
         .{ "r", "read-only: nothing is written through it" },
         .{ "/", "narrow the list by name, host or port" },
         .{ "up down", "move in the list" },
@@ -302,9 +302,28 @@ fn header(app: *App, size: Size) void {
             });
             used += write(app, piece.text, size.cols -| used);
         }
-    } else {
+    }
+    var buf: [96]u8 = undefined;
+    const right = if (app.connected)
+        std.mem.print(&buf, "{s}  {d} objects ", .{ app.conn.version(), app.sidebar.objects.items.len }) catch ""
+    else
+        "no connection ";
+    const right_width = term.width(right);
+    if (app.tabCount() <= 1) {
+        // What is open, and its end where all of it does not fit: a path is
+        // told from the next one by the file it ends in and a server by its
+        // database, and the line used to keep the beginning - `/private/tmp/…`
+        // for every file under there, with the name of none of them.
         screen.style(.{ .bg = C.bar, .fg = C.accent });
-        used += write(app, if (app.connected) app.conn.describe() else "", size.cols - used);
+        const what = if (app.connected) app.conn.describe() else "";
+        const marked: usize = if (app.connected and app.read_only) 11 else 0;
+        const room = size.cols -| used -| right_width -| marked -| 2;
+        if (term.width(what) <= room or room < 8) {
+            used += write(app, what, size.cols -| used);
+        } else {
+            used += write(app, "…", 1);
+            used += write(app, endOf(what, room - 1), room - 1);
+        }
     }
 
     // Beside the name of the connection, because that is what it is about - and
@@ -315,12 +334,6 @@ fn header(app: *App, size: Size) void {
         used += write(app, "  read-only", size.cols -| used);
     }
     screen.style(.{ .bg = C.bar, .fg = C.dim });
-    var buf: [96]u8 = undefined;
-    const right = if (app.connected)
-        std.mem.print(&buf, "{s}  {d} objects ", .{ app.conn.version(), app.sidebar.objects.items.len }) catch ""
-    else
-        "no connection ";
-    const right_width = term.width(right);
     if (size.cols > used + right_width) {
         fill(app, ' ', size.cols - used - right_width);
         _ = write(app, right, right_width);
@@ -484,7 +497,10 @@ fn sidebar(app: *App, width: usize, rows: usize) void {
         }
         screen.reset();
     }
-    var line: usize = 2;
+    // Below what was just said, where nothing is listed: the lines under the
+    // list are blanked further down, and these two were among them - so a
+    // database with nothing in it had an empty list and no word about `c`.
+    var line: usize = if (visible != 0) 2 else if (app.sidebar.filter.items.len > 0) 3 else 4;
     var n = app.sidebar.scroll;
     while (line < rows + 1 and n < visible) : ({
         line += 1;
@@ -676,13 +692,32 @@ pub fn columnAt(app: *App, size: Size, x: usize) ?usize {
     return null;
 }
 
+/// How many rows at the top of the grid the editor takes while it sits over its
+/// own result: the statement, up to five lines of it, in its frame. None where
+/// that would leave fewer than five rows of the result - on a window that short
+/// the result is what was asked for, and `s` still goes back to the statement.
+pub fn dockedRows(app: *App, rows: usize) usize {
+    if (!app.typing.docked or app.view != .grid) {
+        return 0;
+    }
+    const editor = &(app.typing.editor orelse return 0);
+    // A usize, spelled out: `@min` with a literal gives back a type that only
+    // holds the literal, and the sum after it does not fit.
+    const lines: usize = @min(editor.lineCount(), 5);
+    const height = lines + 2;
+    // The grid's own two lines, and five rows of what was asked for.
+    return if (rows < height + 7) 0 else height;
+}
+
 fn grid(app: *App, size: Size, side: usize, rows: usize) void {
     const screen = app.screen;
     const left = side;
     const width = size.cols - left;
+    // Lower by as much as the statement above it takes, when one is there.
+    const down = dockedRows(app, rows);
 
     // Title line: table, paging, sort.
-    screen.moveTo(1, left);
+    screen.moveTo(1 + down, left);
     screen.style(.{ .fg = C.accent, .bold = true });
     var used: usize = write(app, " ", width) + write(app, app.grid.title.items, width - 2);
     screen.style(.{ .fg = C.dim });
@@ -743,7 +778,7 @@ fn grid(app: *App, size: Size, side: usize, rows: usize) void {
         const text = std.mem.print(&which, "columns {d}-{d} of {d}", .{ plan.first + 1, plan.last, plan.shown }) catch "";
         const w = term.width(text) + 5;
         if (text.len != 0 and width > used + w + 2) {
-            screen.moveTo(1, left + width - w);
+            screen.moveTo(1 + down, left + width - w);
             screen.style(.{ .fg = C.accent, .bold = true });
             _ = write(app, if (plan.first > 0) "‹ " else "  ", 2);
             screen.style(.{ .fg = C.dim });
@@ -754,7 +789,7 @@ fn grid(app: *App, size: Size, side: usize, rows: usize) void {
     }
 
     // Header row.
-    screen.moveTo(2, left);
+    screen.moveTo(2 + down, left);
     screen.style(.{ .bg = C.bar, .fg = C.dim, .bold = true });
     var x: usize = 0;
     for (plan.widths, 0..) |w, n| {
@@ -777,7 +812,7 @@ fn grid(app: *App, size: Size, side: usize, rows: usize) void {
     screen.reset();
 
     // Rows.
-    const list_rows = if (rows > 2) rows - 2 else 1;
+    const list_rows = if (rows > 2 + down) rows - 2 - down else 1;
     app.cursor.page = list_rows;
     if (app.cursor.row < app.cursor.row_scroll) {
         app.cursor.row_scroll = app.cursor.row;
@@ -785,7 +820,7 @@ fn grid(app: *App, size: Size, side: usize, rows: usize) void {
     if (app.cursor.row >= app.cursor.row_scroll + list_rows) {
         app.cursor.row_scroll = app.cursor.row - list_rows + 1;
     }
-    var line: usize = 3;
+    var line: usize = 3 + down;
     var r = app.cursor.row_scroll;
     while (line < rows + 1) : (line += 1) {
         screen.moveTo(line, left);
@@ -836,7 +871,7 @@ fn grid(app: *App, size: Size, side: usize, rows: usize) void {
         r += 1;
     }
     if (app.grid.rows.items.len == 0) {
-        screen.moveTo(4, left + 2);
+        screen.moveTo(4 + down, left + 2);
         screen.style(.{ .fg = C.faint });
         // An empty table and a filter that matches nothing look the same on
         // screen, so say which one it is and what undoes it.
@@ -1273,7 +1308,7 @@ pub const HELP = [_][2][]const u8{
     .{ "ctrl+w o", "close the others" },
     .{ "", "ROWS" },
     .{ "enter", "open the row: a form, or a screen about it" },
-    .{ "gv", "show the whole value; arrows scroll a long one" },
+    .{ "gv", "show the whole value; arrows scroll a long one, y copies it" },
     .{ "e", "edit the cell, NULL clears it" },
     .{ "i gy", "insert, clone a row" },
     .{ "space", "mark a row, and unmark it" },
@@ -1293,7 +1328,7 @@ pub const HELP = [_][2][]const u8{
     .{ "E gM", "export, import" },
     .{ "y  y c p s", "copy the row, value, page, last SQL" },
     .{ "O #", "connections, schema or namespace" },
-    .{ ":", "export dump limit text follow open check w e set tabnew q" },
+    .{ ":", "export dump limit text follow open check w e set tabnew q qa" },
     .{ "", "FILES: SFTP, S3, AZURE" },
     .{ "f", "the two panes: here and the connection" },
     .{ "tab", "the other pane: where a copy goes" },
@@ -1313,6 +1348,7 @@ pub const HELP = [_][2][]const u8{
     .{ "yy p P", "yank the line, put it below, above" },
     .{ "u ctrl+r", "take a change back, put it back" },
     .{ "ctrl+s :w", "run it - and enter does, in normal mode" },
+    .{ "s", "over rows a statement brought back: into that statement again" },
     .{ "tab", "complete a name; after `o.` the columns of what o is" },
     .{ "ctrl+p ctrl+n", "earlier, later statement" },
     .{ "ctrl+w ctrl+u", "take back a word, everything" },
@@ -1902,12 +1938,12 @@ fn footerHints(app: *App) []const u8 {
     }
     if (app.detail) {
         return if (app.detail_lines > app.detail_page)
-            " up down scroll   pgup pgdn a page   home end the ends   esc closes"
+            " up down scroll   pgup pgdn a page   home end the ends   y copies it   esc closes"
         else
-            " esc closes the value   ctrl+k commands";
+            " y copies the value   esc closes it";
     }
-    if (app.typing.editor) |ed| {
-        return switch (ed.mode) {
+    if (app.typingInEditor()) {
+        return switch (app.typing.editor.?.mode) {
             .normal => " -- NORMAL --  i insert  o line  dd cut line  u undo  enter runs  esc closes",
             .insert => " -- INSERT --  esc normal mode  tab completes  ctrl+s runs  ctrl+p earlier",
         };
@@ -1965,13 +2001,13 @@ fn footerHints(app: *App) []const u8 {
         // Only what the engine will do: a key in this line that answers with a
         // refusal is a line that was wrong.
         .structure => if (app.caps().no_ddl.len != 0)
-            " S data   j k scroll   ctrl+k commands"
+            " S data   ctrl+k commands"
         else if (app.caps().no_tables.len != 0)
-            " a alter   S data   j k scroll   ctrl+k commands"
+            " a alter   S data   ctrl+k commands"
         else if (app.caps().no_relations.len != 0)
-            " a alter   gN rename   S data   j k scroll   ctrl+k commands"
+            " a alter   gN rename   S data   ctrl+k commands"
         else
-            " a alter   I index   K key   gN rename   S data   j k scroll   ctrl+k commands",
+            " a alter   I index   K key   gN rename   S data   ctrl+k commands",
 
         .messages => " gm back   s sql   r reload   ctrl+k commands",
         // Handled above, from what the engine said can be done.
@@ -2047,6 +2083,57 @@ fn editorPanel(app: *App, size: Size, side: usize, rows: usize) void {
     // The gutter holds the line number, right aligned, and a space.
     const gutter: usize = 5;
     const talking = app.conn.sessionIn().len != 0;
+
+    // Over its own result it is a strip: the statement from its first line, as
+    // tall as that is and no taller, in a frame that is quiet because the keys
+    // are not here. Its top edge says how to get them back.
+    if (app.typing.docked) {
+        const tall = dockedRows(app, rows);
+        if (tall < 3) {
+            return;
+        }
+        var colours: [1024]sql_syntax.Kind = undefined;
+        var n: usize = 0;
+        while (n < tall - 2) : (n += 1) {
+            screen.moveTo(1 + 1 + n, left);
+            screen.style(.{ .bg = C.bar });
+            fill(app, ' ', width);
+            screen.moveTo(1 + 1 + n, left);
+            if (n >= editor.lineCount()) {
+                continue;
+            }
+            const text = editor.lineAt(n);
+            sql_syntax.kinds(text, colours[0..@min(colours.len, text.len)]);
+            var used: usize = write(app, " ", width);
+            var byte: usize = 0;
+            while (byte < text.len and used < width) {
+                const kind = if (byte < colours.len) colours[byte] else .plain;
+                var stop = byte;
+                while (stop < text.len and stop < colours.len and colours[stop] == kind) : (stop += 1) {}
+                if (stop == byte) {
+                    stop = text.len;
+                }
+                screen.style(.{ .bg = C.bar, .fg = switch (kind) {
+                    .keyword => C.accent,
+                    .string => C.ok,
+                    .number => C.number,
+                    .comment => C.faint,
+                    .punct => C.dim,
+                    .plain => C.text,
+                }, .bold = kind == .keyword, .italic = kind == .comment });
+                used += write(app, text[byte..stop], width - used);
+                byte = stop;
+            }
+        }
+        screen.reset();
+        var more: [48]u8 = undefined;
+        const hint = if (editor.lineCount() > tall - 2)
+            std.mem.print(&more, "{d} lines   s edits it again   esc puts it away", .{editor.lineCount()}) catch "s edits it again"
+        else
+            "s edits it again   esc puts it away";
+        box(app, 1, outer_left, outer_width, tall, if (app.caps().speaks_sql) "SQL" else "command", hint, C.faint);
+        return;
+    }
 
     // Tall enough that a completion list has room inside the panel, and one line
     // taller than what is written, so there is visibly somewhere to keep typing.

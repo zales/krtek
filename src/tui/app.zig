@@ -155,7 +155,7 @@ pub const Palette = struct {
     at: usize = 0,
 };
 
-pub const PromptKind = enum { command, filter, find, edit, confirm, password, new_dir, rename_file, remove_files, overwrite, go_to, remove_rows, forget_saved };
+pub const PromptKind = enum { command, filter, find, edit, confirm, password, new_dir, rename_file, remove_files, overwrite, go_to, remove_rows, forget_saved, make_file };
 
 pub const Prompt = struct {
     kind: PromptKind,
@@ -469,6 +469,8 @@ const Reporting = struct {
     /// between a colour somebody reads past and one they stop at.
     status: std.ArrayList(u8) = .empty,
     status_error: bool = false,
+    /// Whether the last run left rows on the grid.
+    result: bool = false,
 
     fn deinit(self: *Reporting, allocator: std.mem.Allocator) void {
         self.status.deinit(allocator);
@@ -501,6 +503,15 @@ const Saved = struct {
     /// Which saved connection the open form is editing, so changing both its name
     /// and its target replaces that entry instead of adding a second one.
     editing: ?usize = null,
+    /// A file that is not there, waiting to hear whether it should be made, and
+    /// the way it was asked for: opened, opened and remembered, or `:open`.
+    making: std.ArrayList(u8) = .empty,
+    making_how: enum { none, connect, remember, reopen } = .none,
+    /// The answer was yes, and the file is being opened: this once, it is made.
+    /// Apart from `making_how`, which is still set after a question that was
+    /// walked away from - and the next name with a letter wrong in it must be
+    /// asked about too.
+    making_now: bool = false,
 
     /// A page, and never zero: a page key that moves by nothing looks broken.
     pub fn page(self: Saved) usize {
@@ -539,6 +550,15 @@ const Typing = struct {
     /// pressed twice to be sure of being in normal mode - so closing it cannot be
     /// what throws a statement away. The next time it opens, this is in it.
     draft: std.ArrayList(u8) = .empty,
+    /// The editor is open above the rows its statement brought back, and the
+    /// keys are the grid's: `s` puts the typing back in it.
+    ///
+    /// A statement and its result were never on the screen together. Running
+    /// one put the editor away, and changing a word of it was `s` for an empty
+    /// editor and `ctrl+p` for the statement again - every time round, in the
+    /// one loop that is gone round most. It stays now, as a strip over what it
+    /// brought back, for as long as that is what the grid is showing.
+    docked: bool = false,
     /// What the engine said about the first statement of the last run that it
     /// would not take, all of it. The editor stays open over a run that failed
     /// and shows this under what was typed: the statement and what is wrong
@@ -1003,6 +1023,9 @@ pub const App = struct {
     /// Open a target and take it as the current connection. `remember` puts it in
     /// the saved list, without its password.
     pub fn connect(self: *App, target: []const u8, keep: bool) !void {
+        if (try self.askToMake(target, if (keep) .remember else .connect)) {
+            return;
+        }
         var report: std.ArrayList(u8) = .empty;
         defer report.deinit(self.allocator);
         var naming = std.heap.ArenaAllocator.init(self.allocator);
@@ -1061,6 +1084,54 @@ pub const App = struct {
         try entered;
     }
 
+    /// Whether opening this would make a file that is not there, and if so the
+    /// question is on the screen and true comes back.
+    ///
+    /// SQLite makes the file it is asked to open, so a name with a letter wrong
+    /// in it was a new, empty database beside the real one, a screen that said
+    /// `0 objects`, and a file of no bytes left behind for somebody to find. A
+    /// new database is still one `y` away - which is how they are made here.
+    fn askToMake(self: *App, target: []const u8, how: @TypeOf(self.saved.making_how)) !bool {
+        if (self.saved.making_now) {
+            // The answer was yes, and this is the opening it was a yes to.
+            return false;
+        }
+        if (!wouldMake(self.allocator, target)) {
+            return false;
+        }
+        self.saved.making.clearRetainingCapacity();
+        try self.saved.making.appendSlice(self.allocator, target);
+        self.saved.making_how = how;
+        if (self.typing.prompt) |*old| {
+            old.buffer.deinit(self.allocator);
+        }
+        self.typing.prompt = .{ .kind = .make_file, .label = " type y to make it: " };
+        // The end of the path, where the line cannot hold all of it: the name
+        // is what somebody has to look at to see the letter that is wrong.
+        const said = " is not there - make a new, empty database?";
+        const end = endFor(target, self.screen.size().cols -| said.len -| 3);
+        self.say("{s}{s}{s}", .{ if (end.len < target.len) "…" else "", end, said });
+        return true;
+    }
+
+    /// The yes to that question.
+    pub fn makeAndOpen(self: *App) !void {
+        const how = self.saved.making_how;
+        const target = try self.allocator.dupe(u8, self.saved.making.items);
+        defer self.allocator.free(target);
+        self.saved.making_how = .none;
+        // Set for as long as the file is being opened, which is what lets it
+        // be made, and cleared whatever comes of it.
+        self.saved.making_now = true;
+        defer self.saved.making_now = false;
+        switch (how) {
+            .none => {},
+            .connect => try self.connect(target, false),
+            .remember => try self.connect(target, true),
+            .reopen => try self.reopen(target),
+        }
+    }
+
     /// Put the panel up for a connection that is about to be opened, and hand
     /// the screen to the thread that keeps it moving. The caller stops it.
     fn attend(self: *App, target: []const u8, what: []const u8) Attendant {
@@ -1078,7 +1149,13 @@ pub const App = struct {
         if (keep) {
             try self.rememberConnection(target);
         }
-        self.say("{s} - {s}", .{ self.conn.describe(), self.conn.version() });
+        // The end of what was opened where the line has no room for all of it,
+        // for the same reason the header keeps the end: that is where one file
+        // differs from the next, and the version comes after it.
+        const what = self.conn.describe();
+        const version = self.conn.version();
+        const end = endFor(what, self.screen.size().cols -| term.width(version) -| 6);
+        self.say("{s}{s} - {s}", .{ if (end.len < what.len) "…" else "", end, version });
         // A place that holds files opens on the files. The grid can show a
         // directory as a table and that is worth having, but it is not what
         // anybody connecting to a NAS came for, and nothing on that screen said
@@ -1231,8 +1308,57 @@ pub const App = struct {
 
     // --- the SQL editor ---
 
+    /// Whether the editor is open and has the keys - which it does not while it
+    /// is a strip over its own result.
+    pub fn typingInEditor(self: *App) bool {
+        return self.typing.editor != null and !self.typing.docked;
+    }
+
+    /// Whether every statement of this would do the same thing a second time,
+    /// by the engine's own account of each.
+    fn readsAgain(self: *App, sql: []const u8) bool {
+        var scratch = std.heap.ArenaAllocator.init(self.allocator);
+        defer scratch.deinit();
+        const statements = self.conn.split(scratch.allocator(), sql) catch return false;
+        var any = false;
+        for (statements) |statement| {
+            const text = std.mem.trim(u8, statement.sql, " \t\r\n;");
+            if (text.len == 0) {
+                continue;
+            }
+            if (!self.conn.repeatable(text)) {
+                return false;
+            }
+            any = true;
+        }
+        return any;
+    }
+
+    /// Put the editor that was left over a result away, statement and all. The
+    /// statement is in the history, where one that was run is looked for; what
+    /// the editor opens with next is nothing, as it always was after a run.
+    pub fn dropDocked(self: *App) void {
+        if (!self.typing.docked) {
+            return;
+        }
+        if (self.typing.editor) |*open| {
+            open.deinit();
+        }
+        self.typing.editor = null;
+        self.typing.docked = false;
+        self.typing.failure.clearRetainingCapacity();
+    }
+
     pub fn openEditor(self: *App) !void {
-        if (self.typing.editor != null) {
+        if (self.typing.editor) |*open| {
+            // Over its result: the typing goes back into it, after what is
+            // there, which is where the next word of a statement goes.
+            if (self.typing.docked) {
+                self.typing.docked = false;
+                open.cursor = open.text.items.len;
+                open.enterInsert();
+                self.say("the statement is as it was run - ctrl+u empties it", .{});
+            }
             return;
         }
         self.typing.editor = Editor.init(self.allocator);
@@ -1264,6 +1390,7 @@ pub const App = struct {
             open.deinit();
         }
         self.typing.editor = null;
+        self.typing.docked = false;
         self.typing.failure.clearRetainingCapacity();
     }
 
@@ -1314,9 +1441,23 @@ pub const App = struct {
         // way: a slip of one letter was the editor gone, a line saying only
         // that something had failed, `gm` to find out what, and `s` to get the
         // statement back.
+        //
+        // And over a run that brought rows back it stays too, as a strip above
+        // them with the keys handed to the grid: see `Typing.docked`.
         if (!talking and !takes_over and self.typing.editor != null and !self.report.status_error) {
-            self.closeEditor();
             self.typing.draft.clearRetainingCapacity();
+            // Only over something that reads. What stays in the editor is what
+            // `s` and a few more letters run again, and a statement that wrote
+            // and then brought rows back is not one to be run twice by a hand
+            // that expected an empty editor.
+            if (self.report.result and !self.hasTable() and self.conn.sessionIn().len == 0 and self.readsAgain(owned)) {
+                self.typing.docked = true;
+                self.typing.editor.?.closeCompletion();
+                self.typing.editor.?.scroll = 0;
+            } else {
+                self.closeEditor();
+                self.typing.draft.clearRetainingCapacity();
+            }
         }
         // Opening one, or leaving it, changes which of the two this is.
         if (self.conn.sessionIn().len == 0 and self.typing.editor != null and talking) {
@@ -2113,6 +2254,7 @@ pub const App = struct {
         self.saved.list.deinit();
         self.saved.path.deinit(self.allocator);
         self.saved.pending.deinit(self.allocator);
+        self.saved.making.deinit(self.allocator);
         if (self.palette) |*open| {
             open.query.deinit(self.allocator);
         }
@@ -2552,6 +2694,7 @@ pub const App = struct {
     // ----------------------------------------------------------- data load
 
     pub fn openTable(self: *App, name: []const u8) !void {
+        self.dropDocked();
         try self.setTable(name);
         self.grid.page = 0;
         self.cursor.row = 0;
@@ -2803,6 +2946,11 @@ pub const App = struct {
         // owns the memory this was read from.
         const again = try self.allocator.dupe(u8, self.follow.statement.items);
         defer self.allocator.free(again);
+        // The same statement again leaves the editor over it where it is;
+        // anything else that is run takes it away.
+        const docked = self.typing.docked;
+        self.typing.docked = false;
+        defer self.typing.docked = docked and self.typing.editor != null;
         try self.runBatchStopping(again, true);
 
         if (self.follow.ms != 0 and at_end and self.grid.rows.items.len != 0) {
@@ -2847,7 +2995,7 @@ pub const App = struct {
         if (self.follow.ms == 0 or self.view != .grid or !self.hasRows()) {
             return;
         }
-        if (self.typing.prompt != null or self.typing.form != null or self.typing.editor != null or self.files != null or self.detail) {
+        if (self.typing.prompt != null or self.typing.form != null or self.typingInEditor() or self.files != null or self.detail) {
             return;
         }
         self.reload() catch {};
@@ -3385,7 +3533,10 @@ pub const App = struct {
     /// generated script needs: its own COMMIT would otherwise make a half
     /// finished rebuild permanent.
     pub fn runBatchStopping(self: *App, sql: []const u8, stop_on_error: bool) !void {
+        // What is about to be on the grid is not what the editor left there.
+        self.dropDocked();
         self.typing.failure.clearRetainingCapacity();
+        self.report.result = false;
         // A statement that wants the terminal is not a statement the grid can
         // hold, and it is never one of a batch: it owns the screen until it ends.
         if (self.conn.wantsTerminal(std.mem.trim(u8, sql, " \t\r\n;"))) {
@@ -3522,6 +3673,7 @@ pub const App = struct {
         }
         const count = self.report.list.items.len;
         const undone: []const u8 = if (rolled_back) ", rolled back" else "";
+        self.report.result = shown;
         if (failures > 0) {
             // What the engine said, rather than that it said something: the
             // line used to be "1 of 1 statement(s) failed, press gm for
@@ -3728,8 +3880,9 @@ pub const App = struct {
             // A name that could have been written somewhere else is worth saying out
             // loud, not counting quietly: it means the other end sent something it had
             // no business sending.
-            self.complain("copied {d} file(s) - {s}, and left {d} with a name that would not stay put", .{
+            self.complain("copied {d} file{s} - {s}, and left {d} with a name that would not stay put", .{
                 total.files,
+                plural(total.files),
                 Files.size(&room, total.bytes),
                 total.refused,
             });
@@ -3960,7 +4113,7 @@ pub const App = struct {
 
         if (is(verb, &.{ "w", "write" })) {
             // In the editor, writing is running: that is what a statement is for.
-            if (self.typing.editor != null) {
+            if (self.typingInEditor()) {
                 try self.runEditor();
             } else if (argument.len != 0) {
                 try dump_mod.dump(self, argument);
@@ -3971,7 +4124,7 @@ pub const App = struct {
             // The same, and then what `:q` would do - which in the editor is
             // nothing more, because running a statement already puts the editor
             // away. Quitting the program there took the result with it.
-            if (self.typing.editor != null) {
+            if (self.typingInEditor()) {
                 try self.runEditor();
             } else {
                 if (argument.len != 0) {
@@ -4084,7 +4237,7 @@ pub const App = struct {
     /// open behind it. What is in front goes first: the editor, a screen that
     /// is not the grid, then the tab, and the program after the last of them.
     pub fn leave(self: *App) void {
-        if (self.typing.editor != null) {
+        if (self.typingInEditor()) {
             self.closeEditor();
         } else if (self.detail) {
             self.detail = false;
@@ -4096,6 +4249,8 @@ pub const App = struct {
             self.view = if (self.files != null) .files else self.home();
         } else if (self.connected and self.view != .grid) {
             self.view = .grid;
+        } else if (self.typing.docked) {
+            self.dropDocked();
         } else if (self.tabs.items.len > 1) {
             self.closeTab(self.active_tab);
         } else {
@@ -4227,7 +4382,7 @@ pub const App = struct {
             self.complain("cannot write {s}: {s}", .{ path, @errorName(err) });
             return;
         };
-        self.say("{d} row(s) written to {s}", .{ self.grid.rows.items.len, path });
+        self.say("{d} row{s} written to {s}", .{ self.grid.rows.items.len, plural(self.grid.rows.items.len), path });
     }
 
     /// A whole table, not just the page on screen.
@@ -4265,7 +4420,7 @@ pub const App = struct {
             self.complain("cannot write {s}: {s}", .{ path, @errorName(err) });
             return;
         };
-        self.say("{d} row(s) of {s} written to {s}", .{ rows, table.name, path });
+        self.say("{d} row{s} of {s} written to {s}", .{ rows, plural(rows), table.name, path });
     }
 
     /// The full, unflattened value under the cursor, for the detail view.
@@ -4406,6 +4561,9 @@ pub const App = struct {
     /// Point the app at another database, a file or a server.
     fn reopen(self: *App, target: []const u8) !void {
         if (target.len == 0) {
+            return;
+        }
+        if (try self.askToMake(target, .reopen)) {
             return;
         }
         var report: std.ArrayList(u8) = .empty;
@@ -4921,7 +5079,7 @@ pub const App = struct {
                     }
                 }
                 self.closeForm();
-                self.say("{d} column(s) hidden", .{self.cursor.hidden.items.len});
+                self.say("{d} column{s} hidden", .{ self.cursor.hidden.items.len, plural(self.cursor.hidden.items.len) });
                 return;
             },
             .search_all => {
@@ -5192,10 +5350,11 @@ pub const App = struct {
         if (!self.isFiltered()) {
             self.say("filter cleared", .{});
         } else if (self.grid.counted) {
-            self.say("{d} row(s) match", .{self.grid.total});
+            self.say("{d} row{s}", .{ self.grid.total, if (self.grid.total == 1) " matches" else "s match" });
         } else {
-            self.say("{d} row(s) on this page; {s} cannot count the rest without reading it", .{
+            self.say("{d} row{s} on this page; {s} cannot count the rest without reading it", .{
                 self.grid.rows.items.len,
+                plural(self.grid.rows.items.len),
                 self.caps().label,
             });
         }
@@ -5271,7 +5430,7 @@ pub const App = struct {
         self.setTitle("search: {s}", .{needle});
         self.view = .grid;
         self.focus = .main;
-        self.say("{d} hit(s) in {d} column(s)", .{ self.grid.rows.items.len, parts });
+        self.say("{d} hit{s} in {d} column{s}", .{ self.grid.rows.items.len, plural(self.grid.rows.items.len), parts, plural(parts) });
     }
 
     pub fn importCsv(
@@ -5385,12 +5544,12 @@ pub const App = struct {
             try self.loadObjects();
             try self.reload();
             if (failed != 0) {
-                self.complain("{d} row(s) imported into {s}, {d} refused{s}{s}", .{
-                    rows,                           table.name, failed,
+                self.complain("{d} row{s} imported into {s}, {d} refused{s}{s}", .{
+                    rows,                           plural(rows), table.name, failed,
                     if (why.len != 0) ": " else "", why,
                 });
             } else {
-                self.say("{d} row(s) imported into {s}", .{ rows, table.name });
+                self.say("{d} row{s} imported into {s}", .{ rows, plural(rows), table.name });
             }
             return;
         }
@@ -5399,7 +5558,7 @@ pub const App = struct {
         self.closeForm();
         try self.runBatch(owned);
         try self.reload();
-        self.say("{d} row(s) imported into {s}", .{ rows, table.name });
+        self.say("{d} row{s} imported into {s}", .{ rows, plural(rows), table.name });
     }
 };
 
@@ -5556,6 +5715,36 @@ pub fn connectionMatches(name: []const u8, target: []const u8, needle: []const u
     }
     return fuzzy.match(name, needle, null) != null or
         std.ascii.findIgnoreCase(target, needle) != null;
+}
+
+/// As much of the end of a path or a target as there is room for, or all of
+/// it: the end is where one differs from the next. Whoever writes it puts the
+/// mark in front that says something was left off.
+pub fn endFor(text: []const u8, room: usize) []const u8 {
+    if (room < 8 or term.width(text) <= room) {
+        return text;
+    }
+    var from = text.len -| (room - 1);
+    while (from < text.len and text[from] & 0xc0 == 0x80) {
+        from += 1;
+    }
+    return text[from..];
+}
+
+/// Whether opening this target would make a file: it is a path to a database,
+/// and nothing is at the end of it. A CSV file is not made by being opened, a
+/// name SQLite reads as something other than a path is SQLite's own business,
+/// and every other engine is a server.
+pub fn wouldMake(allocator: std.mem.Allocator, target: []const u8) bool {
+    if (target.len == 0 or database.Db.engine(target) != .sqlite or conns.isSheet(target)) {
+        return false;
+    }
+    if (target[0] == ':' or std.mem.startsWith(u8, target, "file:")) {
+        return false;
+    }
+    const path = allocator.dupeSentinel(u8, target, 0) catch return false;
+    defer allocator.free(path);
+    return std.c.access(path.ptr, std.c.F_OK) != 0;
 }
 
 /// The `s` a count of anything but one takes. "1 row(s)" is a program that

@@ -41,7 +41,7 @@ pub fn handle(app: *App, key: Key, size: term.Size) !void {
         try onPalette(app, key);
         return;
     }
-    if (app.typing.editor != null) {
+    if (app.typingInEditor()) {
         try onEditor(app, key);
         return;
     }
@@ -82,7 +82,7 @@ pub fn handle(app: *App, key: Key, size: term.Size) !void {
         return;
     }
     if (app.view == .files) {
-        try onFiles(app, key);
+        try onFiles(app, key, size);
         return;
     }
     if (app.view == .object) {
@@ -111,7 +111,16 @@ pub fn handle(app: *App, key: Key, size: term.Size) !void {
                 'p' => app.detail_at -|= app.detail_page,
                 'g' => app.detail_at = 0,
                 'G' => app.detail_at = last,
+                // The value that is being looked at, which is the one somebody
+                // wants. `y` closed the box like any other letter, and the value
+                // was then `y` and `c` away.
+                'y' => try dump_mod.copyCell(app),
                 else => app.detail = false,
+            },
+            .mouse => |mouse| switch (mouse.button) {
+                .wheel_down => app.detail_at = @min(app.detail_at + 3, last),
+                .wheel_up => app.detail_at -|= 3,
+                else => {},
             },
             .escape, .enter => app.detail = false,
             // What ctrl+c does to anything that is open over the grid.
@@ -163,6 +172,9 @@ pub fn handle(app: *App, key: Key, size: term.Size) !void {
             } else if (app.grid.find.items.len != 0) {
                 app.findOff(false);
                 app.say("no longer looking for anything", .{});
+            } else if (app.typing.docked) {
+                app.dropDocked();
+                app.say("the statement is put away - ctrl+p in the editor has it", .{});
             } else if (app.sidebar.filter.items.len > 0) {
                 app.sidebar.filter.clearRetainingCapacity();
                 app.sidebar.selected = 0;
@@ -373,7 +385,7 @@ pub const actions = [_]Action{
     .{ .keys = "s", .does = .editor, .label = "write and run SQL", .plain = "write and run a command", .also = "query editor statement console" },
     .{ .keys = "F", .does = .search, .label = "search every table", .also = "find text grep", .wants = .sql },
     .{ .keys = "/", .does = .filter_objects, .label = "filter the object list", .also = "search find tables go to jump", .needs = .sidebar },
-    .{ .keys = "/", .does = .find, .label = "find in the rows", .also = "search text look for grep next match", .needs = .main },
+    .{ .keys = "/", .does = .find, .label = "find in the rows", .also = "search look for grep match word", .needs = .main },
     .{ .keys = "W", .does = .filter_rows, .label = "filter the rows", .also = "where condition" },
     .{ .keys = "gw", .does = .columns, .label = "choose visible columns", .also = "hide show" },
     .{ .keys = "o", .does = .sort, .label = "sort by this column", .also = "order asc desc" },
@@ -1015,13 +1027,23 @@ fn click(app: *App, mouse: term.Mouse, size: term.Size) !void {
         }
         return;
     }
-    if (app.view != .grid or mouse.row < 2) {
+    if (app.view != .grid) {
+        return;
+    }
+    // The grid starts lower while the statement that filled it is above it -
+    // and a click on the statement is where the typing goes back to.
+    const down = draw.dockedRows(app, if (size.rows > 3) size.rows - 3 else 1);
+    if (down != 0 and mouse.row >= 1 and mouse.row <= down) {
+        try app.openEditor();
+        return;
+    }
+    if (mouse.row < 2 + down) {
         return;
     }
     // Which column, by the layout that drew it.
     const column = draw.columnAt(app, size, mouse.col);
     app.focus = .main;
-    if (mouse.row == 2) {
+    if (mouse.row == 2 + down) {
         // A click on a column's name sorts by it, as `o` on it does.
         if (column) |index| {
             app.cursor.col = index;
@@ -1029,7 +1051,7 @@ fn click(app: *App, mouse: term.Mouse, size: term.Size) !void {
         }
         return;
     }
-    const row = app.cursor.row_scroll + (mouse.row - 3);
+    const row = app.cursor.row_scroll + (mouse.row - 3 - down);
     if (row < app.grid.rows.items.len) {
         app.cursor.row = row;
     }
@@ -1661,7 +1683,7 @@ fn edit(app: *App) !void {
 /// The two panes. Everything here acts on the pane the cursor is in, and `tab`
 /// is what moves the cursor to the other one - which is the whole of what makes
 /// copying between two places one keystroke.
-fn onFiles(app: *App, key: Key) !void {
+fn onFiles(app: *App, key: Key, size: term.Size) !void {
     const manager = app.files orelse {
         app.view = .grid;
         return;
@@ -1675,6 +1697,17 @@ fn onFiles(app: *App, key: Key) !void {
             else => {},
         },
         .tab, .back_tab => manager.swap(),
+        // The wheel moves in the pane it is over, without taking the keys there.
+        .mouse => |mouse| {
+            const delta: isize = switch (mouse.button) {
+                .wheel_down => 3,
+                .wheel_up => -3,
+                else => return,
+            };
+            const split = size.cols - (if (size.cols > 5) (size.cols - 1) / 2 else 2) - 1;
+            const over = if (mouse.col < split) &manager.left else &manager.right;
+            over.move(delta);
+        },
         .up => pane.move(-1),
         .down => pane.move(1),
         .page_up => pane.move(-20),
@@ -1856,6 +1889,13 @@ fn typing(app: *App, key: Key) !void {
                         try app.forgetSavedNow();
                     } else {
                         app.say("left alone", .{});
+                    }
+                },
+                .make_file => {
+                    if (line.len != 0 and (line[0] == 'y' or line[0] == 'Y')) {
+                        try app.makeAndOpen();
+                    } else {
+                        app.say("nothing made", .{});
                     }
                 },
             }

@@ -87,7 +87,7 @@ pub fn dumpTo(app: *App, path: []const u8, only: ?[]const u8, structure: bool, d
         app.complain("cannot write {s}: {s}", .{ path, @errorName(err) });
         return;
     };
-    app.say("{d} object(s), {d} bytes written to {s}", .{ written, out.items.len, path });
+    app.say("{d} object{s}, {d} bytes written to {s}", .{ written, app_mod.plural(written), out.items.len, path });
 }
 
 pub fn dumpRows(app: *App, out: *std.ArrayList(u8), table: database.Table) !void {
@@ -227,7 +227,7 @@ pub fn copyCell(app: *App) !void {
         return;
     };
     try app.screen.copy(text);
-    app.say("{d} byte(s) copied", .{text.len});
+    app.say("{d} byte{s} copied", .{ text.len, app_mod.plural(text.len) });
 }
 
 /// The row under the cursor, as tab separated text, which is what a
@@ -287,7 +287,7 @@ pub fn copyPage(app: *App) !void {
         try out.append(app.allocator, '\n');
     }
     try app.screen.copy(out.items);
-    app.say("{d} row(s) copied as CSV", .{app.grid.rows.items.len});
+    app.say("{d} row{s} copied as CSV", .{ app.grid.rows.items.len, app_mod.plural(app.grid.rows.items.len) });
 }
 
 pub fn openExportForm(app: *App) !void {
