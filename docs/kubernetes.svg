@@ -3,15 +3,14 @@
 <rect x="14.0" y="14.0" width="59.3" height="18.0" fill="#26262c"/>
 <rect x="72.8" y="14.0" width="59.3" height="18.0" fill="#26262c"/>
 <rect x="131.6" y="14.0" width="756.5" height="18.0" fill="#26262c"/>
-<rect x="232.4" y="50.0" width="605.3" height="18.0" fill="#26262c"/>
-<rect x="837.2" y="50.0" width="50.9" height="18.0" fill="#26262c"/>
+<rect x="232.4" y="50.0" width="613.7" height="18.0" fill="#26262c"/>
+<rect x="845.6" y="50.0" width="42.5" height="18.0" fill="#26262c"/>
 <rect x="14.0" y="68.0" width="202.1" height="18.0" fill="#4c4c56"/>
 <rect x="215.6" y="68.0" width="8.9" height="18.0" fill="#4c4c56"/>
 <rect x="232.4" y="68.0" width="202.1" height="18.0" fill="#8aa7f0"/>
-<rect x="434.0" y="68.0" width="193.7" height="18.0" fill="#4c4c56"/>
-<rect x="627.2" y="68.0" width="76.1" height="18.0" fill="#4c4c56"/>
-<rect x="702.8" y="68.0" width="101.3" height="18.0" fill="#4c4c56"/>
-<rect x="803.6" y="68.0" width="34.1" height="18.0" fill="#4c4c56"/>
+<rect x="434.0" y="68.0" width="160.1" height="18.0" fill="#4c4c56"/>
+<rect x="593.6" y="68.0" width="76.1" height="18.0" fill="#4c4c56"/>
+<rect x="669.2" y="68.0" width="176.9" height="18.0" fill="#4c4c56"/>
 <rect x="14.0" y="230.0" width="286.1" height="18.0" fill="#26262c"/>
 <rect x="299.6" y="230.0" width="588.5" height="18.0" fill="#26262c"/>
 <text x="14.0" y="27.3" fill="#e0e0e6" font-weight="600" xml:space="preserve" textLength="58.8" lengthAdjust="spacing"> krtek </text>
@@ -21,64 +20,58 @@
 <text x="106.4" y="45.3" fill="#8aa7f0" xml:space="preserve" textLength="67.2" lengthAdjust="spacing">payments</text>
 <text x="173.6" y="45.3" fill="#7c7c88" xml:space="preserve" textLength="58.8" lengthAdjust="spacing">     #│</text>
 <text x="232.4" y="45.3" fill="#8aa7f0" font-weight="600" xml:space="preserve" textLength="42.0" lengthAdjust="spacing"> pods</text>
-<text x="274.4" y="45.3" fill="#9a9aa6" xml:space="preserve" textLength="613.2" lengthAdjust="spacing">  1-9 of ?   page 1/1                                                    </text>
+<text x="274.4" y="45.3" fill="#9a9aa6" xml:space="preserve" textLength="613.2" lengthAdjust="spacing">  1-10 of ?   page 1/1                                                   </text>
 <text x="14.0" y="63.3" fill="#7c7c88" xml:space="preserve" textLength="218.4" lengthAdjust="spacing"> workloads               │</text>
-<text x="232.4" y="63.3" fill="#9a9aa6" font-weight="600" xml:space="preserve" textLength="604.8" lengthAdjust="spacing"> name                    ready status           restarts cpu  memory age</text>
+<text x="232.4" y="63.3" fill="#9a9aa6" font-weight="600" xml:space="preserve" textLength="613.2" lengthAdjust="spacing"> name                    ready cpu  memory  restarts age status          </text>
 <text x="14.0" y="81.3" fill="#e0e0e6" xml:space="preserve" textLength="201.6" lengthAdjust="spacing"> ▪ pods                 </text>
 <text x="215.6" y="81.3" fill="#9a9aa6" xml:space="preserve" textLength="8.4" lengthAdjust="spacing">?</text>
 <text x="224.0" y="81.3" fill="#7c7c88" xml:space="preserve" textLength="8.4" lengthAdjust="spacing">│</text>
-<text x="232.4" y="81.3" fill="#111114" xml:space="preserve" textLength="201.6" lengthAdjust="spacing"> api-7686876779-cxcwb   </text>
-<text x="434.0" y="81.3" fill="#e0e0e6" xml:space="preserve" textLength="193.2" lengthAdjust="spacing"> 1/1   Running         </text>
-<text x="627.2" y="81.3" fill="#63a8d8" xml:space="preserve" textLength="75.6" lengthAdjust="spacing">        0</text>
-<text x="702.8" y="81.3" fill="#82828e" font-style="italic" xml:space="preserve" textLength="100.8" lengthAdjust="spacing"> NULL NULL  </text>
-<text x="803.6" y="81.3" fill="#e0e0e6" xml:space="preserve" textLength="33.6" lengthAdjust="spacing"> 10m</text>
+<text x="232.4" y="81.3" fill="#111114" xml:space="preserve" textLength="201.6" lengthAdjust="spacing"> api-7b8fc59745-2xcs6   </text>
+<text x="434.0" y="81.3" fill="#e0e0e6" xml:space="preserve" textLength="159.6" lengthAdjust="spacing"> 1/1   1m   328.0Ki</text>
+<text x="593.6" y="81.3" fill="#63a8d8" xml:space="preserve" textLength="75.6" lengthAdjust="spacing">        0</text>
+<text x="669.2" y="81.3" fill="#e0e0e6" xml:space="preserve" textLength="176.4" lengthAdjust="spacing"> 7m  Running         </text>
 <text x="14.0" y="99.3" fill="#e0e0e6" xml:space="preserve" textLength="201.6" lengthAdjust="spacing"> ▪ deployments          </text>
 <text x="215.6" y="99.3" fill="#7c7c88" xml:space="preserve" textLength="16.8" lengthAdjust="spacing">?│</text>
-<text x="232.4" y="99.3" fill="#e0e0e6" xml:space="preserve" textLength="394.8" lengthAdjust="spacing"> api-7686876779-ftdgv    1/1   Running         </text>
-<text x="627.2" y="99.3" fill="#63a8d8" xml:space="preserve" textLength="75.6" lengthAdjust="spacing">        0</text>
-<text x="702.8" y="99.3" fill="#82828e" font-style="italic" xml:space="preserve" textLength="100.8" lengthAdjust="spacing"> NULL NULL  </text>
-<text x="803.6" y="99.3" fill="#e0e0e6" xml:space="preserve" textLength="84.0" lengthAdjust="spacing"> 10m      </text>
+<text x="232.4" y="99.3" fill="#e0e0e6" xml:space="preserve" textLength="361.2" lengthAdjust="spacing"> api-7b8fc59745-lq2l9    1/1   0m   328.0Ki</text>
+<text x="593.6" y="99.3" fill="#63a8d8" xml:space="preserve" textLength="75.6" lengthAdjust="spacing">        0</text>
+<text x="669.2" y="99.3" fill="#e0e0e6" xml:space="preserve" textLength="218.4" lengthAdjust="spacing"> 7m  Running              </text>
 <text x="14.0" y="117.3" fill="#e0e0e6" xml:space="preserve" textLength="201.6" lengthAdjust="spacing"> ▪ statefulsets         </text>
 <text x="215.6" y="117.3" fill="#7c7c88" xml:space="preserve" textLength="16.8" lengthAdjust="spacing">?│</text>
-<text x="232.4" y="117.3" fill="#e0e0e6" xml:space="preserve" textLength="394.8" lengthAdjust="spacing"> api-7686876779-jz4vm    1/1   Running         </text>
-<text x="627.2" y="117.3" fill="#63a8d8" xml:space="preserve" textLength="75.6" lengthAdjust="spacing">        0</text>
-<text x="702.8" y="117.3" fill="#82828e" font-style="italic" xml:space="preserve" textLength="100.8" lengthAdjust="spacing"> NULL NULL  </text>
-<text x="803.6" y="117.3" fill="#e0e0e6" xml:space="preserve" textLength="84.0" lengthAdjust="spacing"> 10m      </text>
+<text x="232.4" y="117.3" fill="#e0e0e6" xml:space="preserve" textLength="361.2" lengthAdjust="spacing"> api-7b8fc59745-qcz9w    1/1   1m   316.0Ki</text>
+<text x="593.6" y="117.3" fill="#63a8d8" xml:space="preserve" textLength="75.6" lengthAdjust="spacing">        0</text>
+<text x="669.2" y="117.3" fill="#e0e0e6" xml:space="preserve" textLength="218.4" lengthAdjust="spacing"> 7m  Running              </text>
 <text x="14.0" y="135.3" fill="#e0e0e6" xml:space="preserve" textLength="201.6" lengthAdjust="spacing"> ▪ daemonsets           </text>
 <text x="215.6" y="135.3" fill="#7c7c88" xml:space="preserve" textLength="16.8" lengthAdjust="spacing">?│</text>
-<text x="232.4" y="135.3" fill="#e0e0e6" xml:space="preserve" textLength="394.8" lengthAdjust="spacing"> api-7686876779-vkrfk    1/1   Running         </text>
-<text x="627.2" y="135.3" fill="#63a8d8" xml:space="preserve" textLength="75.6" lengthAdjust="spacing">        0</text>
-<text x="702.8" y="135.3" fill="#82828e" font-style="italic" xml:space="preserve" textLength="100.8" lengthAdjust="spacing"> NULL NULL  </text>
-<text x="803.6" y="135.3" fill="#e0e0e6" xml:space="preserve" textLength="84.0" lengthAdjust="spacing"> 10m      </text>
+<text x="232.4" y="135.3" fill="#e0e0e6" xml:space="preserve" textLength="361.2" lengthAdjust="spacing"> api-7b8fc59745-r2n6k    1/1   0m   324.0Ki</text>
+<text x="593.6" y="135.3" fill="#63a8d8" xml:space="preserve" textLength="75.6" lengthAdjust="spacing">        0</text>
+<text x="669.2" y="135.3" fill="#e0e0e6" xml:space="preserve" textLength="218.4" lengthAdjust="spacing"> 7m  Running              </text>
 <text x="14.0" y="153.3" fill="#e0e0e6" xml:space="preserve" textLength="201.6" lengthAdjust="spacing"> ▪ replicasets          </text>
 <text x="215.6" y="153.3" fill="#7c7c88" xml:space="preserve" textLength="16.8" lengthAdjust="spacing">?│</text>
-<text x="232.4" y="153.3" fill="#e0e0e6" xml:space="preserve" textLength="394.8" lengthAdjust="spacing"> api-7686876779-xvvpz    1/1   Running         </text>
-<text x="627.2" y="153.3" fill="#63a8d8" xml:space="preserve" textLength="75.6" lengthAdjust="spacing">        0</text>
-<text x="702.8" y="153.3" fill="#82828e" font-style="italic" xml:space="preserve" textLength="100.8" lengthAdjust="spacing"> NULL NULL  </text>
-<text x="803.6" y="153.3" fill="#e0e0e6" xml:space="preserve" textLength="84.0" lengthAdjust="spacing"> 10m      </text>
+<text x="232.4" y="153.3" fill="#e0e0e6" xml:space="preserve" textLength="361.2" lengthAdjust="spacing"> api-7b8fc59745-vbmdn    1/1   0m   328.0Ki</text>
+<text x="593.6" y="153.3" fill="#63a8d8" xml:space="preserve" textLength="75.6" lengthAdjust="spacing">        0</text>
+<text x="669.2" y="153.3" fill="#e0e0e6" xml:space="preserve" textLength="218.4" lengthAdjust="spacing"> 7m  Running              </text>
 <text x="14.0" y="171.3" fill="#e0e0e6" xml:space="preserve" textLength="201.6" lengthAdjust="spacing"> ▪ jobs                 </text>
 <text x="215.6" y="171.3" fill="#7c7c88" xml:space="preserve" textLength="16.8" lengthAdjust="spacing">?│</text>
-<text x="232.4" y="171.3" fill="#e0e0e6" xml:space="preserve" textLength="394.8" lengthAdjust="spacing"> billing-647fdb9fc-8btcp 0/1   Error           </text>
-<text x="627.2" y="171.3" fill="#63a8d8" xml:space="preserve" textLength="75.6" lengthAdjust="spacing">        1</text>
-<text x="702.8" y="171.3" fill="#82828e" font-style="italic" xml:space="preserve" textLength="100.8" lengthAdjust="spacing"> NULL NULL  </text>
-<text x="803.6" y="171.3" fill="#e0e0e6" xml:space="preserve" textLength="84.0" lengthAdjust="spacing"> 4s       </text>
+<text x="232.4" y="171.3" fill="#e0e0e6" xml:space="preserve" textLength="252.0" lengthAdjust="spacing"> billing-647fdb9fc-pzwrx 0/1  </text>
+<text x="484.4" y="171.3" fill="#82828e" font-style="italic" xml:space="preserve" textLength="109.2" lengthAdjust="spacing"> NULL NULL   </text>
+<text x="593.6" y="171.3" fill="#63a8d8" xml:space="preserve" textLength="75.6" lengthAdjust="spacing">        1</text>
+<text x="669.2" y="171.3" fill="#e0e0e6" xml:space="preserve" textLength="218.4" lengthAdjust="spacing"> 4s  Error                </text>
 <text x="14.0" y="189.3" fill="#e0e0e6" xml:space="preserve" textLength="201.6" lengthAdjust="spacing"> ▪ cronjobs             </text>
 <text x="215.6" y="189.3" fill="#7c7c88" xml:space="preserve" textLength="16.8" lengthAdjust="spacing">?│</text>
-<text x="232.4" y="189.3" fill="#e0e0e6" xml:space="preserve" textLength="394.8" lengthAdjust="spacing"> broken-766b8df9cb-mrdmh 0/1   CrashLoopBackOff</text>
-<text x="627.2" y="189.3" fill="#63a8d8" xml:space="preserve" textLength="75.6" lengthAdjust="spacing">        7</text>
-<text x="702.8" y="189.3" fill="#82828e" font-style="italic" xml:space="preserve" textLength="100.8" lengthAdjust="spacing"> NULL NULL  </text>
-<text x="803.6" y="189.3" fill="#e0e0e6" xml:space="preserve" textLength="84.0" lengthAdjust="spacing"> 11m      </text>
+<text x="232.4" y="189.3" fill="#e0e0e6" xml:space="preserve" textLength="252.0" lengthAdjust="spacing"> broken-766b8df9cb-blclr 0/1  </text>
+<text x="484.4" y="189.3" fill="#82828e" font-style="italic" xml:space="preserve" textLength="109.2" lengthAdjust="spacing"> NULL NULL   </text>
+<text x="593.6" y="189.3" fill="#63a8d8" xml:space="preserve" textLength="75.6" lengthAdjust="spacing">        6</text>
+<text x="669.2" y="189.3" fill="#e0e0e6" xml:space="preserve" textLength="218.4" lengthAdjust="spacing"> 8m  CrashLoopBackOff     </text>
 <text x="14.0" y="207.3" fill="#7c7c88" xml:space="preserve" textLength="218.4" lengthAdjust="spacing"> network                 │</text>
-<text x="232.4" y="207.3" fill="#e0e0e6" xml:space="preserve" textLength="394.8" lengthAdjust="spacing"> migrate-4pkk5           0/1   Completed       </text>
-<text x="627.2" y="207.3" fill="#63a8d8" xml:space="preserve" textLength="75.6" lengthAdjust="spacing">        0</text>
-<text x="702.8" y="207.3" fill="#82828e" font-style="italic" xml:space="preserve" textLength="100.8" lengthAdjust="spacing"> NULL NULL  </text>
-<text x="803.6" y="207.3" fill="#e0e0e6" xml:space="preserve" textLength="84.0" lengthAdjust="spacing"> 11m      </text>
+<text x="232.4" y="207.3" fill="#e0e0e6" xml:space="preserve" textLength="361.2" lengthAdjust="spacing"> hungry                  1/1   1m   29.1Mi </text>
+<text x="593.6" y="207.3" fill="#63a8d8" xml:space="preserve" textLength="75.6" lengthAdjust="spacing">        0</text>
+<text x="669.2" y="207.3" fill="#e0e0e6" xml:space="preserve" textLength="218.4" lengthAdjust="spacing"> 8m  Running              </text>
 <text x="14.0" y="225.3" fill="#e0e0e6" xml:space="preserve" textLength="201.6" lengthAdjust="spacing"> ▪ services             </text>
 <text x="215.6" y="225.3" fill="#7c7c88" xml:space="preserve" textLength="16.8" lengthAdjust="spacing">?│</text>
-<text x="232.4" y="225.3" fill="#e0e0e6" xml:space="preserve" textLength="394.8" lengthAdjust="spacing"> shellme                 1/1   Running         </text>
-<text x="627.2" y="225.3" fill="#63a8d8" xml:space="preserve" textLength="75.6" lengthAdjust="spacing">        0</text>
-<text x="702.8" y="225.3" fill="#82828e" font-style="italic" xml:space="preserve" textLength="100.8" lengthAdjust="spacing"> NULL NULL  </text>
-<text x="803.6" y="225.3" fill="#e0e0e6" xml:space="preserve" textLength="84.0" lengthAdjust="spacing"> 10m      </text>
+<text x="232.4" y="225.3" fill="#e0e0e6" xml:space="preserve" textLength="252.0" lengthAdjust="spacing"> migrate-z4zcx           0/1  </text>
+<text x="484.4" y="225.3" fill="#82828e" font-style="italic" xml:space="preserve" textLength="109.2" lengthAdjust="spacing"> NULL NULL   </text>
+<text x="593.6" y="225.3" fill="#63a8d8" xml:space="preserve" textLength="75.6" lengthAdjust="spacing">        0</text>
+<text x="669.2" y="225.3" fill="#e0e0e6" xml:space="preserve" textLength="218.4" lengthAdjust="spacing"> 8m  Completed            </text>
 <text x="14.0" y="243.3" fill="#71c68f" xml:space="preserve" textLength="285.6" lengthAdjust="spacing"> default - Kubernetes v1.31.5+k3s1</text>
 <text x="14.0" y="261.3" fill="#7c7c88" xml:space="preserve" textLength="873.6" lengthAdjust="spacing"> x delete   o sort   gv value   space mark   ctrl+k commands                                            </text>
 </svg>

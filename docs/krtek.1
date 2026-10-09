@@ -133,8 +133,9 @@ url is taken as well; its port is not, because 5672 does not answer HTTP.
 .PP
 Kubernetes maps a resource kind to a table and a namespace to a schema:
 .IR pods ", " deployments ", " services ", " nodes " and fourteen others,"
-with the columns kubectl prints, ages and ready counts included. A target names a
-context and at most a namespace -
+with the columns kubectl prints, ages and ready counts included - and for a pod
+what it is using of cpu and memory, where the cluster has a metrics-server to
+say. A target names a context and at most a namespace -
 .IR k8s://prod/payments ,
 or nothing at all for the kubeconfig's current context. Started with no argument
 at all, every context of the kubeconfig is offered in the list of connections,

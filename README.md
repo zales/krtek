@@ -842,6 +842,24 @@ finished is phase `Succeeded` where kubectl says `Completed` - so a column that
 showed the phase would call the one broken pod in a namespace healthy, which is
 the single thing anybody scans a pod list for.
 
+**A pod's `cpu` and `memory` are what it is using, not what it asked for.** A
+request is written once in a manifest and says nothing about the pod that is
+eating a node today, which is the one somebody opens a list of pods to find - so
+`o` on either column puts them in order of how much, `5m` before `10m` and
+`900.0Ki` before `1.2Mi`. The figures are metrics-server's, added up over the
+pod's containers and rounded the way `kubectl top` rounds them. That is an add-on
+and a second request, and neither is allowed to stop a list of pods from opening:
+on a cluster without one, for an account that may not ask it, and for a pod that
+is not running, the two cells are empty rather than zero, because nobody measured
+and that is not the same as idle. `TOP pods` is the same question asked on
+purpose, and says why it cannot be answered. What a pod asked for and what it is
+limited to are on the screen `enter` opens, under what it is using, where the
+three numbers can be read against each other.
+
+What controls a pod - `ReplicaSet`, `StatefulSet`, `Job` - has a column too, after
+the status rather than before it: every pod of a deployment says the same word
+there, and that is not worth the status falling off the edge of a narrow window.
+
 **`enter` on a row opens a screen about it.** Everything the grid had room for
 and everything it did not: what each container is doing, what the last one died of
 and with what exit code, the labels, and the events - which is where a failed image
