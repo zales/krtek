@@ -119,6 +119,19 @@ check "a container that is not there says so" "$ROOT/neexistuje" "ContainerNotFo
 check "a key that is not base64 is refused before it is used" \
 	"azure+http://$ACCOUNT:not-base64@127.0.0.1:10000/$ACCOUNT/photos" "could not be signed"
 
+# --- and the grid ---
+#
+# The whole value of a cell is that cell's. `gv` asks the account again for the
+# one column the cursor is on and shows the first cell of what comes back - and
+# what came back was every column, so the box said `size` along the top and had
+# the blob's name inside. A container opens on the file manager, so `q` first,
+# for the grid; the blob that sorts first there is the one with the spaces in
+# its name, `ahoj` and a newline, five bytes.
+whole=$(python3 tests/screen.py "$ROOT/photos" '{sleep}' 'q' '{tab}' '{right}' 'g' 'v' '{sleep}' '{keep}' 2>&1 |
+	grep -A1 'size ─ enter/esc closes' | tail -1 | sed 's/\(.*\)│.*$/\1/; s/ *$//; s/^.*│ //')
+[ "$whole" = "5" ] || fail "gv on the size of 2015 august trip.txt should show 5, and shows '$whole'"
+echo "ok: gv shows the value under the cursor, and not the name of its row"
+
 # --- and the file manager, which is the only way the copying is reachable ---
 #
 # None of the above goes near it: the table listing and the file listing are two

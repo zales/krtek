@@ -170,4 +170,16 @@ check "a key with no secret asks for one" \
 check "the secret may arrive as a password" \
 	"s3+http://$KEY@127.0.0.1:9000/photos?password=$SECRET" "connected: 127.0.0.1/photos"
 
+# --- and the screen ---
+#
+# The whole value of a cell is that cell's. `gv` asks the server again for the
+# one column the cursor is on and shows the first cell of what comes back - and
+# what came back was every column, so the box said `size` along the top and had
+# the key inside. A bucket opens on the file manager, so `q` first, for the
+# grid; the first object there is `zaznam 1` and a newline, nine bytes.
+whole=$(python3 tests/screen.py "$ROOT/photos" '{sleep}' 'q' '{tab}' '{right}' 'g' 'v' '{sleep}' '{keep}' 2>&1 |
+	grep -A1 'size ─ enter/esc closes' | tail -1 | sed 's/\(.*\)│.*$/\1/; s/ *$//; s/^.*│ //')
+[ "$whole" = "9" ] || fail "gv on the size of 2015/soubor-01.txt should show 9, and shows '$whole'"
+echo "ok: gv shows the value under the cursor, and not the key of its row"
+
 echo "all good"

@@ -184,6 +184,18 @@ check "every partition is counted" "kafka://127.0.0.1:9093" "orders rows~9 exact
 for codec in gzip snappy lz4 zstd; do
 	check "$codec unpacks" "kafka://127.0.0.1:9093" "c-$codec rows~3 exact=3"
 done
+
+# The whole value of a cell is that cell's. `gv` asks the broker again for the
+# one column the cursor is on and shows the first cell of what comes back - and
+# what came back was the whole record, so the box said `value` along the top and
+# had the partition inside, a 0. The first topic in the list is c-gzip, which
+# has one partition, so its first record is the first one written; and its
+# value is longer than the grid shows, which is what the view is for.
+whole=$(python3 tests/screen.py "kafka://127.0.0.1:9093" '{tab}' '{right}{right}{right}{right}' 'g' 'v' '{sleep}' '{keep}' 2>&1 |
+	grep -A1 'value ─ enter/esc closes' | tail -1 | sed 's/\(.*\)│.*$/\1/; s/ *$//; s/^.*│ //')
+[ "$whole" = "zprava 1 zabalena pomoci gzip, dost dlouha na to aby se komprese projevila" ] ||
+	fail "gv on the value of the first record of c-gzip should show all of it, and shows '$whole'"
+echo "ok: gv shows the value under the cursor, and not the partition of its record"
 check "SASL/PLAIN" "kafka://alice:alice-secret@127.0.0.1:9097" "connected:"
 check "SASL/SCRAM-SHA-256" "kafka://bob:bob-secret@127.0.0.1:9097?mechanism=SCRAM-SHA-256" "connected:"
 check "TLS with SASL" "kafka+ssl://alice:alice-secret@127.0.0.1:9101?insecure=1" "connected:"
