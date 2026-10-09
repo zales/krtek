@@ -8,6 +8,7 @@ const db = @import("db");
 // the DDL generator brings its own tests
 comptime {
     _ = @import("app.zig");
+    _ = @import("bench.zig");
     _ = @import("draw.zig");
     _ = @import("ddl.zig");
     _ = @import("connections.zig");

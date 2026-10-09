@@ -3,10 +3,10 @@
 Bugs that are known and not fixed yet. Each says how to see it, where it comes
 from and what the fix would be. Delete an entry in the commit that fixes it.
 
-Both below were found on 2026-10-04 by a review of the fix for text that is not
-UTF-8 ("A value that is not UTF-8 is drawn a U+FFFD a byte, and stays in its
-column"), by reading the code. Neither was reproduced in a pty: `tests/screen.py`
-puts every character in one cell, so it cannot show either.
+The one below was found on 2026-10-04 by a review of the fix for text that is
+not UTF-8 ("A value that is not UTF-8 is drawn a U+FFFD a byte, and stays in its
+column"), by reading the code. It was not reproduced in a pty: `tests/screen.py`
+puts every character in one cell, so it cannot show it.
 
 ## An emoji is laid out at one width and drawn at another on some terminals
 
@@ -34,19 +34,3 @@ counted 2, `👍🏽` is 4, a family joined with U+200D is 6.
 `.unicode` after `queryTerminal`, so the cell model and the layout agree and
 the terminal is trusted to draw clusters. About an hour, most of it deciding
 which, and a check in Apple Terminal and in one that does mode 2027.
-
-## The cursor of a password prompt is not after its last dot
-
-**What it looks like.** Typing a password with a character that is not one
-column wide - `日` is two, `e` with U+0301 after it is one column of two code
-points - leaves the cursor in the middle of the dots, or past them.
-
-**How to see it.** Connect to a server that asks for a password and type `日本`:
-four dots, with the cursor after the second.
-
-**Why.** `promptLine` (`src/tui/draw.zig`) draws one dot per column of
-`term.width(prompt.buffer.items)`, and `cursorAndFlush` puts the cursor at
-`utf8CountCodepoints` of the same buffer - one per code point.
-
-**The fix.** Count the same thing in both: one dot per code point, which also
-says nothing about how wide the characters are. About 15 minutes with a test.

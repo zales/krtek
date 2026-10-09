@@ -205,6 +205,13 @@ pub const Term = struct {
     /// that sends its keys without waiting to see the first screen.
     held: std.ArrayList(Event) = .empty,
     held_at: usize = 0,
+    /// No terminal under it: made by `headless`, for the tests. What is drawn
+    /// goes into the cells exactly as it does otherwise and is then written
+    /// nowhere, there is no reader of keys, and what was copied is kept here
+    /// rather than sent to a clipboard that is not there.
+    bare: bool = false,
+    nowhere: std.Io.Writer.Discarding = undefined,
+    copied: std.ArrayList(u8) = .empty,
 
     pub fn init(allocator: std.mem.Allocator, io: std.Io, env: *std.process.Environ.Map) !*Term {
         const self = try allocator.create(Term);
@@ -243,16 +250,85 @@ pub const Term = struct {
         return self;
     }
 
+    /// A screen of a given size with no terminal behind it.
+    ///
+    /// The whole of this program above the terminal - what a key does, and
+    /// what is then drawn - could only be run by a person or by a script
+    /// typing into a pseudo terminal and waiting a third of a second for each
+    /// answer, so most of it was tested that way or not at all. Everything
+    /// drawn goes through the cells vaxis keeps, and those need no terminal:
+    /// with this, a test presses a key and reads the screen as fast as the
+    /// code runs.
+    pub fn headless(allocator: std.mem.Allocator, io: std.Io, env: *std.process.Environ.Map, wanted: Size) !*Term {
+        const self = try allocator.create(Term);
+        errdefer allocator.destroy(self);
+        const buffer = try allocator.alloc(u8, 4096);
+        errdefer allocator.free(buffer);
+        self.* = .{
+            .allocator = allocator,
+            .io = io,
+            .buffer = buffer,
+            .tty = undefined,
+            .vx = undefined,
+            .loop = undefined,
+            .frame = std.heap.ArenaAllocator.init(allocator),
+            .bare = true,
+            .nowhere = .init(buffer),
+        };
+        self.vx = try vaxis.init(io, allocator, env, .{});
+        try self.vx.resize(allocator, self.sink(), .{
+            .rows = wanted.rows,
+            .cols = wanted.cols,
+            .x_pixel = 0,
+            .y_pixel = 0,
+        });
+        self.window = self.vx.window();
+        return self;
+    }
+
+    /// Where the escape sequences go: the terminal, or nowhere.
+    fn sink(self: *Term) *std.Io.Writer {
+        return if (self.bare) &self.nowhere.writer else self.tty.writer();
+    }
+
     pub fn deinit(self: *Term) void {
         self.follow(0);
         self.forgetImage();
         self.held.deinit(self.allocator);
+        self.copied.deinit(self.allocator);
         self.frame.deinit();
-        self.loop.stop();
-        self.vx.deinit(self.allocator, self.tty.writer());
-        self.tty.deinit();
+        if (!self.bare) {
+            self.loop.stop();
+        }
+        self.vx.deinit(self.allocator, self.sink());
+        if (!self.bare) {
+            self.tty.deinit();
+        }
         self.allocator.free(self.buffer);
         self.allocator.destroy(self);
+    }
+
+    /// What is on the screen, as text: a line for every row, without the
+    /// space at its end. For a test to read; the caller frees it.
+    pub fn shown(self: *Term, allocator: std.mem.Allocator) ![]u8 {
+        var text: std.ArrayList(u8) = .empty;
+        errdefer text.deinit(allocator);
+        var row: u16 = 0;
+        while (row < self.vx.screen.height) : (row += 1) {
+            const start = text.items.len;
+            var col: u16 = 0;
+            while (col < self.vx.screen.width) {
+                const cell = self.vx.screen.readCell(col, row) orelse break;
+                const drawn = cell.char.grapheme;
+                try text.appendSlice(allocator, if (drawn.len != 0) drawn else " ");
+                // A character two columns wide is one cell and a gap after it.
+                col += @max(1, cell.char.width);
+            }
+            const kept = std.mem.trimEnd(u8, text.items[start..], " ");
+            text.shrinkRetainingCapacity(start + kept.len);
+            try text.append(allocator, '\n');
+        }
+        return text.toOwnedSlice(allocator);
     }
 
     /// A terminal that reports nothing, or almost nothing, still has to be drawn
@@ -279,7 +355,7 @@ pub const Term = struct {
     }
 
     pub fn flush(self: *Term) !void {
-        try self.vx.render(self.tty.writer());
+        try self.vx.render(self.sink());
     }
 
     /// Print at the cursor and advance it. Vaxis measures the text, so a wide or
@@ -364,7 +440,7 @@ pub const Term = struct {
         const hash = std.hash.Wyhash.hash(0, bytes);
         if (self.picture == null or self.picture_hash != hash) {
             self.forgetImage();
-            self.picture = try self.vx.loadImage(self.allocator, self.tty.writer(), .{ .mem = bytes });
+            self.picture = try self.vx.loadImage(self.allocator, self.sink(), .{ .mem = bytes });
             self.picture_hash = hash;
         }
         const area = self.window.child(.{
@@ -378,7 +454,7 @@ pub const Term = struct {
 
     pub fn forgetImage(self: *Term) void {
         if (self.picture) |old| {
-            self.vx.freeImage(self.tty.writer(), old.id);
+            self.vx.freeImage(self.sink(), old.id);
         }
         self.picture = null;
         self.picture_hash = 0;
@@ -387,6 +463,10 @@ pub const Term = struct {
     /// Put text in the system clipboard, through OSC 52, so it works over ssh and
     /// inside tmux as well - there is no local clipboard to talk to.
     pub fn copy(self: *Term, text: []const u8) !void {
+        if (self.bare) {
+            self.copied.clearRetainingCapacity();
+            return self.copied.appendSlice(self.allocator, text);
+        }
         try self.vx.copyToSystemClipboard(self.tty.writer(), text, self.allocator);
     }
 
@@ -423,6 +503,9 @@ pub const Term = struct {
     /// also did them would double every character.
     pub fn release(self: *Term) void {
         self.follow(0);
+        if (self.bare) {
+            return;
+        }
         self.loop.stop();
         self.vx.exitAltScreen(self.tty.writer()) catch {};
         const writer = self.tty.writer();
@@ -451,6 +534,9 @@ pub const Term = struct {
     /// Take it back, and forget everything that was on the screen: what ran in
     /// between drew whatever it liked, so nothing about the old frame is true.
     pub fn reclaim(self: *Term) void {
+        if (self.bare) {
+            return;
+        }
         if (self.opened_fd >= 0) {
             _ = std.c.close(self.opened_fd);
             self.opened_fd = -1;
@@ -517,7 +603,9 @@ pub const Term = struct {
             self.ticker = null;
         }
         self.tick_ms = ms;
-        if (ms == 0) {
+        // With no terminal there is no queue for a tick to be put in, and
+        // nobody waiting on one: a test says when the time has come.
+        if (ms == 0 or self.bare) {
             return;
         }
         // A timer that cannot be started is not worth failing over: the view
@@ -527,7 +615,7 @@ pub const Term = struct {
 
     /// Whether ticks are being delivered.
     pub fn following(self: *Term) bool {
-        return self.ticker != null;
+        return self.ticker != null or (self.bare and self.tick_ms != 0);
     }
 
     fn tickRun(self: *Term) void {
@@ -669,6 +757,10 @@ pub const Term = struct {
     }
 
     fn asked(self: *Term, wait: enum { statement, connection }) bool {
+        // Nobody at a keyboard that is not there.
+        if (self.bare) {
+            return false;
+        }
         var found = false;
         while (self.loop.tryEvent() catch null) |event| {
             switch (event) {

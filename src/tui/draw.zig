@@ -83,13 +83,20 @@ pub fn frame(app: *App, size: Size) !void {
     try cursorAndFlush(app, size);
 }
 
+/// How many dots a password is, and so where the cursor after them goes: its
+/// characters. One function, because the two that asked had each their own
+/// answer.
+fn passwordLength(typed: []const u8) usize {
+    return std.unicode.utf8CountCodepoints(typed) catch typed.len;
+}
+
 /// Park the cursor where the user is typing, then put the frame on screen.
 fn cursorAndFlush(app: *App, size: Size) !void {
     const screen = app.screen;
     if (app.typing.prompt) |prompt| {
         // A password shows dots, so the cursor goes after the last one.
         const typed = if (prompt.kind == .password)
-            std.unicode.utf8CountCodepoints(prompt.buffer.items) catch prompt.buffer.items.len
+            passwordLength(prompt.buffer.items)
         else
             term.width(prompt.buffer.items);
         screen.cursorAt(size.rows - 1, term.width(prompt.label) + typed, false);
@@ -313,7 +320,7 @@ fn header(app: *App, size: Size) void {
         }
     } else {
         screen.style(.{ .bg = C.bar, .fg = C.accent });
-        used += write(app, if (app.connected) app.conn.describe() else "", size.cols - used);
+        used += write(app, if (app.connected) app.conn.describe() else "", size.cols -| used);
     }
 
     // Beside the name of the connection, because that is what it is about - and
@@ -331,7 +338,7 @@ fn header(app: *App, size: Size) void {
         "no connection ";
     const right_width = term.width(right);
     if (size.cols > used + right_width) {
-        fill(app, ' ', size.cols - used - right_width);
+        fill(app, ' ', size.cols -| used -| right_width);
         _ = write(app, right, right_width);
     } else {
         fill(app, ' ', if (size.cols > used) size.cols - used else 0);
@@ -453,11 +460,11 @@ fn sidebar(app: *App, width: usize, rows: usize) void {
     if (app.typing.prompt != null and app.typing.prompt.?.kind == .filter) {
         _ = write(app, " filter: ", width);
         screen.style(.{ .fg = C.accent });
-        _ = write(app, app.typing.prompt.?.buffer.items, width - 9);
+        _ = write(app, app.typing.prompt.?.buffer.items, width -| 9);
     } else if (app.sidebar.filter.items.len > 0) {
         _ = write(app, " /", width);
         screen.style(.{ .fg = C.accent });
-        _ = write(app, app.sidebar.filter.items, width - 2);
+        _ = write(app, app.sidebar.filter.items, width -| 2);
     } else if (app.grid.schema.items.len != 0) {
         // The engine's own word for it, and the key that changes it out at the
         // right - the same way the filter header shows the `/` that made it, and
@@ -475,7 +482,7 @@ fn sidebar(app: *App, width: usize, rows: usize) void {
         used += write(app, app.grid.schema.items, width -| used -| 2);
         if (width > used + 1) {
             screen.style(.{ .fg = C.faint });
-            fill(app, ' ', width - used - 2);
+            fill(app, ' ', width -| used -| 2);
             _ = write(app, "#", 1);
         }
     } else {
@@ -489,7 +496,7 @@ fn sidebar(app: *App, width: usize, rows: usize) void {
         _ = write(app, if (app.sidebar.filter.items.len > 0) "nothing matches" else "no tables yet", width - 1);
         if (app.sidebar.filter.items.len == 0) {
             screen.moveTo(3, 1);
-            _ = write(app, "c creates one", width - 1);
+            _ = write(app, "c creates one", width -| 1);
         }
         screen.reset();
     }
@@ -509,7 +516,7 @@ fn sidebar(app: *App, width: usize, rows: usize) void {
             screen.moveTo(line, 0);
             screen.style(.{ .fg = C.faint });
             _ = write(app, " ", 1);
-            _ = write(app, object.group, width - 1);
+            _ = write(app, object.group, width -| 1);
             screen.clearToEol();
             line += 1;
         }
@@ -527,7 +534,7 @@ fn sidebar(app: *App, width: usize, rows: usize) void {
         var used: usize = 0;
         used += write(app, if (std.mem.eql(u8, object.kind, "view")) " ~ " else " ▪ ", width);
         // The filter matches fuzzily, so mark what earned the name its place.
-        used += writeMatched(app, object.name, app.filterHit(object.name), width - used - 8, base);
+        used += writeMatched(app, object.name, app.filterHit(object.name), width -| used -| 8, base);
         var buf: [24]u8 = undefined;
         const count = if (object.rows) |value|
             std.mem.print(&buf, "{d} ", .{value}) catch " "
@@ -535,7 +542,7 @@ fn sidebar(app: *App, width: usize, rows: usize) void {
             "? ";
         const count_width = term.width(count);
         if (width > used + count_width) {
-            fill(app, ' ', width - used - count_width);
+            fill(app, ' ', width -| used -| count_width);
             screen.style(.{ .bg = if (selected) C.selected else null, .fg = if (selected) C.dim else C.faint });
             _ = write(app, count, count_width);
         }
@@ -554,7 +561,7 @@ fn sidebar(app: *App, width: usize, rows: usize) void {
     // keyboard - the cheapest way to show focus without a frame around each pane.
     var i: usize = 1;
     while (i < rows + 1) : (i += 1) {
-        screen.moveTo(i, width - 1);
+        screen.moveTo(i, width -| 1);
         screen.style(.{ .fg = if (app.focus == .sidebar) C.accent else C.faint });
         screen.put(if (app.focus == .sidebar) "┃" else "│");
     }
@@ -635,12 +642,12 @@ fn layout(app: *App, available: usize, columns: []usize, widths: []usize) Layout
 fn grid(app: *App, size: Size, side: usize, rows: usize) void {
     const screen = app.screen;
     const left = side;
-    const width = size.cols - left;
+    const width = size.cols -| left;
 
     // Title line: table, paging, sort.
     screen.moveTo(1, left);
     screen.style(.{ .fg = C.accent, .bold = true });
-    var used: usize = write(app, " ", width) + write(app, app.grid.title.items, width - 2);
+    var used: usize = write(app, " ", width) + write(app, app.grid.title.items, width -| 2);
     screen.style(.{ .fg = C.dim });
     var buf: [160]u8 = undefined;
     const first: usize = if (app.grid.rows.items.len == 0) 0 else app.firstRow();
@@ -659,7 +666,7 @@ fn grid(app: *App, size: Size, side: usize, rows: usize) void {
         if (app.grid.order) |column| column else "",
         if (app.grid.order != null and app.grid.descending) " desc" else "",
     }) catch "";
-    used += write(app, summary, width - used);
+    used += write(app, summary, width -| used);
     if (app.follow.ms != 0) {
         // In green, the colour of something going well: this is the one thing on
         // the line that is still happening, and it should be seen without being
@@ -669,18 +676,18 @@ fn grid(app: *App, size: Size, side: usize, rows: usize) void {
         const text = std.mem.print(&every, "   following {d:.1}s", .{
             @as(f64, @floatFromInt(app.follow.ms)) / 1000.0,
         }) catch "   following";
-        used += write(app, text, width - used);
+        used += write(app, text, width -| used);
         screen.style(.{ .fg = C.dim });
     }
     if (!app.grid.editable and app.grid.rows.items.len > 0) {
         screen.style(.{ .fg = C.faint });
-        used += write(app, "   read-only", width - used);
+        used += write(app, "   read-only", width -| used);
     }
     screen.clearToEol();
 
     var indexes: [128]usize = undefined;
     var widths: [128]usize = undefined;
-    const plan = layout(app, width - 1, &indexes, &widths);
+    const plan = layout(app, width -| 1, &indexes, &widths);
 
     // Header row.
     screen.moveTo(2, left);
@@ -696,7 +703,7 @@ fn grid(app: *App, size: Size, side: usize, rows: usize) void {
     }
     screen.style(.{ .bg = C.bar });
     if (width > x) {
-        fill(app, ' ', width - x);
+        fill(app, ' ', width -| x);
     }
     screen.reset();
 
@@ -766,7 +773,7 @@ fn grid(app: *App, size: Size, side: usize, rows: usize) void {
 fn structure(app: *App, size: Size, side: usize, rows: usize) void {
     const screen = app.screen;
     const left = side;
-    const width = size.cols - left;
+    const width = size.cols -| left;
     const table = app.currentTable() orelse {
         note(app, left, width, "no table selected");
         return;
@@ -799,22 +806,22 @@ fn structure(app: *App, size: Size, side: usize, rows: usize) void {
         used += 22;
         if (column.notnull) {
             screen.style(.{ .fg = C.warn });
-            used += write(app, "NOT NULL ", width - used);
+            used += write(app, "NOT NULL ", width -| used);
         } else {
             screen.style(.{ .fg = C.nul, .italic = true });
-            used += write(app, "null ", width - used);
+            used += write(app, "null ", width -| used);
         }
         if (column.pk) {
             screen.style(.{ .fg = C.accent });
-            used += write(app, "PRIMARY ", width - used);
+            used += write(app, "PRIMARY ", width -| used);
         }
         if (column.unique) {
             screen.style(.{ .fg = C.accent });
-            used += write(app, "UNIQUE ", width - used);
+            used += write(app, "UNIQUE ", width -| used);
         }
         if (column.dflt) |value| {
             screen.style(.{ .fg = C.faint });
-            used += write(app, "default ", width - used);
+            used += write(app, "default ", width -| used);
             used += write(app, value, if (width > used) width - used else 0);
         }
         screen.reset();
@@ -837,7 +844,7 @@ fn structure(app: *App, size: Size, side: usize, rows: usize) void {
         pad(app, index.columns, 30, false);
         used += 30;
         screen.style(.{ .fg = C.faint });
-        used += write(app, " ", width - used);
+        used += write(app, " ", width -| used);
         used += write(app, index.name, if (width > used) width - used else 0);
         if (index.partial) {
             used += write(app, " partial", if (width > used) width - used else 0);
@@ -859,16 +866,16 @@ fn structure(app: *App, size: Size, side: usize, rows: usize) void {
         pad(app, key.column, 22, false);
         used += 22;
         screen.style(.{ .fg = C.faint });
-        used += write(app, "-> ", width - used);
+        used += write(app, "-> ", width -| used);
         screen.style(.{ .fg = C.accent });
-        used += write(app, key.target_table, width - used);
+        used += write(app, key.target_table, width -| used);
         screen.style(.{ .fg = C.dim });
-        used += write(app, ".", width - used);
-        used += write(app, key.target_column, width - used);
+        used += write(app, ".", width -| used);
+        used += write(app, key.target_column, width -| used);
         screen.style(.{ .fg = C.faint });
-        used += write(app, "   on update ", width - used);
-        used += write(app, key.on_update, width - used);
-        used += write(app, ", on delete ", width - used);
+        used += write(app, "   on update ", width -| used);
+        used += write(app, key.on_update, width -| used);
+        used += write(app, ", on delete ", width -| used);
         used += write(app, key.on_delete, if (width > used) width - used else 0);
         screen.reset();
         screen.clearToEol();
@@ -888,7 +895,7 @@ fn structure(app: *App, size: Size, side: usize, rows: usize) void {
             _ = write(app, "  ", width);
             // A tab would land on the terminal's own stop and break the column.
             const expanded = expandTabs(scratch, part) catch part;
-            _ = write(app, expanded, width - 2);
+            _ = write(app, expanded, width -| 2);
             screen.clearToEol();
             line += 1;
         }
@@ -908,7 +915,7 @@ fn section(app: *App, left: usize, width: usize, line: usize, rows: usize, title
     screen.moveTo(line, left);
     screen.style(.{ .fg = C.faint, .bold = true });
     _ = write(app, " ", width);
-    _ = write(app, title, width - 1);
+    _ = write(app, title, width -| 1);
     screen.clearToEol();
     return line + 1;
 }
@@ -922,7 +929,7 @@ fn files(app: *App, size: Size, rows: usize) void {
     // One column between them, and the odd column goes to the left pane.
     const gap: usize = 1;
     const right_width = if (size.cols > gap + 4) (size.cols - gap) / 2 else 2;
-    const left_width = size.cols - gap - right_width;
+    const left_width = size.cols -| gap -| right_width;
 
     pane(app, &manager.left, 0, left_width, rows, manager.active == .left);
     pane(app, &manager.right, left_width + gap, right_width, rows, manager.active == .right);
@@ -1021,7 +1028,7 @@ fn endOf(text: []const u8, width: usize) []const u8 {
     if (term.width(text) <= width or width < 2) {
         return text;
     }
-    var at = text.len -| (width - 1);
+    var at = text.len -| (width -| 1);
     while (at < text.len and text[at] & 0xC0 == 0x80) : (at += 1) {}
     return text[at..];
 }
@@ -1029,7 +1036,7 @@ fn endOf(text: []const u8, width: usize) []const u8 {
 fn messages(app: *App, size: Size, side: usize, rows: usize) void {
     const screen = app.screen;
     const left = side;
-    const width = size.cols - left;
+    const width = size.cols -| left;
     screen.moveTo(1, left);
     screen.style(.{ .fg = C.accent, .bold = true });
     _ = write(app, " last batch", width);
@@ -1045,7 +1052,7 @@ fn messages(app: *App, size: Size, side: usize, rows: usize) void {
         var buf: [32]u8 = undefined;
         var used: usize = write(app, std.mem.print(&buf, " {d} ", .{n + 1}) catch " ", width);
         screen.style(.{ .fg = C.text });
-        used += write(app, report.sql, width - used - 22);
+        used += write(app, report.sql, width -| used -| 22);
         screen.style(.{ .fg = C.faint });
         var right: [48]u8 = undefined;
         const stats = if (report.result_set)
@@ -1062,7 +1069,7 @@ fn messages(app: *App, size: Size, side: usize, rows: usize) void {
             screen.moveTo(line, left);
             screen.style(.{ .fg = C.danger });
             _ = write(app, "   ", width);
-            _ = write(app, message, width - 3);
+            _ = write(app, message, width -| 3);
             screen.clearToEol();
             line += 1;
         }
@@ -1159,7 +1166,7 @@ pub const HELP = [_][2][]const u8{
 fn help(app: *App, size: Size, side: usize, rows: usize) void {
     const screen = app.screen;
     const left = side;
-    const width = size.cols - left;
+    const width = size.cols -| left;
     screen.moveTo(1, left);
     screen.style(.{ .fg = C.accent, .bold = true });
     _ = write(app, " keys", width);
@@ -1198,7 +1205,7 @@ fn help(app: *App, size: Size, side: usize, rows: usize) void {
             if (entry[0].len == 0) {
                 screen.style(.{ .fg = C.faint, .bold = true });
                 _ = write(app, "  ", column_width);
-                _ = write(app, entry[1], column_width - 2);
+                _ = write(app, entry[1], column_width -| 2);
                 continue;
             }
             screen.style(.{ .fg = C.accent });
@@ -1242,7 +1249,7 @@ fn help(app: *App, size: Size, side: usize, rows: usize) void {
 fn objectScreen(app: *App, size: Size, side: usize, rows: usize) void {
     const screen = app.screen;
     const left = side;
-    const width = size.cols - left;
+    const width = size.cols -| left;
 
     screen.moveTo(1, left);
     screen.style(.{ .fg = C.accent, .bold = true });
@@ -1344,7 +1351,7 @@ fn detail(app: *App, size: Size, side: usize, rows: usize) !void {
     var rows_needed: usize = 0;
     var counting = text;
     while (counting.len != 0) : (rows_needed += 1) {
-        _ = wrapRow(&counting, width - 4);
+        _ = wrapRow(&counting, width -| 4);
     }
     const lines: usize = 1 + @max(1, rows_needed);
     // One row for each of the frame's edges, on top of the value itself.
@@ -1416,7 +1423,7 @@ fn detail(app: *App, size: Size, side: usize, rows: usize) !void {
             }
             screen.style(.{ .bg = C.selected });
             if (width > used + 2) {
-                fill(app, ' ', width - used - 2);
+                fill(app, ' ', width -| used -| 2);
             }
         }
         screen.reset();
@@ -1433,17 +1440,17 @@ fn detail(app: *App, size: Size, side: usize, rows: usize) !void {
     // lines would jump over the wrapped part of one.
     var skipped: usize = 0;
     while (skipped < app.detail_at and rest.len != 0) : (skipped += 1) {
-        _ = wrapRow(&rest, width - 4);
+        _ = wrapRow(&rest, width -| 4);
     }
     while (line + 1 < top + height) : (line += 1) {
         screen.moveTo(line, left + 1);
         screen.style(.{ .bg = C.selected, .fg = C.text });
         screen.put(" ");
         if (rest.len == 0) {
-            fill(app, ' ', width - 3);
+            fill(app, ' ', width -| 3);
             continue;
         }
-        const piece = wrapRow(&rest, width - 4);
+        const piece = wrapRow(&rest, width -| 4);
         screen.put(piece.text);
         fill(app, ' ', width - 3 - piece.cols);
     }
@@ -1513,7 +1520,7 @@ fn palettePanel(app: *App, size: Size, rows: usize) void {
     var line: usize = 2;
     screen.moveTo(line, left + 1);
     screen.style(.{ .bg = C.bar, .fg = C.accent, .bold = true });
-    var used: usize = write(app, " › ", width - 2);
+    var used: usize = write(app, " › ", width -| 2);
     screen.style(.{ .bg = C.bar, .fg = C.text });
     used += write(app, palette.query.items, width -| used -| 2);
     app.typing.cursor = .{ .row = line, .col = left + 1 + used };
@@ -1522,7 +1529,7 @@ fn palettePanel(app: *App, size: Size, rows: usize) void {
         used += write(app, "what do you want to do?", width -| used -| 2);
     }
     if (width > used + 2) {
-        fill(app, ' ', width - used - 2);
+        fill(app, ' ', width -| used -| 2);
     }
 
     var at: usize = from;
@@ -1532,7 +1539,7 @@ fn palettePanel(app: *App, size: Size, rows: usize) void {
         const here = at == palette.at;
         screen.moveTo(line, left + 1);
         screen.style(.{ .bg = if (here) C.selected else C.bar, .fg = if (here) C.accent else C.text });
-        var span: usize = write(app, if (here) " ❯ " else "   ", width - 2);
+        var span: usize = write(app, if (here) " ❯ " else "   ", width -| 2);
         const named = input.labelFor(action, if (app.connected) app.caps() else null);
         span += writeMatched(app, named, input.paletteHit(found[at], palette.query.items), width -| span -| 2, .{
             .bg = if (here) C.selected else C.bar,
@@ -1553,7 +1560,7 @@ fn palettePanel(app: *App, size: Size, rows: usize) void {
         line += 1;
         screen.moveTo(line, left + 1);
         screen.style(.{ .bg = C.bar, .fg = C.dim, .italic = true });
-        const span: usize = write(app, "   nothing matches", width - 2);
+        const span: usize = write(app, "   nothing matches", width -| 2);
         if (width > span + 2) {
             fill(app, ' ', width - span - 2);
         }
@@ -1561,7 +1568,7 @@ fn palettePanel(app: *App, size: Size, rows: usize) void {
     line += 1;
     screen.moveTo(line, left + 1);
     screen.style(.{ .bg = C.bar, .fg = C.faint });
-    var footer: usize = write(app, "   up down choose   enter run   esc close", width - 2);
+    var footer: usize = write(app, "   up down choose   enter run   esc close", width -| 2);
     if (count > shown) {
         var buf: [32]u8 = undefined;
         footer += write(app, std.mem.print(&buf, "   {d} more", .{count - shown}) catch "", width -| footer -| 2);
@@ -1595,7 +1602,7 @@ pub fn connecting(app: *App) void {
     if (size.rows < height) {
         return;
     }
-    const left = (size.cols - width) / 2;
+    const left = (size.cols -| width) / 2;
     const top = (size.rows - height) / 2;
     const inner = width - 2;
 
@@ -1661,10 +1668,10 @@ fn status(app: *App, size: Size) void {
     screen.moveTo(size.rows - 2, 0);
     screen.style(.{ .bg = C.bar, .fg = if (app.report.status_error) C.danger else C.ok });
     var used: usize = write(app, " ", size.cols);
-    used += write(app, app.report.status.items, size.cols - 1);
+    used += write(app, app.report.status.items, size.cols -| 1);
     screen.style(.{ .bg = C.bar });
     if (size.cols > used) {
-        fill(app, ' ', size.cols - used);
+        fill(app, ' ', size.cols -| used);
     }
     screen.reset();
 }
@@ -1679,9 +1686,13 @@ fn promptLine(app: *App, size: Size) void {
         screen.style(.{ .fg = C.text });
         if (prompt.kind == .password) {
             // Never echo a password, not even to the screen it was typed on.
+            // A dot for a character, which is what the cursor after them is
+            // counted in: it was a dot for a column, so a character two
+            // columns wide was two dots with the cursor after the first - and
+            // how wide the characters of a password are is nobody's business.
             var dots: usize = 0;
-            while (dots < term.width(prompt.buffer.items) and used < size.cols) : (dots += 1) {
-                used += write(app, "•", size.cols - used);
+            while (dots < passwordLength(prompt.buffer.items) and used < size.cols) : (dots += 1) {
+                used += write(app, "•", size.cols -| used);
             }
         } else {
             used += write(app, prompt.buffer.items, if (size.cols > used) size.cols - used else 0);
@@ -1910,7 +1921,7 @@ fn editorPanel(app: *App, size: Size, side: usize, rows: usize) void {
                 .punct => C.dim,
                 .plain => C.text,
             }, .bold = kind == .keyword, .italic = kind == .comment });
-            used += write(app, text[byte..stop], width - used);
+            used += write(app, text[byte..stop], width -| used);
             byte = stop;
         }
     }
@@ -1999,19 +2010,19 @@ fn box(app: *App, top: usize, left: usize, width: usize, height: usize, title: [
     var used: usize = write(app, "╭─", width);
     if (title.len != 0) {
         screen.style(.{ .fg = accent, .bold = true });
-        used += write(app, " ", width - used);
+        used += write(app, " ", width -| used);
         used += write(app, title, width -| used -| 2);
         used += write(app, " ", width -| used -| 1);
         screen.style(.{ .fg = accent });
     }
     if (hint.len != 0 and width > used + 8) {
-        used += write(app, "─ ", width - used);
+        used += write(app, "─ ", width -| used);
         screen.style(.{ .fg = C.faint });
         used += write(app, hint, width -| used -| 2);
         used += write(app, " ", width -| used -| 1);
         screen.style(.{ .fg = accent });
     }
-    while (used < width - 1) : (used += 1) {
+    while (used < width -| 1) : (used += 1) {
         _ = write(app, "─", 1);
     }
     _ = write(app, "╮", 1);
@@ -2020,12 +2031,12 @@ fn box(app: *App, top: usize, left: usize, width: usize, height: usize, title: [
     while (line < bottom) : (line += 1) {
         screen.moveTo(line, left);
         _ = write(app, "│", 1);
-        screen.moveTo(line, left + width - 1);
+        screen.moveTo(line, left + width -| 1);
         _ = write(app, "│", 1);
     }
     screen.moveTo(bottom, left);
     used = write(app, "╰", width);
-    while (used < width - 1) : (used += 1) {
+    while (used < width -| 1) : (used += 1) {
         _ = write(app, "─", 1);
     }
     _ = write(app, "╯", 1);
@@ -2061,7 +2072,7 @@ fn pad(app: *App, text: []const u8, width: usize, right_align: bool) void {
     const cut = term.fit(text, width);
     // One column of the field goes to the ellipsis when the text did not all fit.
     const ellipsis = cut.text.len != text.len;
-    const piece = if (ellipsis) term.fit(text, width - 1) else cut;
+    const piece = if (ellipsis) term.fit(text, width -| 1) else cut;
     const space = width - piece.cols - @intFromBool(ellipsis);
     if (right_align) {
         fill(app, ' ', space);
@@ -2403,7 +2414,7 @@ fn tail(text: []const u8, max: usize) []const u8 {
 fn info(app: *App, size: Size, side: usize, rows: usize) void {
     const screen = app.screen;
     const left = side;
-    const width = size.cols - left;
+    const width = size.cols -| left;
     var arena = std.heap.ArenaAllocator.init(app.allocator);
     defer arena.deinit();
 
@@ -2473,7 +2484,7 @@ fn labelled(app: *App, left: usize, width: usize, line: usize, rows: usize, labe
 fn relations(app: *App, size: Size, side: usize, rows: usize) void {
     const screen = app.screen;
     const left = side;
-    const width = size.cols - left;
+    const width = size.cols -| left;
     screen.moveTo(1, left);
     screen.style(.{ .fg = C.accent, .bold = true });
     _ = write(app, " relations", width);
@@ -2502,14 +2513,14 @@ fn relations(app: *App, size: Size, side: usize, rows: usize) void {
             pad(app, key.column, 18, false);
             used += 18;
             screen.style(.{ .fg = C.faint });
-            used += write(app, "-> ", width - used);
+            used += write(app, "-> ", width -| used);
             screen.style(.{ .fg = C.accent });
-            used += write(app, key.target_table, width - used);
+            used += write(app, key.target_table, width -| used);
             screen.style(.{ .fg = C.dim });
-            used += write(app, ".", width - used);
-            used += write(app, key.target_column, width - used);
+            used += write(app, ".", width -| used);
+            used += write(app, key.target_column, width -| used);
             screen.style(.{ .fg = C.faint });
-            used += write(app, "   ", width - used);
+            used += write(app, "   ", width -| used);
             used += write(app, key.on_delete, if (width > used) width - used else 0);
             screen.clearToEol();
             line += 1;
@@ -2620,4 +2631,167 @@ test "a password is dots, and as many of them as it has characters" {
     try testing.expect(mask(&tiny, "velmi dlouhe heslo", 40).len <= tiny.len);
     // And nothing of the password itself comes back.
     try testing.expect(std.mem.find(u8, mask(&buffer, "hunter2", 20), "hunter2") == null);
+}
+
+// --------------------------------------------------------------- the frame
+//
+// On the bench - see bench.zig: a frame drawn into cells with no terminal
+// behind them, and read back. tests/sizes.sh asks the same of a real terminal
+// and takes ten minutes to; what is here is the part of that which is about
+// the drawing and not about the terminal.
+
+const Bench = @import("bench.zig").Bench;
+const BOOKS = @import("bench.zig").BOOKS;
+
+/// The column a piece of text starts in on a line of the screen, counted the
+/// way the screen counts.
+fn columnOf(line: []const u8, text: []const u8) ?usize {
+    const at = std.mem.find(u8, line, text) orelse return null;
+    return term.width(line[0..at]);
+}
+
+test "the header says what is open, and the line at the bottom what happened and what can be pressed" {
+    var bench = try Bench.open(BOOKS);
+    defer bench.close();
+    try testing.expect(std.mem.startsWith(u8, try bench.line(0), " krtek /tmp/"));
+    try testing.expect(std.mem.endsWith(u8, try bench.line(0), "2 objects"));
+    // The last two lines: what was said, and the keys that mean something here.
+    try testing.expect(std.mem.endsWith(u8, try bench.line(22), "bench.db - SQLite 3.50.4") or
+        std.mem.find(u8, try bench.line(22), "bench.db - SQLite") != null);
+    try testing.expect(std.mem.startsWith(u8, try bench.line(23), " enter opens"));
+    // In the rows, the keys are the rows'.
+    try bench.keys("{enter}");
+    try testing.expect(std.mem.startsWith(u8, try bench.line(23), " i insert"));
+}
+
+test "a number is at the right of its column, text at the left, and NULL says so" {
+    var bench = try Bench.open(
+        \\CREATE TABLE t (n INTEGER, name TEXT, note TEXT);
+        \\INSERT INTO t VALUES (7, 'seven', NULL), (1234, 'many', 'x');
+    );
+    defer bench.close();
+    const first = try testing.allocator.dupe(u8, try bench.line(3));
+    defer testing.allocator.free(first);
+    const second = try bench.line(4);
+    // The 7 ends where the 1234 ends.
+    try testing.expectEqual(columnOf(second, "1234").? + 3, columnOf(first, "7").?);
+    // The names start together.
+    try testing.expectEqual(columnOf(first, "seven").?, columnOf(second, "many").?);
+    try testing.expect(std.mem.find(u8, first, "NULL") != null);
+}
+
+test "a character two columns wide takes two, and the column after it starts where it does on every row" {
+    var bench = try Bench.open(
+        \\CREATE TABLE t (name TEXT, n INTEGER);
+        \\INSERT INTO t VALUES ('ab', 11), ('日本', 22), ('ěščř', 33);
+    );
+    defer bench.close();
+    var columns: [3]usize = undefined;
+    for (0..3) |row| {
+        const line = try bench.line(3 + row);
+        const wanted = [_][]const u8{ "11", "22", "33" };
+        columns[row] = columnOf(line, wanted[row]) orelse return error.TestExpectedEqual;
+    }
+    try testing.expectEqual(columns[0], columns[1]);
+    try testing.expectEqual(columns[0], columns[2]);
+}
+
+test "a value longer than the room it has is cut, and says it was" {
+    var bench = try Bench.open(
+        \\CREATE TABLE t (body TEXT, n INTEGER);
+        \\INSERT INTO t VALUES ('a very long value that goes on and on and on, well past what a column of a grid is ever given, and then some', 5);
+    );
+    defer bench.close();
+    const line = try bench.line(3);
+    try testing.expect(std.mem.find(u8, line, "a very long value") != null);
+    try testing.expect(std.mem.find(u8, line, "and then some") == null);
+    try testing.expect(std.mem.find(u8, line, "…") != null);
+    // And what comes after it is still on the line.
+    try testing.expect(std.mem.endsWith(u8, line, "5"));
+}
+
+test "the list of tables is as wide as the window allows, and gone where there is no room for it" {
+    {
+        var bench = try Bench.openWith(BOOKS, .{ .size = .{ .rows = 20, .cols = 100 } });
+        defer bench.close();
+        try bench.sees("TABLES & VIEWS");
+        // Twenty-six columns of list, then the line between it and the rows.
+        try testing.expectEqual(@as(?usize, 25), columnOf(try bench.line(1), "┃"));
+    }
+    {
+        // A third of the width where that is less.
+        var bench = try Bench.openWith(BOOKS, .{ .size = .{ .rows = 20, .cols = 60 } });
+        defer bench.close();
+        try bench.sees("TABLES & VIEWS");
+        try testing.expectEqual(@as(?usize, 19), columnOf(try bench.line(1), "┃"));
+    }
+    {
+        var bench = try Bench.openWith(BOOKS, .{ .size = .{ .rows = 20, .cols = 44 } });
+        defer bench.close();
+        try bench.lacks("TABLES & VIEWS");
+        // The rows have the whole width, and are still the rows.
+        try bench.sees("Karel Čapek");
+    }
+}
+
+test "every screen is drawn inside the window, whatever size the window is" {
+    // What tests/sizes.sh asks of a terminal, of the drawing: nothing may be
+    // put past the right edge or below the bottom, and nothing may fall over,
+    // on a window too small to be of any use as on one with room to spare.
+    const sizes = [_]term.Size{
+        .{ .rows = 6, .cols = 24 },   .{ .rows = 8, .cols = 30 },
+        .{ .rows = 10, .cols = 44 },  .{ .rows = 12, .cols = 47 },
+        .{ .rows = 14, .cols = 60 },  .{ .rows = 24, .cols = 80 },
+        .{ .rows = 30, .cols = 118 }, .{ .rows = 50, .cols = 200 },
+    };
+    // A key that opens something, and the keys that put it away again.
+    const screens = [_][2][]const u8{
+        .{ "", "" },              .{ "{enter}", "" },
+        .{ "S", "{esc}" },        .{ "?", "?" },
+        .{ "gb", "gb" },          .{ "gL", "gL" },
+        .{ "gm", "gm" },          .{ "{enter}gv", "{esc}" },
+        .{ "{enter}i", "{esc}" }, .{ "a", "{esc}" },
+        .{ "c", "{esc}" },        .{ "W", "{esc}" },
+        .{ "I", "{esc}" },        .{ "K", "{esc}" },
+        .{ "T", "{esc}" },        .{ "E", "{esc}" },
+        .{ "gM", "{esc}" },       .{ "s", "{esc}{esc}" },
+        .{ "{ctrl-k}", "{esc}" }, .{ ":", "{esc}" },
+        .{ "y", "{esc}" },        .{ "O", "{esc}" },
+        .{ "Oa", "{esc}{esc}" },  .{ "Oe", "{esc}{esc}" },
+        .{ "{ctrl-t}", "[" },
+    };
+    for (sizes) |size| {
+        var bench = try Bench.openWith(BOOKS, .{ .size = size });
+        defer bench.close();
+        for (screens) |entry| {
+            try bench.keys(entry[0]);
+            const text = try bench.screen();
+            var lines = std.mem.splitScalar(u8, text, '\n');
+            var count: usize = 0;
+            while (lines.next()) |line| {
+                if (term.width(line) > size.cols) {
+                    std.debug.print("\n{d}x{d} after {s}: a line of {d} columns\n{s}\n", .{ size.cols, size.rows, entry[0], term.width(line), text });
+                    return error.TestExpectedEqual;
+                }
+                count += 1;
+            }
+            // A line for every row and the empty one after the last.
+            try testing.expectEqual(@as(usize, size.rows) + 1, count);
+            try bench.keys(entry[1]);
+        }
+    }
+}
+
+test "a password is a dot for each character, with the cursor after the last" {
+    var bench = try Bench.open(BOOKS);
+    defer bench.close();
+    bench.app.typing.prompt = .{ .kind = .password, .label = " password: " };
+    // Two characters of two columns each, and one made of two code points.
+    try bench.keys("日本x");
+    const line = try bench.line(23);
+    try testing.expectEqualStrings(" password: •••", line);
+    try testing.expect(std.mem.find(u8, try bench.screen(), "日") == null);
+    const cursor = bench.app.screen.vx.screen.cursor;
+    try testing.expectEqual(@as(u16, 23), cursor.row);
+    try testing.expectEqual(@as(u16, " password: ".len + 3), cursor.col);
 }

@@ -842,13 +842,23 @@ pub const App = struct {
     /// empty. Nothing is opened before the screen exists, so a failure to connect
     /// lands on the list instead of quitting.
     pub fn init(allocator: std.mem.Allocator, target: []const u8, io: std.Io, env: *std.process.Environ.Map) !App {
+        const screen = try Term.init(allocator, io, env);
+        // A terminal taken over and then not given back is worse than whatever
+        // went wrong after it.
+        errdefer screen.deinit();
+        return initOn(allocator, screen, target, env);
+    }
+
+    /// The same, on a screen that is already there - which is how a test gets
+    /// one with no terminal behind it. The screen is the App's from here on.
+    pub fn initOn(allocator: std.mem.Allocator, screen: *Term, target: []const u8, env: *std.process.Environ.Map) !App {
         var self = App{
             .allocator = allocator,
             .arena = std.heap.ArenaAllocator.init(allocator),
             .report = .{ .arena = std.heap.ArenaAllocator.init(allocator) },
             .object = .{ .arena = std.heap.ArenaAllocator.init(allocator) },
             .typing = .{ .arena = std.heap.ArenaAllocator.init(allocator) },
-            .screen = try Term.init(allocator, io, env),
+            .screen = screen,
             .conn = undefined,
             .connected = false,
             .path = "",
@@ -2306,6 +2316,15 @@ pub const App = struct {
             if (object.rows == null or object.rows.? < 0) {
                 object.rows = self.conn.rowCount(.{ .schema = self.grid.schema.items, .name = object.name });
             }
+        }
+        // The cursor stays on the list. Where the last object in it has just
+        // gone - dropped, with the cursor on it - the cursor was past the end
+        // and on nothing: no table was opened in its place, and the grid kept
+        // the count of the one that was gone over an invitation to insert a
+        // row into it.
+        const count = self.visibleCount();
+        if (self.sidebar.selected >= count) {
+            self.sidebar.selected = count -| 1;
         }
     }
 
@@ -5323,4 +5342,239 @@ test "the connection filter is fuzzy about the name and literal about the target
     try testing.expect(connectionMatches("cokoliv", target, "localni.example"));
     // Case is not the point of a search either.
     try testing.expect(connectionMatches("cokoliv", target, "LOCALNI"));
+}
+
+// ------------------------------------------------------- the forms, and after
+//
+// On the bench - see bench.zig. Each of these is a form filled in the way a
+// person fills it, and then the database asked what became of it: the
+// statement a form writes was only ever compared with a statement, and whether
+// the engine took it was found out by whoever tried.
+
+const Bench = @import("bench.zig").Bench;
+const BOOKS = @import("bench.zig").BOOKS;
+
+test "a table is made from the form, with the columns it was given" {
+    var bench = try Bench.open(BOOKS);
+    defer bench.close();
+    // The name, then the two columns the form starts with: the first is
+    // renamed and left as the key, the second gets a name and NOT NULL.
+    try bench.keys("cshelves{tab}{ctrl-u}code{tab}{tab}{tab}{tab}{tab}{ctrl-u}room{tab}{tab}{space}{ctrl-s}");
+    try bench.says("created");
+    try bench.expectAsked(
+        "SELECT name || ':' || type || ':' || \"notnull\" || ':' || pk FROM pragma_table_info('shelves')",
+        "code:TEXT:0:1 room:TEXT:1:0",
+    );
+    // And it is in the list beside the others.
+    try bench.sees("shelves");
+    try testing.expectEqual(@as(usize, 3), bench.app.sidebar.objects.items.len);
+}
+
+test "an alter adds a column and keeps every row" {
+    var bench = try Bench.open(BOOKS);
+    defer bench.close();
+    try bench.keys("j{enter}a{ctrl-n}");
+    try bench.keys("pages{ctrl-s}");
+    try testing.expect(bench.app.typing.form == null);
+    try bench.expectAsked("SELECT name FROM pragma_table_info('books')", "id title year author pages");
+    try bench.expectAsked("SELECT title FROM books ORDER BY id", "RUR Krakatit Žert Saturnin");
+    // The key it had is the key it has, and it is enforced.
+    try bench.expectAsked("SELECT \"table\" || ':' || on_delete FROM pragma_foreign_key_list('books')", "authors:CASCADE");
+    try bench.expectAsked("PRAGMA foreign_keys", "1");
+    // The grid is the table as it is now.
+    try bench.sees("pages");
+}
+
+test "a table that has a trigger is altered, and the trigger still fires" {
+    var bench = try Bench.open(BOOKS ++
+        \\CREATE TABLE log (what TEXT);
+        \\CREATE TRIGGER noted AFTER INSERT ON books BEGIN INSERT INTO log VALUES (NEW.title); END;
+    );
+    defer bench.close();
+    try bench.keys("j{enter}a{ctrl-n}pages{ctrl-s}");
+    try bench.lacks("failed");
+    try bench.expectAsked("SELECT name FROM pragma_table_info('books')", "id title year author pages");
+    try bench.app.conn.exec("INSERT INTO books (title) VALUES ('Povětroň')");
+    try bench.expectAsked("SELECT what FROM log", "Povětroň");
+}
+
+test "an alter that fails takes nothing with it, and leaves the keys enforced" {
+    var bench = try Bench.open(BOOKS ++ "INSERT INTO books (id, title, year, author) VALUES (9, 'undated', NULL, 1);");
+    defer bench.close();
+    // NOT NULL on a column one row has nothing in: the thirteenth field.
+    try bench.keys("j{enter}a");
+    try bench.repeat("{tab}", 13);
+    try bench.keys("{space}{ctrl-s}");
+    try bench.says("failed");
+    try bench.says("rolled back");
+    try bench.expectAsked("SELECT count(*) FROM books", "5");
+    try bench.expectAsked("SELECT \"notnull\" FROM pragma_table_info('books') WHERE name = 'year'", "0");
+    try bench.expectAsked("SELECT count(*) FROM sqlite_master WHERE name = 'krtek_rebuild'", "0");
+    // The script turned them off at its first line and never reached its last.
+    try bench.expectAsked("PRAGMA foreign_keys", "1");
+    try testing.expectError(error.Driver, bench.app.conn.exec("INSERT INTO books (title, author) VALUES ('orphan', 99)"));
+    // What failed, and why, is a key away.
+    try bench.keys("gm");
+    try bench.sees("NOT NULL constraint failed");
+}
+
+test "the trigger form makes a trigger, and it fires" {
+    var bench = try Bench.open(BOOKS ++ "CREATE TABLE log (what TEXT);");
+    defer bench.close();
+    // Name, when, event, table, condition, body: the table is the one that is
+    // open, and the two choices are left at AFTER and INSERT.
+    try bench.keys("j{enter}Tnoted{tab}{tab}{tab}{tab}NEW.year > 1900{tab}");
+    try bench.typed("INSERT INTO log VALUES (NEW.title); INSERT INTO log VALUES ('twice')");
+    try bench.keys("{ctrl-s}");
+    try bench.says("1 statement(s)");
+    try bench.app.conn.exec("INSERT INTO books (title, year) VALUES ('new', 2000), ('old', 1800)");
+    try bench.expectAsked("SELECT what FROM log", "new twice");
+}
+
+test "an index is made from the form, on the column the cursor was in" {
+    var bench = try Bench.open(BOOKS);
+    defer bench.close();
+    try bench.keys("j{enter}llI");
+    try bench.sees("create index");
+    // Named after the table and offered on the column under the cursor.
+    try bench.keys("{ctrl-s}");
+    try bench.expectAsked("SELECT name FROM pragma_index_list('books')", "books_idx");
+    try bench.expectAsked("SELECT name FROM pragma_index_info('books_idx')", "year");
+}
+
+test "the filter form narrows the rows to what was asked for, and W again shows what" {
+    var bench = try Bench.open(BOOKS);
+    defer bench.close();
+    // The raw condition is the tenth field, after three of column, operator
+    // and value.
+    try bench.keys("j{enter}W");
+    try bench.repeat("{tab}", 9);
+    try bench.typed("year < 1930");
+    try bench.keys("{ctrl-s}");
+    try testing.expectEqual(@as(usize, 2), bench.app.grid.rows.items.len);
+    try bench.sees("1-2 of 2");
+    try bench.lacks("Saturnin");
+    // Counting is of what matches, and sorting keeps the filter.
+    try bench.keys("llo");
+    try testing.expectEqual(@as(usize, 2), bench.app.grid.rows.items.len);
+    try testing.expectEqualStrings("RUR", bench.app.grid.rows.items[0].cells[1].text);
+}
+
+test "a connection marked read-only writes nothing, by key or by statement" {
+    var bench = try Bench.openWith(BOOKS, .{ .connections = "library\t{dir}/bench.db\tread-only\n" });
+    defer bench.close();
+    try testing.expect(bench.app.read_only);
+    try bench.keys("j{enter}x");
+    try testing.expect(bench.app.report.status_error);
+    try bench.says("read-only");
+    try bench.keys("e");
+    try testing.expect(bench.app.typing.prompt == null);
+    try bench.keys("i");
+    try testing.expect(bench.app.typing.form == null);
+
+    // What is typed is read before it is run: a write is refused, a read runs.
+    try bench.keys("s");
+    try bench.typed("delete from books");
+    try bench.keys("{ctrl-s}");
+    try bench.says("read-only");
+    try bench.keys("{esc}{esc}s{ctrl-u}");
+    try bench.typed("select count(*) from books");
+    try bench.keys("{ctrl-s}");
+    try testing.expectEqualStrings("4", bench.app.grid.rows.items[0].cells[0].text);
+}
+
+test "the whole value opens over the grid, and anything else closes it" {
+    var bench = try Bench.open("CREATE TABLE notes (body TEXT); INSERT INTO notes VALUES ('first line' || char(10) || 'second line');");
+    defer bench.close();
+    try bench.keys("{enter}");
+    // One line in the grid, whatever was in it.
+    try bench.sees("first line second line");
+    try bench.keys("gv");
+    try testing.expect(bench.app.detail);
+    // And the value as it is in the box.
+    try bench.sees("│ first line");
+    try bench.sees("│ second line");
+    try bench.keys("{esc}");
+    try testing.expect(!bench.app.detail);
+}
+
+test "following reads the table again on the clock, and stays on its end" {
+    var bench = try Bench.open(BOOKS);
+    defer bench.close();
+    try bench.keys("j{enter}R");
+    try testing.expect(bench.app.follow.ms != 0);
+    try bench.app.conn.exec("INSERT INTO books (title, year) VALUES ('Hordubal', 1933)");
+    try bench.lacks("Hordubal");
+    try bench.keys("{tick}");
+    try bench.sees("Hordubal");
+    // Off again with the same key, and a tick that is still on its way does
+    // nothing.
+    try bench.keys("R");
+    try testing.expectEqual(@as(u64, 0), bench.app.follow.ms);
+    try bench.app.conn.exec("DELETE FROM books WHERE title = 'Hordubal'");
+    try bench.keys("{tick}");
+    try bench.sees("Hordubal");
+}
+
+test "a connection is chosen from the list, and the one opened moves to the front" {
+    var bench = try Bench.openWith(BOOKS, .{
+        .on_list = true,
+        .connections = "nowhere\t{dir}/nothing/there.db\nlibrary\t{dir}/bench.db\n",
+    });
+    defer bench.close();
+    try testing.expectEqual(View.connections, bench.app.view);
+    try bench.sees("nowhere");
+    try bench.sees("library");
+    try bench.says("2 saved connection(s)");
+
+    try bench.keys("j{enter}");
+    try testing.expect(bench.app.connected);
+    try bench.sees("authors  1-3 of 3");
+    try testing.expectEqualStrings("library", bench.app.saved.list.items.items[0].name);
+
+    // One that cannot be opened says why, and the list is still there.
+    try bench.keys("Oj{enter}");
+    try testing.expect(bench.app.report.status_error);
+    try bench.says("cannot open");
+    try testing.expectEqual(View.connections, bench.app.view);
+}
+
+test "a list that cannot be written says so when something asked of it is lost" {
+    if (std.c.geteuid() == 0) {
+        return error.SkipZigTest; // nothing refuses root a file
+    }
+    var bench = try Bench.openWith(BOOKS, .{
+        .on_list = true,
+        .connections = "library\t{dir}/bench.db\nother\t{dir}/other.db\n",
+    });
+    defer bench.close();
+    const list = try testing.allocator.dupeSentinel(u8, bench.app.saved.path.items, 0);
+    defer testing.allocator.free(list);
+    try testing.expectEqual(@as(c_int, 0), std.c.chmod(list, 0o444));
+    defer _ = std.c.chmod(list, 0o644);
+
+    // Opening one only moves it to the front: nobody asked for that, and a
+    // list kept read-only on purpose is not complained about for it.
+    try bench.keys("{enter}");
+    try testing.expect(bench.app.connected);
+    try testing.expect(!bench.app.saved.unwritten);
+    try testing.expect(!bench.app.report.status_error);
+
+    // Removing one is somebody's own change, and it did not reach the file.
+    try bench.keys("Ojd");
+    try testing.expect(bench.app.saved.unwritten);
+    try bench.says("could not be written");
+    try bench.sees("not written to");
+
+    // It goes on being said, after the line has been written over by a
+    // connection that opened...
+    try bench.keys("{enter}");
+    try bench.says("could not be written");
+    // ...and stops when a write has gone through, which writes all of it.
+    try testing.expectEqual(@as(c_int, 0), std.c.chmod(list, 0o644));
+    try bench.keys("Or");
+    try testing.expect(!bench.app.saved.unwritten);
+    try bench.keys("O");
+    try bench.sees("saved in");
+    try bench.lacks("not written to");
 }

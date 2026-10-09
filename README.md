@@ -1194,6 +1194,7 @@ permanent.
 | `src/tui/form.zig` | the form widget every dialog is built from |
 | `src/tui/draw.zig` | rendering |
 | `src/tui/input.zig` | the key map and the command palette |
+| `src/tui/bench.zig` | the program with no terminal under it, for the unit tests |
 | `src/tui/connections.zig` | the saved connections and where each keeps its password |
 | `src/db/kafka.zig` | Kafka: the protocol, the compression codecs, TLS and SASL |
 | `src/db/ask.zig` | what the interface asks for, and the SQL it renders to |
@@ -1229,6 +1230,28 @@ that changed; a resize arrives as an event, so there is no polling and no signal
 handler.
 
 ## Testing it
+
+`zig build test` runs the unit tests, and most of what a key does is among them.
+Everything drawn goes into the cells libvaxis keeps, and those need no terminal:
+[src/tui/bench.zig](src/tui/bench.zig) is the loop `main` runs - a key, then a
+frame - over a screen that is only cells, on a SQLite file in a directory of its
+own. A test types a script, reads the screen back as text and asks the database
+what became of it, as fast as the code runs:
+
+```zig
+var bench = try Bench.open(BOOKS);
+defer bench.close();
+try bench.keys("j{enter}jx");
+try bench.says("1 row(s) deleted");
+try bench.expectAsked("SELECT title FROM books ORDER BY id", "RUR Žert Saturnin");
+```
+
+The keys, the forms and the drawing are tested that way, beside the code they
+test. One of them draws every screen at eight window sizes and looks for
+anything past the edge, which is what found the structure of a table falling
+over on a window twenty-four columns wide. What that cannot say is whether a
+terminal would agree - how wide it draws a character, what it sends for a key -
+and that is what the rest of this section is for.
 
 A terminal app cannot be checked by a human on every change, so
 [tests/screen.py](tests/screen.py) runs the binary in a pseudo terminal, feeds it
