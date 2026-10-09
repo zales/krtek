@@ -1189,6 +1189,10 @@ permanent.
 | `src/sqlite.zig` | the SQLite C declarations |
 | `src/tui/term.zig` | the terminal: a thin adapter over libvaxis |
 | `src/tui/app.zig` | state, the loaded page, and everything that runs SQL |
+| `src/tui/forms.zig` | the forms: what each asks, and what is done with the answers |
+| `src/tui/connection_form.zig` | the form a connection is added in, which builds itself again for each engine |
+| `src/tui/dialing.zig` | opening a connection on a thread of its own, with a panel that can be given up on |
+| `src/tui/file_actions.zig` | what the two file panes do: copying, removing, renaming, and asking first |
 | `src/tui/editor.zig` | the SQL editor and the tokenizer that colours it |
 | `src/tui/fuzzy.zig` | the fuzzy match shared by the palette and the filter |
 | `src/tui/form.zig` | the form widget every dialog is built from |

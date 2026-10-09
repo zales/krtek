@@ -9,11 +9,14 @@ const db = @import("db");
 comptime {
     _ = @import("app.zig");
     _ = @import("bench.zig");
+    _ = @import("connection_form.zig");
+    _ = @import("dialing.zig");
     _ = @import("draw.zig");
     _ = @import("ddl.zig");
     _ = @import("connections.zig");
     _ = @import("editor.zig");
     _ = @import("files.zig");
+    _ = @import("forms.zig");
     _ = @import("fuzzy.zig");
     _ = @import("input.zig");
     _ = @import("term.zig");

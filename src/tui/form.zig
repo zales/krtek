@@ -67,7 +67,6 @@ pub const Purpose = enum {
     search_all,
     filter,
     columns,
-    open_file,
     schema,
     connection,
     rename_table,
