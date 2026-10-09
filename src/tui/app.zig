@@ -152,7 +152,7 @@ pub const Palette = struct {
     at: usize = 0,
 };
 
-pub const PromptKind = enum { command, filter, edit, confirm, password, new_dir, rename_file, remove_files, overwrite, go_to, remove_rows };
+pub const PromptKind = enum { command, filter, edit, confirm, password, new_dir, rename_file, remove_files, overwrite, go_to, remove_rows, forget_saved };
 
 pub const Prompt = struct {
     kind: PromptKind,
@@ -593,19 +593,82 @@ const Cursor = struct {
     col: usize = 0,
     row_scroll: usize = 0,
     col_scroll: usize = 0,
-    /// Row indexes ticked with space.
-    marked: std.ArrayList(usize) = .empty,
+    /// The rows ticked with space: what addresses each of them, as a copy of its
+    /// own. They used to be positions on the page, and a position stops being
+    /// the same row the moment the page is read again - turned, sorted, followed
+    /// - so `x` on the next page took a row nobody had ticked and nobody was on.
+    marked: std.ArrayList([]const database.ask.Filter) = .empty,
+    /// Where `V` started a run of them: a row of the page in hand, until `V`
+    /// again ticks everything from there to the cursor.
+    range_from: ?usize = null,
     /// Column indexes put away, by index into the grid's own columns.
     hidden: std.ArrayList(usize) = .empty,
     /// How many rows the grid has room for, as last drawn: what "the middle of
     /// the screen" and "the bottom of it" are measured in.
     page: usize = 1,
 
+    /// Untick every row.
+    pub fn unmark(self: *Cursor, allocator: std.mem.Allocator) void {
+        for (self.marked.items) |key| {
+            freeFilters(allocator, key);
+        }
+        self.marked.clearRetainingCapacity();
+        self.range_from = null;
+    }
+
     fn deinit(self: *Cursor, allocator: std.mem.Allocator) void {
+        self.unmark(allocator);
         self.marked.deinit(allocator);
         self.hidden.deinit(allocator);
     }
 };
+
+/// A copy of what addresses a row, held by itself rather than in the arena of
+/// the page the row was read into.
+pub fn ownFilters(allocator: std.mem.Allocator, filters: []const database.ask.Filter) ![]const database.ask.Filter {
+    const out = try allocator.alloc(database.ask.Filter, filters.len);
+    var made: usize = 0;
+    errdefer {
+        for (out[0..made]) |one| {
+            allocator.free(one.column);
+            allocator.free(one.value);
+        }
+        allocator.free(out);
+    }
+    for (filters, out) |filter, *copy| {
+        const column = try allocator.dupe(u8, filter.column);
+        errdefer allocator.free(column);
+        copy.* = .{
+            .column = column,
+            .op = filter.op,
+            .value = try allocator.dupe(u8, filter.value),
+            .as_text = filter.as_text,
+        };
+        made += 1;
+    }
+    return out;
+}
+
+pub fn freeFilters(allocator: std.mem.Allocator, filters: []const database.ask.Filter) void {
+    for (filters) |one| {
+        allocator.free(one.column);
+        allocator.free(one.value);
+    }
+    allocator.free(filters);
+}
+
+/// Whether two keys address the same row.
+pub fn sameFilters(a: []const database.ask.Filter, b: []const database.ask.Filter) bool {
+    if (a.len != b.len) {
+        return false;
+    }
+    for (a, b) |one, other| {
+        if (one.op != other.op or !std.mem.eql(u8, one.column, other.column) or !std.mem.eql(u8, one.value, other.value)) {
+            return false;
+        }
+    }
+    return true;
+}
 
 /// The table on the screen: which one it is, what its columns are, the page
 /// of rows in hand and how that page was asked for.
@@ -812,6 +875,8 @@ pub const App = struct {
     report: Reporting,
 
     quit: bool = false,
+    /// When ctrl+c was last pressed with nothing to stop, in milliseconds.
+    interrupted: f64 = -1e12,
 
     saved: Saved,
     palette: ?Palette = null,
@@ -877,12 +942,13 @@ pub const App = struct {
         } else {
             const found = self.saved.list.items.items.len - self.saved.list.savedCount();
             if (found != 0) {
-                self.say("{d} saved, {d} from the kubeconfig - enter connects, a adds, d removes", .{
+                self.say("{d} saved, {d} from the kubeconfig - enter connects, a adds, x removes", .{
                     self.saved.list.savedCount(),
                     found,
                 });
             } else {
-                self.say("{d} saved connection(s) - enter connects, a adds, d removes", .{self.saved.list.items.items.len});
+                const count = self.saved.list.items.items.len;
+                self.say("{d} saved connection{s} - enter connects, a adds, x removes", .{ count, plural(count) });
             }
         }
         return self;
@@ -1016,7 +1082,7 @@ pub const App = struct {
         self.clearConditions();
         self.grid.where_text.clearRetainingCapacity();
         self.cursor.hidden.clearRetainingCapacity();
-        self.cursor.marked.clearRetainingCapacity();
+        self.cursor.unmark(self.allocator);
         self.sidebar.selected = 0;
         self.grid.page = 0;
         self.view = .grid;
@@ -1528,6 +1594,9 @@ pub const App = struct {
         }
     }
 
+    /// `x` on a saved connection: asked about before it goes, because what goes
+    /// with it - the password in the keychain - is not somewhere to get it back
+    /// from, and the key beside this one in the grid only shows a table's rows.
     pub fn forgetSaved(self: *App) !void {
         const chosen = self.chosenSaved() orelse return;
         const going = self.saved.list.items.items[chosen];
@@ -1535,6 +1604,23 @@ pub const App = struct {
         // it came from is where it lives.
         if (going.found) {
             self.complain("{s} comes from the kubeconfig - remove the context there", .{going.name});
+            return;
+        }
+        if (self.typing.prompt) |*old| {
+            old.buffer.deinit(self.allocator);
+        }
+        self.typing.prompt = .{ .kind = .forget_saved, .label = " type y to remove: " };
+        self.say("remove {s} from the list{s}?", .{
+            going.name,
+            if (going.keeps.inKeychain()) ", and its password from the keychain" else "",
+        });
+    }
+
+    /// And after the yes.
+    pub fn forgetSavedNow(self: *App) !void {
+        const chosen = self.chosenSaved() orelse return;
+        const going = self.saved.list.items.items[chosen];
+        if (going.found) {
             return;
         }
         var name: [128]u8 = undefined;
@@ -2207,6 +2293,8 @@ pub const App = struct {
             self.allocator.free(old);
         }
         self.grid.name = if (name) |value| try self.allocator.dupe(u8, value) else null;
+        // What was ticked was ticked in the table this stops being.
+        self.cursor.unmark(self.allocator);
         // A table on the grid is not a statement's rows any more, so nothing is
         // left behind for `r` to run instead of reading the table.
         if (name != null) {
@@ -2399,7 +2487,7 @@ pub const App = struct {
             self.grid.order = null;
         }
         self.grid.descending = false;
-        self.cursor.marked.clearRetainingCapacity();
+        self.cursor.unmark(self.allocator);
         self.cursor.hidden.clearRetainingCapacity();
         self.clearConditions();
         self.grid.where_text.clearRetainingCapacity();
@@ -2713,22 +2801,109 @@ pub const App = struct {
         self.grid.clearConditions(self.allocator);
     }
 
+    /// Show the whole table again.
+    pub fn clearRowFilter(self: *App) !void {
+        self.clearConditions();
+        self.grid.where_text.clearRetainingCapacity();
+        self.grid.page = 0;
+        try self.reload();
+        if (!self.grid.failed) {
+            self.say("the filter is off", .{});
+        }
+    }
+
     pub fn isHidden(self: *App, column: usize) bool {
         return std.mem.findScalar(usize, self.cursor.hidden.items, column) != null;
     }
 
-    pub fn isMarked(self: *App, row: usize) bool {
-        return std.mem.findScalar(usize, self.cursor.marked.items, row) != null;
+    /// Where in the list of ticked rows this key is, if it is there.
+    fn markedAt(self: *App, key: []const database.ask.Filter) ?usize {
+        for (self.cursor.marked.items, 0..) |one, at| {
+            if (sameFilters(one, key)) {
+                return at;
+            }
+        }
+        return null;
     }
 
+    /// Whether the row at this place on the page is ticked - or is about to be,
+    /// lying between where `V` was pressed and the cursor.
+    pub fn isMarked(self: *App, row: usize) bool {
+        if (row >= self.grid.rows.items.len) {
+            return false;
+        }
+        if (self.cursor.range_from) |from| {
+            if (row >= @min(from, self.cursor.row) and row <= @max(from, self.cursor.row)) {
+                return true;
+            }
+        }
+        if (self.cursor.marked.items.len == 0) {
+            return false;
+        }
+        const key = self.grid.rows.items[row].key orelse return false;
+        return self.markedAt(key) != null;
+    }
+
+    /// Tick the row under the cursor, or untick it, and step to the next one -
+    /// which is what makes ticking a run of them one key held down.
     pub fn toggleMark(self: *App) !void {
         if (self.cursor.row >= self.grid.rows.items.len) {
             return;
         }
-        if (std.mem.findScalar(usize, self.cursor.marked.items, self.cursor.row)) |at| {
-            _ = self.cursor.marked.orderedRemove(at);
+        const key = self.grid.rows.items[self.cursor.row].key orelse {
+            self.complain("these rows cannot be addressed, so there is nothing to mark one by", .{});
+            return;
+        };
+        self.cursor.range_from = null;
+        if (self.markedAt(key)) |at| {
+            freeFilters(self.allocator, self.cursor.marked.orderedRemove(at));
         } else {
-            try self.cursor.marked.append(self.allocator, self.cursor.row);
+            const copy = try ownFilters(self.allocator, key);
+            errdefer freeFilters(self.allocator, copy);
+            try self.cursor.marked.append(self.allocator, copy);
+        }
+        if (self.cursor.row + 1 < self.grid.rows.items.len) {
+            self.cursor.row += 1;
+        }
+        self.sayMarked();
+    }
+
+    /// `V`: the first time it says where a run starts, the second time it ticks
+    /// every row from there to the cursor.
+    pub fn markRange(self: *App) !void {
+        if (self.cursor.row >= self.grid.rows.items.len) {
+            return;
+        }
+        if (self.grid.rows.items[self.cursor.row].key == null) {
+            self.complain("these rows cannot be addressed, so there is nothing to mark one by", .{});
+            return;
+        }
+        const from = self.cursor.range_from orelse {
+            self.cursor.range_from = self.cursor.row;
+            self.say("marking from this row - move, and V again marks them all (esc gives up)", .{});
+            return;
+        };
+        self.cursor.range_from = null;
+        const first = @min(from, self.cursor.row);
+        const last = @min(@max(from, self.cursor.row), self.grid.rows.items.len - 1);
+        for (self.grid.rows.items[first .. last + 1]) |row| {
+            const key = row.key orelse continue;
+            if (self.markedAt(key) != null) {
+                continue;
+            }
+            const copy = try ownFilters(self.allocator, key);
+            errdefer freeFilters(self.allocator, copy);
+            try self.cursor.marked.append(self.allocator, copy);
+        }
+        self.sayMarked();
+    }
+
+    fn sayMarked(self: *App) void {
+        const count = self.cursor.marked.items.len;
+        if (count == 0) {
+            self.say("nothing marked", .{});
+        } else {
+            self.say("{d} marked - x deletes them, esc unmarks", .{count});
         }
     }
 
@@ -2768,25 +2943,37 @@ pub const App = struct {
             self.complain("these rows cannot be addressed, so they are read-only", .{});
             return;
         }
-        if (self.grid.rows.items.len == 0) {
+        const marked = self.cursor.marked.items.len;
+        if (self.grid.rows.items.len == 0 and marked == 0) {
             self.complain("there is no row here", .{});
             return;
         }
-        // Where nothing takes a delete back - a row that is a file, a row that is a
-        // Kubernetes object - it is asked about first. A database row goes as it
-        // always has, because a transaction is there to take it out of.
+        self.cursor.range_from = null;
+        // Nothing here takes a delete back, so none of them happens on one key.
+        // Several at once, and anything the engine has no way of undoing - a row
+        // that is a file, a row that is a Kubernetes object - are asked about in
+        // so many words. One row of a table is asked about the way vi asks
+        // about a line: by the same key again, which a slip of the hand does
+        // not press twice.
         const allowed = self.caps();
-        if (self.conn.files() != null or allowed.final_deletes) {
-            const count = if (self.cursor.marked.items.len != 0) self.cursor.marked.items.len else @as(usize, 1);
+        const final = self.conn.files() != null or allowed.final_deletes;
+        if (marked != 0 or final) {
+            const count = if (marked != 0) marked else @as(usize, 1);
             const noun = if (self.conn.files() != null) "file" else allowed.row_noun;
             if (self.typing.prompt) |*old| {
                 old.buffer.deinit(self.allocator);
             }
             self.typing.prompt = .{ .kind = .remove_rows, .label = " type y to delete: " };
-            self.say("delete {d} {s}{s}?", .{ count, noun, if (count == 1) "" else "s" });
+            self.say("delete {d} {s}{s}{s}?", .{
+                count,
+                if (marked != 0) "marked " else "",
+                noun,
+                plural(count),
+            });
             return;
         }
-        try self.deleteRowsNow();
+        self.typing.prefix = 'x';
+        self.say("x again deletes this {s} - any other key leaves it", .{allowed.row_noun});
     }
 
     pub fn deleteRowsNow(self: *App) !void {
@@ -2797,28 +2984,46 @@ pub const App = struct {
             self.complain("{s}", .{self.caps().no_delete});
             return;
         }
-        var targets: std.ArrayList(usize) = .empty;
-        defer targets.deinit(self.allocator);
-        if (self.cursor.marked.items.len != 0) {
-            try targets.appendSlice(self.allocator, self.cursor.marked.items);
-        } else if (self.cursor.row < self.grid.rows.items.len) {
-            try targets.append(self.allocator, self.cursor.row);
-        } else {
-            return;
-        }
         var deleted: usize = 0;
-        for (targets.items) |index| {
-            if (index >= self.grid.rows.items.len) {
-                continue;
+        if (self.cursor.marked.items.len != 0) {
+            // By what addresses each of them, not by where on the page it was:
+            // a ticked row may be on another page by now, and is the same row.
+            // One that could not be deleted keeps its tick, and the rest of them
+            // theirs, so what is still ticked is what is still there.
+            var failed = false;
+            while (self.cursor.marked.items.len != 0) {
+                const key = self.cursor.marked.items[0];
+                (try self.change(.{ .kind = .delete, .table = table, .where = key })) orelse {
+                    failed = true;
+                    break;
+                };
+                freeFilters(self.allocator, self.cursor.marked.orderedRemove(0));
+                deleted += 1;
             }
-            const key = self.grid.rows.items[index].key orelse continue;
+            var why: std.ArrayList(u8) = .empty;
+            defer why.deinit(self.allocator);
+            if (failed) {
+                try why.appendSlice(self.allocator, self.report.status.items);
+            }
+            try self.loadObjects();
+            try self.reload();
+            if (failed) {
+                self.complain("{d} row{s} deleted, then: {s}", .{ deleted, plural(deleted), why.items });
+                return;
+            }
+        } else {
+            if (self.cursor.row >= self.grid.rows.items.len) {
+                return;
+            }
+            const key = self.grid.rows.items[self.cursor.row].key orelse return;
             try self.change(.{ .kind = .delete, .table = table, .where = key }) orelse return;
-            deleted += 1;
+            deleted = 1;
+            try self.loadObjects();
+            try self.reload();
         }
-        self.cursor.marked.clearRetainingCapacity();
-        try self.loadObjects();
-        try self.reload();
-        self.say("{d} row(s) deleted", .{deleted});
+        if (!self.grid.failed) {
+            self.say("{d} row{s} deleted", .{ deleted, plural(deleted) });
+        }
     }
 
     /// Put a cursor's rows on the grid. With `hidden_key` the first column
@@ -3504,6 +3709,9 @@ pub const App = struct {
         if (is(verb, &.{ "q", "quit", "q!", "quit!" })) {
             self.leave();
             return;
+        } else if (is(verb, &.{ "qa", "qall", "qa!", "qall!", "quitall" })) {
+            self.quit = true;
+            return;
         } else if (is(verb, &.{ "tabnew", "tabe", "tabedit" })) {
             try self.newTab(if (argument.len != 0) argument else null);
             return;
@@ -3660,16 +3868,47 @@ pub const App = struct {
     /// `:q`, from the inside out: the editor if it is open, then this tab if
     /// there are others, then whatever screen is over the grid, and the program
     /// only when there is nothing left to leave.
-    fn leave(self: *App) void {
+    /// `q` and `:q`: out of whatever is in front, and out of the program only
+    /// when nothing is.
+    ///
+    /// `q` used to end the program from wherever it was pressed - from the key
+    /// map, where it is what closes every pager there is, and with five tabs
+    /// open behind it. What is in front goes first: the editor, a screen that
+    /// is not the grid, then the tab, and the program after the last of them.
+    pub fn leave(self: *App) void {
         if (self.typing.editor != null) {
             self.closeEditor();
-        } else if (self.tabs.items.len > 1) {
-            self.closeTab(self.active_tab);
+        } else if (self.detail) {
+            self.detail = false;
+        } else if (self.view == .object) {
+            self.closeObject();
+        } else if (self.view == .files) {
+            self.closeFiles();
+        } else if (self.view == .help) {
+            self.view = if (self.files != null) .files else self.home();
         } else if (self.connected and self.view != .grid) {
             self.view = .grid;
+        } else if (self.tabs.items.len > 1) {
+            self.closeTab(self.active_tab);
         } else {
             self.quit = true;
         }
+    }
+
+    /// `ctrl+c` where there is nothing for it to stop: the second one, close
+    /// behind the first, ends the program.
+    ///
+    /// The same key gives up on a statement that is running, and one pressed
+    /// just as the statement finishes arrives here instead. It used to end the
+    /// program at once - every tab, for having been a moment late.
+    pub fn interrupt(self: *App) void {
+        const now = monotonicMs();
+        if (now - self.interrupted < 2000) {
+            self.quit = true;
+            return;
+        }
+        self.interrupted = now;
+        self.say("ctrl+c again quits", .{});
     }
 
     fn goToRow(self: *App, row: usize) void {
@@ -5109,6 +5348,12 @@ pub fn connectionMatches(name: []const u8, target: []const u8, needle: []const u
     }
     return fuzzy.match(name, needle, null) != null or
         std.ascii.findIgnoreCase(target, needle) != null;
+}
+
+/// The `s` a count of anything but one takes. "1 row(s)" is a program that
+/// has the number in its hand and will not look at it.
+pub fn plural(count: anytype) []const u8 {
+    return if (count == 1) "" else "s";
 }
 
 pub fn divCeil(a: usize, b: usize) usize {

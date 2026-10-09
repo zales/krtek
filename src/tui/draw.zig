@@ -669,7 +669,16 @@ fn grid(app: *App, size: Size, side: usize, rows: usize) void {
     }
     if (!app.grid.editable and app.grid.rows.items.len > 0) {
         screen.style(.{ .fg = C.faint });
-        used += write(app, "   read-only", width - used);
+        used += write(app, "   read-only", width -| used);
+    }
+    if (app.cursor.marked.items.len != 0) {
+        // However many of them are on this page. A ticked row on another page
+        // is still ticked, and `x` still means it: the count is what says so
+        // when none of them is in sight.
+        screen.style(.{ .fg = C.warn, .bold = true });
+        var ticked: [32]u8 = undefined;
+        const text = std.mem.print(&ticked, "   {d} marked", .{app.cursor.marked.items.len}) catch "   marked";
+        used += write(app, text, width -| used);
     }
     screen.clearToEol();
 
@@ -715,6 +724,10 @@ fn grid(app: *App, size: Size, side: usize, rows: usize) void {
         }
         const row = app.grid.rows.items[r];
         const on_row = r == app.cursor.row and app.focus == .main;
+        // A ticked row is in the colour that means "mind this" from end to end,
+        // with the sign the file panes put on theirs in front of it: a tick that
+        // could not be seen was a row waiting to be deleted by surprise.
+        const marked = app.isMarked(r);
         for (plan.widths, 0..) |w, n| {
             const index = plan.columns[n];
             if (index >= row.cells.len) {
@@ -724,10 +737,11 @@ fn grid(app: *App, size: Size, side: usize, rows: usize) void {
             const on_cell = on_row and index == app.cursor.col;
             screen.style(.{
                 .bg = if (on_cell) C.accent else if (on_row) C.selected else null,
-                .fg = if (on_cell) 16 else cell.colour(),
+                .fg = if (on_cell) 16 else if (marked) C.warn else cell.colour(),
                 .italic = cell.kind == .nul,
+                .bold = marked and !on_cell,
             });
-            screen.put(" ");
+            screen.put(if (marked and n == 0) "*" else " ");
             pad(app, cell.text, w, cell.kind == .int or cell.kind == .float);
         }
         screen.reset();
@@ -1093,7 +1107,8 @@ pub const HELP = [_][2][]const u8{
     .{ "gm", "report of the last batch" },
     .{ "r", "reload" },
     .{ "R", "follow: read it again, staying at the end" },
-    .{ "q ctrl+c", "quit" },
+    .{ "q", "out of what is in front, then the tab, then the program" },
+    .{ "ctrl+c ctrl+c", "quit, whatever is open" },
     .{ "", "TABS" },
     .{ "ctrl+t", "a new tab; t on a saved connection opens it in one" },
     .{ "] [ gt gT", "next, previous tab" },
@@ -1105,8 +1120,9 @@ pub const HELP = [_][2][]const u8{
     .{ "gv", "show the whole value; arrows scroll a long one" },
     .{ "e", "edit the cell, NULL clears it" },
     .{ "i gy", "insert, clone a row" },
-    .{ "space v", "mark a row" },
-    .{ "x", "delete the marked rows" },
+    .{ "space", "mark a row, and unmark it" },
+    .{ "V", "mark a run: V, move, V again" },
+    .{ "x", "delete the marked rows, asked first; x x the row here" },
     .{ "o", "order by this column" },
     .{ "gw W", "visible columns, filter" },
     .{ "", "SCHEMA" },
@@ -1704,6 +1720,7 @@ fn footerHints(app: *App) []const u8 {
                 " v value  w columns  y clone  m messages  b info  L relations  M import  V view",
             ),
             'z' => " t this row to the top   z the middle   b the bottom   esc nothing",
+            'x' => " x deletes this row   esc nothing",
             'm' => " a-z leaves that mark on this row   esc nothing",
             '\'' => " a-z goes back to that mark   esc nothing",
             0x17 => " h list   l grid   w the other   q close tab   o close others   t new tab",
@@ -1766,8 +1783,8 @@ fn footerHints(app: *App) []const u8 {
     return switch (app.view) {
         .connections => fitted(
             app,
-            " enter connect   t in a new tab   / filter   a add   e edit   d remove   r read-only   q quit",
-            " enter connect   t new tab   / filter   a add   e edit   d remove   r read-only",
+            " enter connect   t in a new tab   / filter   a add   e edit   x remove   r read-only   q quit",
+            " enter connect   t new tab   / filter   a add   e edit   x remove   r read-only",
         ),
         // Only what the engine will do: a key in this line that answers with a
         // refusal is a line that was wrong.

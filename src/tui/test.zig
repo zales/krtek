@@ -356,7 +356,7 @@ test "a tab gives back everything it holds" {
         .column = try a.dupe(u8, "born"),
         .value = try a.dupe(u8, "1900"),
     });
-    try tab.cursor.marked.append(a, 3);
+    try tab.cursor.marked.append(a, try app.ownFilters(a, &.{.{ .column = "id", .value = "3" }}));
     try tab.cursor.hidden.append(a, 1);
     tab.marks[0] = .{ .table = try a.dupe(u8, "authors"), .row = 2 };
     tab.marks[25] = .{ .table = null, .row = 7 };

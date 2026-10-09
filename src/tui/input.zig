@@ -67,11 +67,11 @@ pub fn handle(app: *App, key: Key, size: term.Size) !void {
         }
         switch (key) {
             .ctrl => |code| if (code == 'c') {
-                app.quit = true;
+                app.interrupt();
             },
             .escape => app.view = .connections,
             .char => |point| switch (point) {
-                'q' => app.quit = true,
+                'q' => app.leave(),
                 '?' => app.view = .connections,
                 ':' => try ask(app, .command, " :"),
                 else => {},
@@ -113,8 +113,9 @@ pub fn handle(app: *App, key: Key, size: term.Size) !void {
                 else => app.detail = false,
             },
             .escape, .enter => app.detail = false,
+            // What ctrl+c does to anything that is open over the grid.
             .ctrl => |code| if (code == 'c') {
-                app.quit = true;
+                app.detail = false;
             },
             else => {},
         }
@@ -123,7 +124,7 @@ pub fn handle(app: *App, key: Key, size: term.Size) !void {
 
     switch (key) {
         .ctrl => |code| switch (code) {
-            'c' => app.quit = true,
+            'c' => app.interrupt(),
             't' => try app.newTab(null),
             'w' => app.typing.prefix = WINDOW,
             'd', 'f' => try movePage(app, 1),
@@ -134,12 +135,25 @@ pub fn handle(app: *App, key: Key, size: term.Size) !void {
         },
         .mouse => |mouse| try click(app, mouse, size),
         .tab, .back_tab => app.focus = if (app.focus == .sidebar) .main else .sidebar,
+        // One thing at a time, the nearest first: the screen that is not the
+        // grid, then whatever was started on the rows and not finished, then
+        // what narrows the list. The grid says `esc clears it` under a filter
+        // that matches nothing, so the filter is on the list too - last, and
+        // only where nothing is on screen for it to have been pressed at.
         .escape => {
             if (app.view != .grid) {
                 app.view = .grid;
+            } else if (app.cursor.range_from != null) {
+                app.cursor.range_from = null;
+                app.say("nothing marked", .{});
+            } else if (app.cursor.marked.items.len != 0) {
+                app.cursor.unmark(app.allocator);
+                app.say("unmarked", .{});
             } else if (app.sidebar.filter.items.len > 0) {
                 app.sidebar.filter.clearRetainingCapacity();
                 app.sidebar.selected = 0;
+            } else if (app.isFiltered() and app.grid.rows.items.len == 0) {
+                try app.clearRowFilter();
             }
         },
         .up => try move(app, -1),
@@ -700,11 +714,18 @@ fn afterPrefix(app: *App, pending: u21, key: Key) !void {
         else => {
             if (pending == 'y') {
                 app.say("nothing copied", .{});
+            } else if (pending == 'x') {
+                app.say("left alone", .{});
             }
             return;
         },
     };
     switch (pending) {
+        'x' => if (point == 'x') {
+            try app.deleteRowsNow();
+        } else {
+            app.say("left alone", .{});
+        },
         'y' => switch (point) {
             'c' => try dump_mod.copyCell(app),
             'r', 'y' => try dump_mod.copyRow(app),
@@ -859,7 +880,7 @@ fn onConnections(app: *App, key: Key) !void {
     const count = app.savedCount();
     switch (key) {
         .ctrl => |code| switch (code) {
-            'c' => app.quit = true,
+            'c' => app.interrupt(),
             't' => try app.newTab(null),
             'w' => app.typing.prefix = WINDOW,
             'd', 'f' => app.saved.at = @min(app.saved.at + app.saved.page(), count -| 1),
@@ -867,7 +888,7 @@ fn onConnections(app: *App, key: Key) !void {
             else => {},
         },
         .char => |point| switch (point) {
-            'q' => app.quit = true,
+            'q' => app.leave(),
             't' => try app.connectSavedInNewTab(),
             'a' => try app.openConnectionForm(false),
             'e' => try app.openConnectionForm(true),
@@ -876,7 +897,9 @@ fn onConnections(app: *App, key: Key) !void {
             ':' => try ask(app, .command, " :"),
             ']' => app.nextTab(),
             '[' => app.prevTab(),
-            'd' => try app.forgetSaved(),
+            // `x` is what removes, here as on a row and on a file. `d` did it
+            // before, and still does - asked about first now, like the other.
+            'x', 'd' => try app.forgetSaved(),
             'j' => if (count != 0 and app.saved.at + 1 < count) {
                 app.saved.at += 1;
             },
@@ -1075,7 +1098,7 @@ fn perform(app: *App, does: Does) !void {
         return;
     }
     switch (does) {
-        .quit => app.quit = true,
+        .quit => app.leave(),
         .help => if (app.view == .help) {
             // Back to wherever the question was asked from, which is the file
             // manager when that is what is open.
@@ -1175,7 +1198,8 @@ fn letter(app: *App, point: u21) !void {
     switch (point) {
         // The same thing under a second key.
         't' => try perform(app, .browse),
-        ' ', 'v', 'V' => try perform(app, .mark),
+        ' ' => try perform(app, .mark),
+        'V' => try app.markRange(),
         'C' => try perform(app, .yank),
 
         'j' => try move(app, 1),
@@ -1365,7 +1389,7 @@ fn onObject(app: *App, key: Key) !void {
         },
         .char => |point| {
             if (point == 'q') {
-                app.quit = true;
+                app.leave();
                 return;
             }
             for (app.object.actions) |action| {
@@ -1398,7 +1422,7 @@ fn onObject(app: *App, key: Key) !void {
             else => {},
         },
         .ctrl => |code| switch (code) {
-            'c' => app.quit = true,
+            'c' => app.interrupt(),
             'k', 'p' => try openPalette(app),
             else => {},
         },
@@ -1501,7 +1525,7 @@ fn onFiles(app: *App, key: Key) !void {
     const pane = manager.here();
     switch (key) {
         .ctrl => |code| switch (code) {
-            'c' => app.quit = true,
+            'c' => app.interrupt(),
             'd' => pane.move(10),
             'u' => pane.move(-10),
             else => {},
@@ -1652,6 +1676,13 @@ fn typing(app: *App, key: Key) !void {
                 .remove_rows => {
                     if (line.len != 0 and (line[0] == 'y' or line[0] == 'Y')) {
                         try app.deleteRowsNow();
+                    } else {
+                        app.say("left alone", .{});
+                    }
+                },
+                .forget_saved => {
+                    if (line.len != 0 and (line[0] == 'y' or line[0] == 'Y')) {
+                        try app.forgetSavedNow();
                     } else {
                         app.say("left alone", .{});
                     }
