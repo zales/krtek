@@ -8,6 +8,7 @@ const term = @import("term.zig");
 const database = @import("db");
 const dump_mod = @import("dump.zig");
 const draw = @import("draw.zig");
+const line_mod = @import("line.zig");
 
 const App = app_mod.App;
 const Key = term.Key;
@@ -832,33 +833,19 @@ fn onPalette(app: *App, key: Key) !void {
         .escape => closePalette(app),
         .ctrl => |code| switch (code) {
             'c', 'k' => closePalette(app),
-            'u' => {
-                palette.query.clearRetainingCapacity();
-                palette.at = 0;
-            },
             'n' => if (count != 0 and palette.at + 1 < count) {
                 palette.at += 1;
             },
             'p' => if (palette.at > 0) {
                 palette.at -= 1;
             },
-            else => {},
+            else => try typeInPalette(app, key),
         },
         .down => if (count != 0 and palette.at + 1 < count) {
             palette.at += 1;
         },
         .up => if (palette.at > 0) {
             palette.at -= 1;
-        },
-        .backspace => {
-            if (palette.query.items.len > 0) {
-                var cut = palette.query.items.len - 1;
-                while (cut > 0 and palette.query.items[cut] & 0xc0 == 0x80) {
-                    cut -= 1;
-                }
-                palette.query.shrinkRetainingCapacity(cut);
-                palette.at = 0;
-            }
         },
         .enter => {
             if (palette.at >= count) {
@@ -876,13 +863,16 @@ fn onPalette(app: *App, key: Key) !void {
             }
             try perform(app, action.does);
         },
-        .char => |point| {
-            var buf: [4]u8 = undefined;
-            const len = std.unicode.utf8Encode(point, &buf) catch return;
-            try palette.query.appendSlice(app.allocator, buf[0..len]);
-            palette.at = 0;
-        },
-        else => {},
+        else => try typeInPalette(app, key),
+    }
+}
+
+/// A key that is the query's own. What it says having changed, the best match
+/// is the first again.
+fn typeInPalette(app: *App, key: Key) !void {
+    const palette = &app.palette.?;
+    if (try line_mod.key(app.allocator, &palette.query, &palette.caret, key) == .changed) {
+        palette.at = 0;
     }
 }
 
@@ -1832,7 +1822,10 @@ fn typing(app: *App, key: Key) !void {
                         app.clearPending();
                     }
                 },
-                .command => try app.command(line),
+                .command => {
+                    app.rememberCommand(line);
+                    try app.command(line);
+                },
                 .edit => try app.saveCell(line),
                 .new_dir => if (line.len != 0) try app.makeFileDir(line),
                 .go_to => if (line.len != 0) try app.goToPath(line),
@@ -1867,50 +1860,43 @@ fn typing(app: *App, key: Key) !void {
                 },
             }
         },
-        .backspace => {
-            if (prompt.buffer.items.len > 0) {
-                // Remove a whole codepoint, not a byte.
-                var cut = prompt.buffer.items.len - 1;
-                while (cut > 0 and prompt.buffer.items[cut] & 0xc0 == 0x80) {
-                    cut -= 1;
-                }
-                prompt.buffer.shrinkRetainingCapacity(cut);
-                try refilter(app);
+        .ctrl => |name| if (name == 'c') {
+            if (prompt.kind == .find) {
+                app.findOff(true);
             }
+            close(app);
+            return;
         },
-        .ctrl => |name| switch (name) {
-            'c' => close(app),
-            'u' => {
-                prompt.buffer.clearRetainingCapacity();
-                try refilter(app);
-            },
-            else => {},
-        },
+        // What was typed after `:` before, and only there. These brought the
+        // statements back into whatever line was open - a value being edited,
+        // a password - which is somewhere they were never typed.
         .up, .down => {
-            if (app.history.items.len == 0) {
+            if (prompt.kind != .command or app.commands.items.len == 0) {
                 return;
             }
-            const last = app.history.items.len - 1;
+            const last = app.commands.items.len - 1;
             const at = switch (key) {
                 .up => if (prompt.history_at) |value| (if (value == 0) 0 else value - 1) else last,
                 else => if (prompt.history_at) |value| (if (value >= last) last else value + 1) else last,
             };
             prompt.history_at = at;
             prompt.buffer.clearRetainingCapacity();
-            try prompt.buffer.appendSlice(app.allocator, app.history.items[at]);
-        },
-        .char => |point| {
-            var buf: [4]u8 = undefined;
-            const len = std.unicode.utf8Encode(point, &buf) catch return;
-            try prompt.buffer.appendSlice(app.allocator, buf[0..len]);
-            try refilter(app);
+            try prompt.buffer.appendSlice(app.allocator, app.commands.items[at]);
+            prompt.at = line_mod.END;
+            return;
         },
         .tab => {
             if (prompt.kind == .edit) {
-                try prompt.buffer.append(app.allocator, ' ');
+                try line_mod.insert(app.allocator, &prompt.buffer, &prompt.at, " ");
             }
+            return;
         },
         else => {},
+    }
+    // Everything else is the line's: where the cursor goes in it, and what is
+    // put in and taken out there.
+    if (try line_mod.key(app.allocator, &prompt.buffer, &prompt.at, key) == .changed) {
+        try refilter(app);
     }
 }
 

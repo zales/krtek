@@ -11,6 +11,7 @@ const dump_mod = @import("dump.zig");
 const Editor = @import("editor.zig").Editor;
 const sql_syntax = @import("editor.zig");
 const fuzzy = @import("fuzzy.zig");
+const line_mod = @import("line.zig");
 const conns = @import("connections.zig");
 const keychain = @import("keychain.zig");
 const biometry = @import("biometry.zig");
@@ -149,6 +150,8 @@ const MECHANISMS = [_][]const u8{ "", "PLAIN", "SCRAM-SHA-256", "SCRAM-SHA-512" 
 /// Its entries live in `input.zig`, next to the keys they stand for.
 pub const Palette = struct {
     query: std.ArrayList(u8) = .empty,
+    /// Where in the query the typing is.
+    caret: usize = line_mod.END,
     at: usize = 0,
 };
 
@@ -158,6 +161,8 @@ pub const Prompt = struct {
     kind: PromptKind,
     label: []const u8,
     buffer: std.ArrayList(u8) = .empty,
+    /// Where in the buffer the typing is.
+    at: usize = line_mod.END,
     history_at: ?usize = null,
 };
 
@@ -534,6 +539,11 @@ const Typing = struct {
     /// pressed twice to be sure of being in normal mode - so closing it cannot be
     /// what throws a statement away. The next time it opens, this is in it.
     draft: std.ArrayList(u8) = .empty,
+    /// What the engine said about the first statement of the last run that it
+    /// would not take, all of it. The editor stays open over a run that failed
+    /// and shows this under what was typed: the statement and what is wrong
+    /// with it are then on the screen together, which they never were.
+    failure: std.ArrayList(u8) = .empty,
 
     fn deinit(self: *Typing, allocator: std.mem.Allocator) void {
         if (self.prompt) |*prompt| {
@@ -547,6 +557,7 @@ const Typing = struct {
         }
         self.pending.deinit(allocator);
         self.draft.deinit(allocator);
+        self.failure.deinit(allocator);
         self.arena.deinit();
     }
 };
@@ -903,6 +914,10 @@ pub const App = struct {
     help: Help = .{},
     pager: Pager = .{},
     history: std.ArrayList([]const u8) = .empty,
+    /// What was typed after `:`, for the arrows there to bring back. Apart from
+    /// the statements, which is what those arrows brought back before: an
+    /// `update` in the line that takes `limit 50`, and in a password.
+    commands: std.ArrayList([]const u8) = .empty,
     report: Reporting,
 
     quit: bool = false,
@@ -1249,6 +1264,7 @@ pub const App = struct {
             open.deinit();
         }
         self.typing.editor = null;
+        self.typing.failure.clearRetainingCapacity();
     }
 
     /// Run what is in the editor and close it, so the result is what is on
@@ -1281,14 +1297,27 @@ pub const App = struct {
             return;
         }
         const talking = self.conn.sessionIn().len != 0;
+        // A statement that takes the terminal over has the screen to itself
+        // until it ends, and the editor is put away before it starts.
+        const takes_over = self.conn.wantsTerminal(std.mem.trim(u8, owned, " \t\r\n;"));
         if (talking) {
             editor.clear();
             editor.settle();
-        } else {
+        } else if (takes_over) {
             self.closeEditor();
             self.typing.draft.clearRetainingCapacity();
         }
         try self.runBatch(owned);
+        // The editor is put away once what was in it has run, so the result is
+        // what is on screen - and stays where it is over a run that did not go
+        // through, with what the engine said under it. It used to close either
+        // way: a slip of one letter was the editor gone, a line saying only
+        // that something had failed, `gm` to find out what, and `s` to get the
+        // statement back.
+        if (!talking and !takes_over and self.typing.editor != null and !self.report.status_error) {
+            self.closeEditor();
+            self.typing.draft.clearRetainingCapacity();
+        }
         // Opening one, or leaving it, changes which of the two this is.
         if (self.conn.sessionIn().len == 0 and self.typing.editor != null and talking) {
             self.closeEditor();
@@ -2091,6 +2120,22 @@ pub const App = struct {
             self.allocator.free(entry);
         }
         self.history.deinit(self.allocator);
+        for (self.commands.items) |entry| {
+            self.allocator.free(entry);
+        }
+        self.commands.deinit(self.allocator);
+    }
+
+    /// Keep a line typed after `:`, unless it is the one just before it.
+    pub fn rememberCommand(self: *App, text: []const u8) void {
+        if (text.len == 0) {
+            return;
+        }
+        if (self.commands.items.len != 0 and std.mem.eql(u8, self.commands.items[self.commands.items.len - 1], text)) {
+            return;
+        }
+        const copy = self.allocator.dupe(u8, text) catch return;
+        self.commands.append(self.allocator, copy) catch self.allocator.free(copy);
     }
 
     /// The screen to fall back to: the grid of whatever is open, or the list of
@@ -3340,6 +3385,7 @@ pub const App = struct {
     /// generated script needs: its own COMMIT would otherwise make a half
     /// finished rebuild permanent.
     pub fn runBatchStopping(self: *App, sql: []const u8, stop_on_error: bool) !void {
+        self.typing.failure.clearRetainingCapacity();
         // A statement that wants the terminal is not a statement the grid can
         // hold, and it is never one of a batch: it owns the screen until it ends.
         if (self.conn.wantsTerminal(std.mem.trim(u8, sql, " \t\r\n;"))) {
@@ -3465,16 +3511,47 @@ pub const App = struct {
         try self.loadObjects();
 
         var affected: i64 = 0;
+        var took: f64 = 0;
+        var first: []const u8 = "";
         for (self.report.list.items) |report| {
             affected += report.changes;
+            took += report.ms;
+            if (first.len == 0) {
+                first = report.failure orelse "";
+            }
         }
+        const count = self.report.list.items.len;
+        const undone: []const u8 = if (rolled_back) ", rolled back" else "";
         if (failures > 0) {
-            self.complain("{d} of {d} statement(s) failed, press gm for details{s}", .{
-                failures, self.report.list.items.len, if (rolled_back) ", rolled back" else "",
-            });
+            // What the engine said, rather than that it said something: the
+            // line used to be "1 of 1 statement(s) failed, press gm for
+            // details", which is a key to press before finding out it was a
+            // letter missing from `select`.
+            self.typing.failure.appendSlice(self.allocator, first) catch {};
+            const end = std.mem.findScalar(u8, first, '\n') orelse first.len;
+            const more: []const u8 = if (end < first.len) " - gm has the rest of it" else "";
+            if (count == 1) {
+                self.complain("{s}{s}{s}", .{ first[0..end], more, undone });
+            } else {
+                self.complain("{d} of {d} statements failed{s}, gm has each - the first: {s}", .{
+                    failures, count, undone, first[0..end],
+                });
+            }
+        } else if (shown) {
+            // How many rows came back, which is what was asked. It said "0
+            // row(s) affected" over a result of two hundred.
+            const rows = self.grid.rows.items.len;
+            const cut: []const u8 = if (rows >= self.grid.limit) "the first " else "";
+            if (count == 1) {
+                self.say("{s}{d} row{s}   {d:.1} ms{s}", .{ cut, rows, plural(rows), took, undone });
+            } else {
+                self.say("{d} statements, {d} row{s} affected, and the last one's {s}{d} row{s}{s}", .{
+                    count, affected, plural(affected), cut, rows, plural(rows), undone,
+                });
+            }
         } else {
-            self.say("{d} statement(s), {d} row(s) affected{s}", .{
-                self.report.list.items.len, affected, if (rolled_back) ", rolled back" else "",
+            self.say("{d} statement{s}, {d} row{s} affected{s}", .{
+                count, plural(count), affected, plural(affected), undone,
             });
         }
     }
@@ -4506,7 +4583,7 @@ pub const App = struct {
         const form = try self.newForm(
             if (alter) .alter_table else .create_table,
             if (alter) "alter table" else "create table",
-            "ctrl+n adds a column, ctrl+k removes one",
+            "ctrl+n adds a column, ctrl+x removes one",
         );
         form.row_size = 5;
         form.table = try form.arena.allocator().dupe(u8, table_label);

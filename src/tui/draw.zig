@@ -9,6 +9,7 @@ const term = @import("term.zig");
 const input = @import("input.zig");
 const sql_syntax = @import("editor.zig");
 const fuzzy = @import("fuzzy.zig");
+const line_mod = @import("line.zig");
 const Files = @import("files.zig");
 
 const App = app_mod.App;
@@ -86,16 +87,11 @@ pub fn frame(app: *App, size: Size) !void {
 /// Park the cursor where the user is typing, then put the frame on screen.
 fn cursorAndFlush(app: *App, size: Size) !void {
     const screen = app.screen;
-    if (app.typing.prompt) |prompt| {
-        // A password shows dots, so the cursor goes after the last one.
-        const typed = if (prompt.kind == .password)
-            std.unicode.utf8CountCodepoints(prompt.buffer.items) catch prompt.buffer.items.len
-        else
-            term.width(prompt.buffer.items);
-        screen.cursorAt(size.rows - 1, term.width(prompt.label) + typed, false);
-    } else if (app.typing.cursor) |spot| {
-        // A form's field, the palette's query, or the editor's text: whichever of
-        // them drew itself said where the typing is.
+    _ = size;
+    if (app.typing.cursor) |spot| {
+        // A form's field, the palette's query, the editor's text or the prompt
+        // along the bottom: whichever of them drew itself last said where the
+        // typing is, and the prompt is drawn last of all.
         screen.cursorAt(spot.row, spot.col, spot.block);
     } else {
         screen.cursorOff();
@@ -1322,9 +1318,11 @@ pub const HELP = [_][2][]const u8{
     .{ "ctrl+w ctrl+u", "take back a word, everything" },
     .{ "", "IN A FORM" },
     .{ "ctrl+s", "save" },
-    .{ "ctrl+n ctrl+k", "add, remove a column row" },
-    .{ "left right", "toggle or cycle a value" },
-    .{ "ctrl+u", "clear the field" },
+    .{ "tab shift+tab", "the next field, the one before; arrows go to everything" },
+    .{ "left right", "in the text; or toggle, cycle a value" },
+    .{ "home end", "the ends of the text - ctrl+a ctrl+e too" },
+    .{ "ctrl+w ctrl+u", "take back a word, clear the field" },
+    .{ "ctrl+n ctrl+x", "add, remove a column row" },
     .{ "esc", "cancel" },
 };
 
@@ -1687,8 +1685,9 @@ fn palettePanel(app: *App, size: Size, rows: usize) void {
     screen.style(.{ .bg = C.bar, .fg = C.accent, .bold = true });
     var used: usize = write(app, " › ", width - 2);
     screen.style(.{ .bg = C.bar, .fg = C.text });
-    used += write(app, palette.query.items, width -| used -| 2);
-    app.typing.cursor = .{ .row = line, .col = left + 1 + used };
+    const part = line_mod.window(palette.query.items, palette.caret, width -| used -| 2);
+    app.typing.cursor = .{ .row = line, .col = left + 1 + used + part.cursor };
+    used += write(app, part.text, width -| used -| 2);
     screen.style(.{ .bg = C.bar, .fg = C.faint });
     if (palette.query.items.len == 0) {
         used += write(app, "what do you want to do?", width -| used -| 2);
@@ -1847,16 +1846,28 @@ fn promptLine(app: *App, size: Size) void {
     screen.reset();
     if (app.typing.prompt) |prompt| {
         screen.style(.{ .fg = C.accent, .bold = true });
-        var used: usize = write(app, prompt.label, size.cols);
+        const used: usize = write(app, prompt.label, size.cols);
         screen.style(.{ .fg = C.text });
+        const room = size.cols -| used;
+        const text = prompt.buffer.items;
         if (prompt.kind == .password) {
-            // Never echo a password, not even to the screen it was typed on.
+            // Never echo a password, not even to the screen it was typed on. A
+            // dot a character, and the cursor after as many of them as there are
+            // characters before it: counted in columns, the dots said how wide
+            // the characters were and the cursor sat in the middle of them.
+            const all = std.unicode.utf8CountCodepoints(text) catch text.len;
+            const before = text[0..line_mod.where(text, prompt.at)];
             var dots: usize = 0;
-            while (dots < term.width(prompt.buffer.items) and used < size.cols) : (dots += 1) {
-                used += write(app, "•", size.cols - used);
+            while (dots < all and dots + 1 < room) : (dots += 1) {
+                _ = write(app, "•", 1);
             }
+            const in = std.unicode.utf8CountCodepoints(before) catch before.len;
+            app.typing.cursor = .{ .row = size.rows - 1, .col = used + @min(in, room -| 1) };
         } else {
-            used += write(app, prompt.buffer.items, if (size.cols > used) size.cols - used else 0);
+            // The part of it the cursor is in, where it is longer than the line.
+            const part = line_mod.window(text, prompt.at, room);
+            _ = write(app, part.text, room);
+            app.typing.cursor = .{ .row = size.rows - 1, .col = used + part.cursor };
         }
         screen.clearToEol();
         return;
@@ -1901,9 +1912,13 @@ fn footerHints(app: *App) []const u8 {
             .insert => " -- INSERT --  esc normal mode  tab completes  ctrl+s runs  ctrl+p earlier",
         };
     }
-    if (app.typing.form != null) {
-        // Not the palette here: in a form ctrl+k removes a row.
-        return " tab moves   ctrl+s saves   ctrl+u clears the field   esc cancels";
+    if (app.typing.form) |form| {
+        // Not the palette here: a form takes what is typed, and a key that
+        // opened something over it would take the typing away from it.
+        return if (form.row_size != 0)
+            " tab next   ctrl+s saves   ctrl+n adds a row   ctrl+x removes it   esc cancels"
+        else
+            " tab next   shift+tab back   ctrl+s saves   ctrl+u clears the field   esc cancels";
     }
     if (app.follow.ms != 0 and app.view == .grid) {
         // The one key worth knowing while the grid moves on its own.
@@ -2040,12 +2055,27 @@ fn editorPanel(app: *App, size: Size, side: usize, rows: usize) void {
     // a shell is one line typed at a time and what matters is the output under
     // it, which a panel nine rows tall would be sitting on.
     const floor: usize = if (talking) 4 else 9;
-    const height: usize = @min(rows, @max(floor, editor.lineCount() + 3));
+    // What the engine said about the last run, where it would not take it: the
+    // last lines of the panel are that, as many as it needs up to six. A line of
+    // it is kept whole where it fits - PostgreSQL points at the place with a
+    // caret on a line of its own, and a caret that has been wrapped points at
+    // nothing.
+    const failure = if (talking) "" else app.typing.failure.items;
+    var said: usize = 0;
+    if (failure.len != 0) {
+        var rest: []const u8 = failure;
+        while (rest.len != 0 and said < 6) : (said += 1) {
+            _ = wrapRow(&rest, width -| 4);
+        }
+    }
+    const height: usize = @min(rows, @max(floor, editor.lineCount() + 3 + said));
     // A statement is written above its result and a shell is typed below it: what
     // came back is what you are looking at while you write the next line, which
     // is the shape every terminal has.
     const top: usize = if (talking) (if (rows > height) rows - height + 1 else 1) else 1;
-    const shown = height -| 2;
+    // Never all of the panel: there is always a line of the statement in it.
+    said = @min(said, height -| 3);
+    const shown = height -| 2 -| said;
     const at = editor.position();
     // Keep the line the cursor is on inside the panel.
     if (at.line < editor.scroll) {
@@ -2091,6 +2121,20 @@ fn editorPanel(app: *App, size: Size, side: usize, rows: usize) void {
             }, .bold = kind == .keyword, .italic = kind == .comment });
             used += write(app, text[byte..stop], width - used);
             byte = stop;
+        }
+    }
+
+    if (said != 0) {
+        var rest: []const u8 = failure;
+        var n: usize = 0;
+        while (n < said) : (n += 1) {
+            const piece = wrapRow(&rest, width -| 4);
+            screen.moveTo(top + 1 + shown + n, left);
+            screen.style(.{ .bg = C.selected, .fg = C.danger });
+            fill(app, ' ', width);
+            screen.moveTo(top + 1 + shown + n, left);
+            _ = write(app, "  ", width);
+            _ = write(app, piece.text, width -| 4);
         }
     }
 
@@ -2498,16 +2542,23 @@ fn formPanel(app: *App, size: Size, side: usize, rows: usize) !void {
                     .underline = true,
                     .underline_colour = if (focused) C.accent else C.faint,
                 });
-                // Show the tail of a long value, which is what is being typed - or
-                // dots, where the value is a password.
+                // The part of a long value the cursor is in - its tail, while the
+                // cursor is where the typing is - or dots, where the value is a
+                // password. A dot is a character, so the cursor is as many of them
+                // in as there are characters before it.
                 var dots: [64]u8 = undefined;
-                const shown = if (field.masked)
-                    mask(&dots, field.text.items, span)
-                else
-                    tail(field.text.items, span);
+                var cursor_col: usize = 0;
+                const shown = if (field.masked) dotted: {
+                    const before = field.text.items[0..line_mod.where(field.text.items, field.at)];
+                    cursor_col = @min(std.unicode.utf8CountCodepoints(before) catch before.len, span -| 1);
+                    break :dotted mask(&dots, field.text.items, span);
+                } else plain: {
+                    const part = line_mod.window(field.text.items, field.at, span);
+                    cursor_col = part.cursor;
+                    break :plain part.text;
+                };
                 if (focused) {
-                    // After the last character, where the next one will go.
-                    app.typing.cursor = .{ .row = line, .col = at + @min(term.width(shown), span -| 1) };
+                    app.typing.cursor = .{ .row = line, .col = at + cursor_col };
                 }
                 // A row too narrow for its labels puts the label inside the empty
                 // field instead of dropping it: five fields in a line still say what
