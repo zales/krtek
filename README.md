@@ -84,11 +84,15 @@ zig build -Doptimize=safe
 ```
 
 A SQLite file is opened through SQLite's own VFS: edits go straight to disk and
-there is nothing to save. A CSV file is one table, and is written when a row or
-a column changes - see [CSV files](#csv-files).
+there is nothing to save. A name with no file behind it is asked about before a
+database is made of it - SQLite makes whatever it is asked to open, and a letter
+wrong in a path used to be a new, empty database beside the real one. A CSV file
+is one table, and is written when a row or a column changes - see
+[CSV files](#csv-files).
 
 **Connections are saved**, and started with no argument the app opens the list of
-them: `enter` connects, `a` adds, `e` edits, `d` removes. The file is
+them: `enter` connects, `a` adds, `e` edits, `x` removes - and asks first,
+because a password kept in the keychain goes with it. The file is
 `~/.config/krtek/connections`, one `name<TAB>target` line per connection, readable
 and editable by hand.
 
@@ -210,7 +214,10 @@ spinner and a running time at the bottom, and `ctrl+c` stops it: SQLite's virtua
 machine is halted through its progress handler, PostgreSQL gets a cancel request
 on its own socket, MySQL a `KILL QUERY` down a second connection while the first
 waits through the connector's non-blocking calls. The connection stays usable, and
-a batch stops at the statement that was interrupted.
+a batch stops at the statement that was interrupted. The same key ends the
+program, and takes two presses to do it: one that arrives a moment after the
+statement finished is a `ctrl+c` with nothing to stop, and it used to take every
+tab with it.
 
 **So can a connection.** One that takes more than a moment to open puts a panel
 in the middle of the screen: what is being opened, the step it is on - looking a
@@ -240,6 +247,14 @@ pane. What a value *is* - a column's type, its `NOT NULL`, its default - sits af
 the field in grey, because that is a note about the value and not part of its name.
 Where a row of fields is too narrow to carry its labels, each label moves inside its
 own empty field and steps aside as soon as something is typed there.
+
+A field is a line with a cursor in it, and so is the prompt along the bottom and
+what is typed into the palette - one line editor, so a key means the same in all
+three: the arrows, `home` and `end` or `ctrl+a` and `ctrl+e`, `alt+b` and `alt+f`
+by a word, `ctrl+w` for the word before the cursor and `ctrl+u` for all of it. A
+value longer than its field shows the part the cursor is in. `tab` goes to the
+next field somebody types into and `shift+tab` to the one before; the arrows go
+to everything, the NULL box beside each value of a row included.
 
 Every grey in the interface is text somebody has to read, so each carries at least
 4.5:1 against what it is drawn on. The three levels are text, dim and faint, and
@@ -347,7 +362,7 @@ column called `rowid`: left with that name it would take it from the row's own
 number, which is what a row is edited by. A file that is a SQLite database is
 opened as one, whatever it is called.
 
-A CSV file holds rows and nothing else, so `c`, `N`, `Y` and `D` - another
+A CSV file holds rows and nothing else, so `c`, `gN`, `Y` and `D` - another
 table, another name, a copy, no table - are refused, and so are indexes, views,
 triggers and keys: each would live in memory and be gone when the file is closed.
 The types are worked out again every time the file is opened, so a `NOT NULL` or
@@ -816,7 +831,7 @@ the same fact to be wrong is worse than a longer command line.
 offers every context of the kubeconfig in the list of connections, marked
 `kubeconfig` and sitting after the ones that were saved. They are not saved and
 never written to the connection file: the kubeconfig is where a cluster is
-described, so `d` says to remove the context there and `e` says that `a` is how to
+described, so `x` says to remove the context there and `e` says that `a` is how to
 make one of your own. Adding a cluster to a kubeconfig is enough to reach it from
 here.
 
@@ -1080,14 +1095,38 @@ copyright file says.
 Everything is reachable from the key map, which `?` prints in full.
 
 **The keys are vi's, wherever vi has one for the thing.** `hjkl` and `w` `b` move,
-`gg` and `G` are the ends, `H` `M` `L` the top, middle and bottom of the screen
-and `zt` `zz` `zb` put the row under the cursor there; `y` yanks, `m` and a
-letter leaves a mark and `'` and the letter goes back to it, `:12` is a row and
-`:$` the last one. Eight letters meant something else here before they meant
+`gg` and `G` are the ends, `ctrl+d` and `ctrl+u` go half a screen and `ctrl+f`
+and `ctrl+b` a whole one, `H` `M` `L` are the top, middle and bottom of the
+screen and `zt` `zz` `zb` put the row under the cursor there; `/` looks for text
+and `n` and `N` go to the next place it is and the one before; `y` yanks, `m` and
+a letter leaves a mark and `'` and the letter goes back to it, `:12` is a row and
+`:$` the last one. Eleven letters meant something else here before they meant
 that, and each of those things is on `g` and the letter it used to be: `gv` the
 whole value, `gm` the messages, `gb` the database information, `gL` the
 relations, `gw` the visible columns, `gy` cloning a row, `gM` importing, `gV`
-creating a view. Press `g` and the footer lists them.
+creating a view, `gN` renaming a table, `gn` and `gp` the next page of rows and
+the one before. Press `g` and the footer lists them.
+
+**A screen is what the window shows, and a page is what the engine hands over.**
+The grid holds two hundred rows at a time - `:limit` says how many - and the
+screen keys move through those by what is on screen, going on to the next two
+hundred where they run out, the way `j` does. `gn` and `gp` turn that page
+outright. They were the same keys once, so on a table of a hundred and twenty
+rows `pgdn` did nothing at all.
+
+**`/` looks in the pane it is pressed in.** In the list it narrows the names, and
+`enter` opens the first of what is left. In the rows it finds text - as it is
+typed, whatever its case, accents included - and underlines every cell that has
+it. It looks in the rows in hand, not in the table: `W` filters the table and `F`
+searches all of them.
+
+**Nothing is deleted, and nothing is quit, on one key.** `x` on a row waits for
+`x` again, the way `dd` is two keys. Rows marked with `space` - or a run of them,
+`V` at one end and `V` at the other - are asked about with their count; a mark is
+drawn on its row and stays on that row whatever page is on screen, because it is
+kept as what addresses the row and not as where the row was. `q` leaves what is
+in front - the key map, a value, a screen that is not the grid - then the tab,
+and the program after the last of them. `:qa` is all of it at once.
 
 **Tabs.** A connection is a tab, and there can be several: `ctrl+t` opens an empty
 one, `t` on a saved connection opens it in one, `:tabnew <target>` opens anything
@@ -1105,7 +1144,13 @@ wants one.
 **Browsing.** Object list with row counts and a filter (PostgreSQL's estimate is
 replaced with an exact count), a data grid with paging,
 sorting, horizontal scrolling, a detail box for the whole value, and a structure
-view with columns, indexes, foreign keys and the `CREATE` statement. `R` follows
+view with columns, indexes, foreign keys and the `CREATE` statement - which
+scrolls, as the other screens that are read rather than worked in do. A table
+wider than the window says which of its columns are on screen, with an arrow on
+each side there are more, and keeps the first of them in place while the rest
+move under it. The mouse does what it would be expected to: a click puts the
+cursor on a cell or opens a table, a click on a column's name sorts by it, and
+the wheel scrolls whatever it is over. `R` follows
 a table: it reads it again every couple of seconds and keeps the view on the last
 `limit` rows, so an append arrives on the screen by itself. Column
 visibility and a filter of up to three conditions plus a raw `WHERE`. Database
@@ -1117,7 +1162,8 @@ box - plus quick in-place editing of a single cell, row marking, and deletion of
 everything marked.
 
 `gv` opens the value on its own, and scrolls where there is more of it than
-fits - arrows, `pgup`/`pgdn`, `home`/`end`. It counts lines as drawn rather than
+fits - arrows, `pgup`/`pgdn`, `home`/`end`, the wheel - and `y` there copies it.
+It counts lines as drawn rather than
 as stored, because a line longer than the box wraps, and a scroll that counted
 the stored ones would jump over the wrapped half of one.
 
@@ -1154,8 +1200,9 @@ one on its own, search across every text column of every table, export as an SQL
 dump (whole database or one table, structure and/or data) or CSV/TSV, and import
 of an SQL script or a CSV file. Commands: `:export`, `:dump`, `:limit`, `:text`,
 `:open`, `:check`, `:analyze`, `:vacuum`, `:follow`, `:w`, `:e`, `:set`, the
-`:tab` ones and `:q` - which leaves the editor, then the tab, and the program
-only when there is nothing else left to leave.
+`:tab` ones and `:q` - which leaves what is in front, then the tab, and the
+program only when there is nothing else left to leave - and `:qa`, which leaves
+all of it. The arrows after `:` bring back what was typed there before.
 
 The editor has vi's two modes. It opens in insert mode, where a key is the
 character on it; `esc` is normal mode, where `dd`, `cw`, `yy`, `p`, `o` and the
@@ -1167,6 +1214,15 @@ statement. Completion knows what a statement calls its tables: after
 `from orders o`, `o.` and `tab` lists the columns of `orders`, with a schema in
 front of the table or without, and after `join` the tables a foreign key leads
 to come first.
+
+**A statement and what came of it are on the screen together.** One that the
+engine will not take leaves the editor open, with all of what the engine said
+under the statement - PostgreSQL's caret under the word it stopped at included.
+One that reads stays too, as a strip above the rows it brought back with the keys
+handed to the grid: `s` puts the typing back in it, so changing a word and
+running it again is `s`, the word and `ctrl+s`. `esc` puts the strip away, and
+opening a table does. A statement that writes is not kept that way - what `s`
+and a few letters run again should be something that can be run again.
 
 A batch reports each statement separately, and one that leaves a transaction
 open is rolled back. A generated schema change
@@ -1235,16 +1291,16 @@ A terminal app cannot be checked by a human on every change, so
 keys and renders the escape sequences it emits back into a character grid:
 
 ```sh
-tests/screen.py x.db '{down}{enter}' 'oo' 'n'            # open a table, sort, page
+tests/screen.py x.db '{down}{enter}' 'oo' 'gn'           # open a table, sort, page
 tests/screen.py x.db 'c' 'notes' '{ctrl-s}'              # create a table
-tests/screen.py x.db 'i' '{down}{down}hello' '{ctrl-s}'  # insert a row
+tests/screen.py x.db 'i' '{tab}hello' '{ctrl-s}'         # insert a row
 tests/screen.py x.db '?' '{keep}'                        # leave the screen as it is
 tests/screen.py '' '{keep}'                              # the connection list
 tests/screen.py x.db '{ctrl-k}' 'dro tab' '{keep}'       # the command palette
 tests/screen.py x.db 's' 'select 1' '{ctrl-s}'           # write SQL and run it
 tests/kitty.py  x.db 'S' 'Cr'                            # keys as Ghostty sends them
 tests/kitty.py  x.db '{shift}{f13}{kpdown}'               # keys that are not text
-tests/screen.py x.db '{tab}' 'Cc' | grep CLIPBOARD       # what a copy key sent
+tests/screen.py x.db '{tab}' 'yc' | grep CLIPBOARD       # what a copy key sent
 SCREEN_RAW=/tmp/raw.bin tests/screen.py x.db '{keep}'    # keep the escapes too
 SCREEN_SLOW=3 tests/k8s.sh                               # wait three times as long
 ```
@@ -1434,6 +1490,18 @@ file with what it should now be, byte for byte:
 zig build && ./tests/csv.sh
 ```
 
+[tests/keys.sh](tests/keys.sh) is about what a key costs when it does the wrong
+thing, and reads the answer out of the file rather than off the screen: a row
+marked on one page and `x` pressed on the next deletes the row that was marked,
+`x` on its own deletes nothing, `q` in the key map closes the key map, the screen
+keys move on a table shorter than a page, a value is edited where the cursor is,
+and a file that is not there is not made by being asked about. Each of those was
+the other way round once.
+
+```sh
+zig build && ./tests/keys.sh
+```
+
 [tests/connecting.sh](tests/connecting.sh) is about the server that does not
 answer, so it brings none up: a listener that takes a connection and says nothing
 is that server on any machine, for as long as the test wants it. It checks that
@@ -1523,7 +1591,8 @@ with `psql` doing the same.
   used as a key, because it moves on UPDATE.
 * **The editor has no selection.** It is meant for writing a statement, not for
   editing prose: there is no visual mode, a count in front of a command is not
-  read, and `.` does not repeat one. In the grid `v` marks a row, as `space` does.
+  read, and `.` does not repeat one. In the grid `V` marks a run of rows: once
+  where it starts and once where it ends.
 * **Completion reads a statement without parsing it.** It finds the tables named
   after `FROM`, `JOIN`, `UPDATE` and `INTO` and what each is called, which is
   enough to turn `o.` into the columns of `orders`. It does not follow a CTE or

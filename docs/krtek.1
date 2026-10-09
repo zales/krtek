@@ -200,15 +200,16 @@ connects,
 adds,
 .B e
 edits and
-.B d
-removes one.
+.B x
+removes one, asking first.
 Adding one asks which engine first and then for that engine's own fields - a host
 and a database, a bucket and a region, a vhost, a file - and writes the target
 itself. Editing takes a target apart again only when putting it back together
 gives the same string; anything else stays the one field it was.
 .PP
 A SQLite file is opened through SQLite's own VFS: edits go straight to disk, the
-database is never held in memory, and there is nothing to save.
+database is never held in memory, and there is nothing to save. A name with no
+file behind it is asked about before a database is made of it.
 .PP
 A file whose name ends in
 .B .csv
@@ -261,14 +262,40 @@ is normal mode, where
 .BR dd ", " cw ", " yy ", " p ", " u " and " ctrl+r
 are what they are in vi and
 .B enter
-runs the statement.
+runs the statement. A statement the engine will not take leaves the editor open
+with what the engine said under it; one that reads stays as a strip above its
+rows, and
+.B s
+puts the typing back in it.
 .TP
 .B S
 The structure of the table: columns, indexes, foreign keys.
 .TP
 .B i
 Insert a row.
-.BR e " edits the one under the cursor, " x " deletes it."
+.BR e " edits the one under the cursor."
+.TP
+.B x
+Delete the row under the cursor: it waits for
+.B x
+again.
+.B space
+marks a row and
+.B V
+a run of them, and
+.B x
+then deletes what is marked, asking first with the count.
+.TP
+.B /
+In the object list, narrow it by name;
+.B enter
+opens the first match. In the rows, find text:
+.BR n " and " N " go to the next place it is and the one before."
+.TP
+.B ctrl+d ctrl+u
+Down and up half a screen;
+.BR ctrl+f " and " ctrl+b " a whole one, and"
+.BR gn " and " gp " the page of rows the engine hands over."
 .TP
 .B W
 Filter the rows.
@@ -295,7 +322,8 @@ The key in front of several others:
 and what a letter did before it was given to vi is on
 .B g
 and that letter -
-.BR gv " the whole value, " gm " the messages, " gb " the database information."
+.BR gv " the whole value, " gm " the messages, " gb " the database information,"
+.BR gN " renaming a table."
 The footer lists the rest.
 .TP
 .B ctrl+t
@@ -306,13 +334,17 @@ on a saved connection opens it in one,
 .TP
 .B ctrl+c
 Give up on a statement that is taking too long. The connection stays usable.
+With nothing to give up on, the second press quits.
 .TP
 .B esc
 While a connection is being opened - a panel says which step it is on and for
 how long - give up on it. Whatever was open before stays open.
 .TP
 .B q
-Quit.
+Leave what is in front - the key map, a value, a screen that is not the grid -
+then the tab, and the program after the last of them.
+.B :qa
+quits whatever is open.
 .SH PASSWORDS
 A password is asked for when the server wants one, and kept only where the
 connection says: nowhere, the configuration file, or - on macOS - the login
