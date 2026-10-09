@@ -223,4 +223,29 @@ $PSQL -d demo -tAc "SELECT string_agg(column_name || ' ' || data_type, ',' ORDER
 	| grep -qx 'id integer,nazev text,cena text' || fail "the columns removed in the form are not what the table lost"
 echo "ok: and the server no longer has it"
 
+# The table's name is a field of that form as well, and the rename is the last
+# statement of what the form writes. Nothing here is in a transaction, so where
+# an earlier statement is refused the script stops and the table is still called
+# what it was - which is the name the grid has to go on reading. `cena` has a
+# NULL in it and is asked to have none: thirteen tabs to its `not null`.
+called() {
+	$PSQL -d demo -tAc "SELECT string_agg(tablename, ',' ORDER BY tablename) FROM pg_tables
+		WHERE tablename IN ('sloupce', 'soucastky')"
+}
+screen "an alter refused before its rename leaves the grid on the table as it was" "sloupce  1-1 of 1" \
+	'{sleep}' '/' 'sloupce' '{enter}' '{sleep}' '{enter}' '{sleep}' 'a' '{sleep}' \
+	'{ctrl-u}' 'soucastky' '{tab}{tab}{tab}{tab}{tab}{tab}{tab}{tab}{tab}{tab}{tab}{tab}{tab}' ' ' \
+	'{ctrl-s}' '{sleep}'
+called | grep -qx 'sloupce' || fail "a rename the script never reached was made anyway: $(called)"
+echo "ok: and the server still has it under that name"
+
+# And where it goes through, the grid reads the table by its new name. It went
+# on asking for the old one: the list beside it showed the rename had worked,
+# and the grid said `relation "public.sloupce" does not exist`.
+screen "a table renamed in the alter form is read by its new name" "soucastky  1-1 of 1" \
+	'{sleep}' '/' 'sloupce' '{enter}' '{sleep}' '{enter}' '{sleep}' 'a' '{sleep}' \
+	'{ctrl-u}' 'soucastky' '{ctrl-s}' '{sleep}'
+called | grep -qx 'soucastky' || fail "the table renamed in the form is not what the server has: $(called)"
+echo "ok: and that is what the server calls it"
+
 echo "all good"

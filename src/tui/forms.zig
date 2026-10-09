@@ -551,7 +551,17 @@ fn runScript(self: *App, form: *Form.Form, sql: []const u8) !void {
     const script = try self.allocator.dupe(u8, sql);
     defer self.allocator.free(script);
     const purpose = form.purpose;
-    const renamed = if (purpose == .rename_table) try self.allocator.dupe(u8, form.valueOf(0)) else null;
+    // What the form says the table is to be called. The name is a field of
+    // the alter form as well, so that is the other way to rename - and a
+    // rename only where it is not the name the table had.
+    const renamed = switch (purpose) {
+        .rename_table => try self.allocator.dupe(u8, form.valueOf(0)),
+        .alter_table => if (std.mem.eql(u8, form.valueOf(0), form.table))
+            null
+        else
+            try self.allocator.dupe(u8, form.valueOf(0)),
+        else => null,
+    };
     defer if (renamed) |value| self.allocator.free(value);
     self.closeForm();
 
@@ -567,13 +577,27 @@ fn runScript(self: *App, form: *Form.Form, sql: []const u8) !void {
                 self.complain("the script failed, and what it had set could not be put back: {s}", .{self.conn.message()});
             };
         }
+        // Under the name it had, whatever the form asked for: a rebuild is
+        // rolled back whole, and everywhere else the rename is the last
+        // statement of the script, so one that stopped never got to it or
+        // was refused there.
         self.reload() catch {};
         return;
     }
+    // A script that came to no statement renamed nothing, whatever the form
+    // said: Kafka takes these two forms and answers each with a comment that
+    // says a topic has no such thing, and the name that was typed is then the
+    // name of nothing.
+    const moved = if (self.report.list.items.len != 0) renamed else null;
     switch (purpose) {
-        .rename_table => if (renamed) |value| try self.openTable(value),
+        .rename_table => if (moved) |value| try self.openTable(value),
         .create_table, .copy_table, .view => self.say("created", .{}),
-        .alter_table, .foreign_key, .index => try self.reload(),
+        // A table the alter form renamed is opened by its new name, as one
+        // renamed under `N` is. Reading it again asked for the old one: the
+        // rename had worked, the list said so, and the grid beside it was a
+        // table that could not be read.
+        .alter_table => if (moved) |value| try self.openTable(value) else try self.reload(),
+        .foreign_key, .index => try self.reload(),
         else => {},
     }
 }
@@ -872,6 +896,40 @@ test "an alter that fails takes nothing with it, and leaves the keys enforced" {
     // What failed, and why, is a key away.
     try bench.keys("gm");
     try bench.sees("NOT NULL constraint failed");
+}
+
+test "a table renamed in the alter form is read by its new name" {
+    var bench = try Bench.open(BOOKS);
+    defer bench.close();
+    // The name is the form's first field, and the cursor starts in it. The grid
+    // went on asking for the old one: the rename worked, the list said so, and
+    // beside it was `no such table: books` over a table that could not be read.
+    try bench.keys("j{enter}a{ctrl-u}novels{ctrl-s}");
+    try testing.expect(bench.app.typing.form == null);
+    try bench.expectAsked("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name", "authors novels");
+    try bench.sees("novels  1-4 of 4");
+    try bench.sees("Saturnin");
+    try bench.lacks("could not be read");
+    try testing.expect(!bench.app.report.status_error);
+    // And it is that table from here on, which is what `r` reads again.
+    try bench.keys("r");
+    try bench.sees("novels  1-4 of 4");
+
+    // A name that is taken is refused, with the rebuild rolled back - so the
+    // table is still where it was, and that is where the grid looks.
+    try bench.keys("a{ctrl-u}authors{ctrl-s}");
+    try bench.says("failed");
+    try bench.expectAsked("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name", "authors novels");
+    try bench.sees("novels  1-4 of 4");
+    try bench.lacks("could not be read");
+
+    // Altered under the name it has, it is read again where it was.
+    try bench.keys("jj");
+    try bench.keys("a{ctrl-n}pages{ctrl-s}");
+    try bench.lacks("failed");
+    try bench.sees("novels  1-4 of 4");
+    try bench.sees("pages");
+    try testing.expectEqual(@as(usize, 2), bench.app.cursor.row);
 }
 
 test "the trigger form makes a trigger, and it fires" {
