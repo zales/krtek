@@ -954,19 +954,19 @@ pub const Db = struct {
                 self.remember(reply.failure);
                 return error.Driver;
             }
-            const pair = reply.list orelse break;
+            const pair = listOf(reply) orelse break;
             if (pair.len < 2) {
                 break;
             }
-            cursor = pair[0].text orelse "0";
-            const keys = pair[1].list orelse &[_]Value{};
+            cursor = textOf(pair[0]) orelse "0";
+            const keys = listOf(pair[1]) orelse &[_]Value{};
 
             // Which of this page's keys are going to be shown. Only those are
             // asked about: the rest of the page is skipped without a word to the
             // server.
             var wanted: std.ArrayList([]const u8) = .empty;
             for (keys) |item| {
-                const key = item.text orelse continue;
+                const key = textOf(item) orelse continue;
                 if (passed < skip) {
                     passed += 1;
                     continue;
@@ -989,7 +989,7 @@ pub const Db = struct {
                 const kinds = try arena.alloc([]const u8, wanted.items.len);
                 const ages = try arena.alloc(i64, wanted.items.len);
                 for (wanted.items, 0..) |_, i| {
-                    kinds[i] = said[i * 2].text orelse "?";
+                    kinds[i] = textOf(said[i * 2]) orelse "?";
                     ages[i] = switch (said[i * 2 + 1]) {
                         .number => |value| value,
                         else => -1,
@@ -1065,7 +1065,14 @@ pub const Db = struct {
                     if (i != 0) {
                         try out.appendSlice(arena, if (pairs and i % 2 == 1) "=" else ", ");
                     }
-                    try out.appendSlice(arena, item.text orelse "");
+                    try out.appendSlice(arena, switch (item) {
+                        .text => |text| text orelse "",
+                        .number => |number| try arena.print("{d}", .{number}),
+                        .nil => "",
+                        .failure => |text| text,
+                        // One level is what a cell has room for.
+                        .list => "…",
+                    });
                 }
                 if (items.len >= PREVIEW) {
                     try out.appendSlice(arena, " …");
@@ -1287,7 +1294,7 @@ pub const Db = struct {
     /// One line out of INFO, by its name.
     fn fact(self: *Db, name: []const u8) ?[]const u8 {
         const reply = self.command(&[_][]const u8{"INFO"}) catch return null;
-        const text = reply.text orelse return null;
+        const text = textOf(reply) orelse return null;
         var lines = std.mem.splitScalar(u8, text, '\n');
         while (lines.next()) |raw| {
             const trimmed = std.mem.trim(u8, raw, " \r");
@@ -1310,11 +1317,11 @@ pub const Db = struct {
     /// How many numbered databases this server has.
     fn databaseCount(self: *Db) u8 {
         const reply = self.command(&[_][]const u8{ "CONFIG", "GET", "databases" }) catch return 16;
-        const items = reply.list orelse return 16;
+        const items = listOf(reply) orelse return 16;
         if (items.len < 2) {
             return 16;
         }
-        return std.fmt.parseInt(u8, items[1].text orelse "16", 10) catch 16;
+        return std.fmt.parseInt(u8, textOf(items[1]) orelse "16", 10) catch 16;
     }
 
     /// Redis has no batch: the console runs one command per line.
@@ -1386,6 +1393,28 @@ pub const Value = union(enum) {
         };
     }
 };
+
+/// The text of a reply that is text, and nothing for one that is anything
+/// else. A field of `Value` read by its name is only there when the reply is
+/// of that kind, and which kind it is is the server's to say: asked for a list
+/// it may answer with an error, because the command was renamed away or is not
+/// among what this user may run. Read as the list anyway, that was a panic
+/// where such things are checked and somebody else's bytes where they are not.
+/// So wherever the kind has not been looked at, it is looked at here.
+fn textOf(value: Value) ?[]const u8 {
+    return switch (value) {
+        .text => |text| text,
+        else => null,
+    };
+}
+
+/// The same for a list.
+fn listOf(value: Value) ?[]const Value {
+    return switch (value) {
+        .list => |items| items,
+        else => null,
+    };
+}
 
 // ------------------------------------------------------------------- cursor
 
@@ -1890,6 +1919,10 @@ const Stand = struct {
     hang_up_on: []const u8 = "",
     /// What AUTH is answered with.
     password_is: []const u8 = "hunter2",
+    /// What a command is answered with in place of what `answer` has for it,
+    /// as the wire has it: a server that will not carry the command out, or
+    /// one whose answer is not in the shape that was asked for.
+    instead: []const [2][]const u8 = &.{},
 
     const a = std.testing.allocator;
 
@@ -2030,13 +2063,20 @@ const Stand = struct {
             self.hang_up_on = "";
         }
         const password = self.password_is;
+        var instead: ?[]const u8 = null;
+        for (self.instead) |one| {
+            if (std.ascii.eqlIgnoreCase(name, one[0])) {
+                instead = one[1];
+                break;
+            }
+        }
         self.release();
         if (hang_up) {
             return false;
         }
 
         const is = std.ascii.eqlIgnoreCase;
-        const reply: []const u8 = if (is(name, "AUTH"))
+        const reply: []const u8 = instead orelse if (is(name, "AUTH"))
             (if (std.mem.eql(u8, words[words.len - 1], password)) "+OK\r\n" else "-WRONGPASS invalid username-password pair\r\n")
         else if (is(name, "PING"))
             "+PONG\r\n"
@@ -2267,4 +2307,130 @@ test "a server that will not have the new connection says why" {
     defer std.testing.allocator.free(heard);
     try std.testing.expect(std.mem.find(u8, heard, "2 AUTH hunter2\n") != null);
     try std.testing.expect(std.mem.find(u8, heard, "2 SCAN") == null);
+}
+
+test "a server that will not say how many databases it has, or what it is, still opens" {
+    // What a hosted Redis is like: CONFIG renamed away, and INFO not among
+    // what the user may run. Both are answered with an error, and the error
+    // was read as the list and the text that had been asked for - a panic
+    // where that is checked, and whatever those bytes are where it is not.
+    // It was the third thing said on a new connection, so none of them opened.
+    const stand = try Stand.start();
+    defer stand.stop();
+    stand.hold();
+    stand.instead = &.{
+        .{ "CONFIG", "-ERR unknown command 'CONFIG', with args beginning with: 'GET' 'databases' \r\n" },
+        .{ "INFO", "-NOPERM User default has no permissions to run the 'info' command\r\n" },
+    };
+    stand.release();
+
+    const conn = try stand.open("");
+    defer conn.close();
+    // Sixteen is what Redis has unless it is told otherwise, and a version
+    // nobody would say is one nobody knows.
+    try std.testing.expectEqual(@as(u8, 16), conn.count);
+    try std.testing.expectEqualStrings("Redis ?", conn.version());
+    // Being refused the two is not something wrong with the connection.
+    try std.testing.expectEqualStrings("", conn.message());
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    try std.testing.expectEqual(@as(usize, 16), (try conn.schemas(arena.allocator())).len);
+    // The info screen leaves out what INFO would have said, and has the rest.
+    const settings = try conn.settings(arena.allocator());
+    try std.testing.expectEqual(@as(usize, 3), settings.len);
+    try std.testing.expectEqualStrings("encryption", settings[0].label);
+    try std.testing.expectEqualStrings("databases", settings[2].label);
+    try std.testing.expectEqualStrings("16", settings[2].value);
+}
+
+test "how many databases is only believed where it is said as CONFIG says it" {
+    // An answer, and not the one asked for: the name with no value after it,
+    // a value that is a number of its own, a line of text.
+    for ([_][]const u8{
+        "*1\r\n$9\r\ndatabases\r\n",
+        "*2\r\n$9\r\ndatabases\r\n*0\r\n",
+        "*2\r\n$9\r\ndatabases\r\n$-1\r\n",
+        "+OK\r\n",
+        ":4\r\n",
+        "$-1\r\n",
+    }) |answer| {
+        const stand = try Stand.start();
+        defer stand.stop();
+        stand.hold();
+        stand.instead = &.{.{ "CONFIG", answer }};
+        stand.release();
+        const conn = try stand.open("");
+        defer conn.close();
+        try std.testing.expectEqual(@as(u8, 16), conn.count);
+        try std.testing.expectEqualStrings("Redis 7.0.0", conn.version());
+    }
+    // And where it is, it is.
+    const stand = try Stand.start();
+    defer stand.stop();
+    stand.hold();
+    stand.instead = &.{.{ "CONFIG", "*2\r\n$9\r\ndatabases\r\n$1\r\n4\r\n" }};
+    stand.release();
+    const conn = try stand.open("");
+    defer conn.close();
+    try std.testing.expectEqual(@as(u8, 4), conn.count);
+}
+
+test "a listing of keys that is not in the shape of one is read as far as it goes" {
+    const stand = try Stand.start();
+    defer stand.stop();
+    const conn = try stand.open("");
+    defer conn.close();
+
+    // Not a list at all, and then a list of the right length with the wrong
+    // things in it: a cursor that is a number, and a word where the keys go.
+    // No keys either way, and no reading of one thing as another.
+    for ([_][]const u8{ "+OK\r\n", ":0\r\n", "$-1\r\n", "*2\r\n:0\r\n+OK\r\n" }) |answer| {
+        stand.hold();
+        stand.instead = &.{.{ "SCAN", answer }};
+        stand.release();
+        var none = (try conn.select(.{ .table = .{ .name = TABLE } })).?;
+        defer none.close();
+        try std.testing.expect(!try none.next());
+    }
+
+    // A page with something in it that is not a key, and a server that will
+    // not say what kind of key the other one is. The key is still a row.
+    stand.hold();
+    stand.instead = &.{
+        .{ "SCAN", "*2\r\n$1\r\n0\r\n*3\r\n:7\r\n*0\r\n$6\r\nuser:1\r\n" },
+        .{ "TYPE", "-NOPERM User default has no permissions to run the 'type' command\r\n" },
+        .{ "TTL", ":-1\r\n" },
+    };
+    stand.release();
+    var rows = (try conn.select(.{ .table = .{ .name = TABLE } })).?;
+    defer rows.close();
+    try std.testing.expect(try rows.next());
+    try std.testing.expectEqualStrings("user:1", rows.value(0).text);
+    try std.testing.expectEqualStrings("?", rows.value(1).text);
+    try std.testing.expectEqual(@as(i64, -1), rows.value(2).int);
+    try std.testing.expectEqualStrings("", rows.value(3).text);
+    try std.testing.expect(!try rows.next());
+}
+
+test "what a collection holds is shown element by element, whatever the elements are" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    // As Redis answers: every element a string.
+    try std.testing.expectEqualStrings("a, b, c", try Db.renderValue(a, "list", .{ .list = &.{
+        .{ .text = "a" }, .{ .text = "b" }, .{ .text = "c" },
+    } }));
+    try std.testing.expectEqualStrings("apples=3, pears=2", try Db.renderValue(a, "hash", .{ .list = &.{
+        .{ .text = "apples" }, .{ .text = "3" }, .{ .text = "pears" }, .{ .text = "2" },
+    } }));
+    try std.testing.expectEqualStrings("", try Db.renderValue(a, "set", .{ .list = null }));
+    // And as it does not: a number, nothing, an error, and a list inside the
+    // list, each of which was read as a string because the others are.
+    try std.testing.expectEqualStrings("a, 7, , ERR no, …", try Db.renderValue(a, "zset", .{ .list = &.{
+        .{ .text = "a" },                  .{ .number = 7 },
+        .{ .nil = {} },                    .{ .failure = "ERR no" },
+        .{ .list = &.{.{ .text = "b" }} },
+    } }));
 }

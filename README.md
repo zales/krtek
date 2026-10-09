@@ -394,6 +394,15 @@ which is how Redis comes once TLS is on, until `tls-auth-clients no` - refuses,
 and the refusal is quoted: `tlsv13 alert certificate required`. And a target
 that says `redis://` to a port that only takes TLS is told to try the other.
 
+**A server that will not answer `CONFIG` or `INFO` opens like any other.** A
+hosted Redis has the first renamed away, and the second may not be among what
+its user is allowed to run. Both are asked on connecting, the answer was an
+error, and the error was read as what had been asked for - which ended the
+program before the first screen. Such a server is now taken to have sixteen
+databases, which is what Redis has unless it is told otherwise, and its version
+is shown as `?`. The same goes for any answer that is not in the shape of what
+was asked: it is read as nothing, not as something it is not.
+
 **A connection that is lost is made again.** A server that restarts, or an idle
 timeout somewhere on the way, used to end the session without saying so: `r`
 answered `reloaded` over a table of no rows, and went on answering it. The
@@ -1389,7 +1398,9 @@ what has to survive the encryption: a value of 300 000 bytes compared with what
 went in, three thousand keys counted and paged, a password, an answer that
 arrives after several read timeouts, and a value changed in the grid and read
 back by `redis-cli` in the clear. A second server wants a certificate from the
-client, which there is none to give, and has to be quoted saying so. And then
+client, which there is none to give, and has to be quoted saying so. A third
+has `CONFIG` renamed away, as a hosted one does, and then `INFO` taken from its
+user, and has to open all the same. And then
 what a session has to survive: every client thrown out with the server still
 up and a password on it, the server restarted under an open connection, and the
 server stopped for good, which has to be said and not called `reloaded`.

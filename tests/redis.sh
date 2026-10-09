@@ -21,6 +21,10 @@
 # well, which is how Redis comes once TLS is turned on and nothing else is
 # said. This driver has none to give, so what is checked there is that the
 # refusal says so.
+#
+# And a third that is what a hosted one is like: CONFIG renamed away, and then
+# INFO taken from the user as well. Those are what a new connection asks first,
+# and a server that answers them with an error has to open like any other.
 set -e
 cd "$(dirname "$0")/.."
 
@@ -29,6 +33,7 @@ IMAGE=${IMAGE:-redis:7-alpine}
 PORT=${PORT:-6390}
 TLS_PORT=${TLS_PORT:-6391}
 MUTUAL_PORT=${MUTUAL_PORT:-6392}
+HOSTED_PORT=${HOSTED_PORT:-6393}
 
 BIN=zig-out/bin/krtek
 test -x "$BIN" || { echo "$BIN is not there - zig build first" >&2; exit 1; }
@@ -57,7 +62,7 @@ docker rm -f "$NAME" >/dev/null 2>&1 || true
 # Without `tls-auth-clients no` Redis wants a certificate from the client too,
 # which is what the second server is left wanting; the authority it would check
 # one against only has to be a certificate, so it is the server's own.
-docker run -d --name "$NAME" -p "$PORT:6379" -p "$TLS_PORT:6380" -p "$MUTUAL_PORT:6381" \
+docker run -d --name "$NAME" -p "$PORT:6379" -p "$TLS_PORT:6380" -p "$MUTUAL_PORT:6381" -p "$HOSTED_PORT:6382" \
 	-e "TLS_CERT=$(cat "$CONFIG/server.crt")" -e "TLS_KEY=$(cat "$CONFIG/server.key")" \
 	"$IMAGE" sh -c '
 	umask 077
@@ -66,15 +71,19 @@ docker run -d --name "$NAME" -p "$PORT:6379" -p "$TLS_PORT:6380" -p "$MUTUAL_POR
 	redis-server --port 0 --tls-port 6381 --daemonize yes \
 		--tls-cert-file /tmp/server.crt --tls-key-file /tmp/server.key \
 		--tls-ca-cert-file /tmp/server.crt --save "" --appendonly no
+	redis-server --port 6382 --daemonize yes --rename-command CONFIG "" \
+		--save "" --appendonly no
 	exec redis-server --port 6379 --tls-port 6380 \
 		--tls-cert-file /tmp/server.crt --tls-key-file /tmp/server.key \
 		--tls-auth-clients no --save "" --appendonly no' >/dev/null
 
 # The other client, always in the clear.
 cli() { docker exec "$NAME" redis-cli "$@"; }
+# And the same to the server that has no CONFIG.
+hosted() { docker exec "$NAME" redis-cli -p 6382 "$@"; }
 
 printf 'waiting for the server'
-until cli PING >/dev/null 2>&1; do
+until cli PING >/dev/null 2>&1 && hosted PING >/dev/null 2>&1; do
 	printf .
 	sleep 1
 done
@@ -143,6 +152,24 @@ check "nothing listening says so, whichever was asked for" "rediss://127.0.0.1:1
 # The handshake is let through and the refusal comes after it, as an alert:
 # without that alert in the message this was a connection closed for no reason.
 check "a server that wants a certificate from the client is quoted saying so" "rediss://127.0.0.1:$MUTUAL_PORT?insecure=1" "open failed: redis closed the connection: .*certificate required"
+
+# A server with CONFIG renamed away, which is how the hosted ones come. How
+# many databases it has is the third thing a new connection asks, the answer
+# was an error, and the error was read as the list that had been asked for:
+# the program ended there, on every one of them. The count is the last of the
+# settings, which dbcheck prints after everything it reads, so it also says
+# that the rest was got through.
+HOSTED="redis://127.0.0.1:$HOSTED_PORT"
+hosted CONFIG GET databases 2>&1 | grep -q "unknown command" || fail "the server that should have no CONFIG has one"
+hosted SET user:1 ada >/dev/null
+hosted HSET cart:7 apples 3 pears 2 >/dev/null
+check "a server with no CONFIG opens" "$HOSTED" "connected: 127.0.0.1:$HOSTED_PORT/0 / Redis [0-9]"
+check "with the keys it has" "$HOSTED" 'table 0\.data rows~2 '
+check "and the sixteen databases Redis has unless it is told otherwise" "$HOSTED" 'databases = 16$'
+# And with INFO not among what the user may run, which an ACL can see to.
+hosted ACL SETUSER default -info >/dev/null
+check "one that will not say what it is opens as well, as a Redis of no known version" "$HOSTED" "connected: 127.0.0.1:$HOSTED_PORT/0 / Redis [?]\$"
+check "and its keys are read all the same" "$HOSTED" 'row key=cart:7  type=hash  ttl=-1  value=apples=3, pears=2'
 
 # What dbcheck prints of the first rows is the whole value, so this is every
 # byte of it as it came through the encryption.
