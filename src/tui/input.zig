@@ -122,13 +122,23 @@ pub fn handle(app: *App, key: Key, size: term.Size) !void {
         return;
     }
 
+    if (paged(app.view) and app.focus == .main and scrollPager(app, key)) {
+        return;
+    }
+
     switch (key) {
         .ctrl => |code| switch (code) {
             'c' => app.interrupt(),
             't' => try app.newTab(null),
             'w' => app.typing.prefix = WINDOW,
-            'd', 'f' => try movePage(app, 1),
-            'u', 'b' => try movePage(app, -1),
+            // By the screen, as in vi: half of it, or all of it. These used to
+            // turn the page of two hundred rows the engine handed over - so on a
+            // table of a hundred and twenty they did nothing at all, and nothing
+            // moved by a screen.
+            'd' => try moveScreen(app, 1, true),
+            'u' => try moveScreen(app, -1, true),
+            'f' => try moveScreen(app, 1, false),
+            'b' => try moveScreen(app, -1, false),
             'k', 'p' => try openPalette(app),
             'r' => try app.reload(),
             else => {},
@@ -149,6 +159,9 @@ pub fn handle(app: *App, key: Key, size: term.Size) !void {
             } else if (app.cursor.marked.items.len != 0) {
                 app.cursor.unmark(app.allocator);
                 app.say("unmarked", .{});
+            } else if (app.grid.find.items.len != 0) {
+                app.findOff(false);
+                app.say("no longer looking for anything", .{});
             } else if (app.sidebar.filter.items.len > 0) {
                 app.sidebar.filter.clearRetainingCapacity();
                 app.sidebar.selected = 0;
@@ -160,8 +173,8 @@ pub fn handle(app: *App, key: Key, size: term.Size) !void {
         .down => try move(app, 1),
         .left => moveColumn(app, -1),
         .right => moveColumn(app, 1),
-        .page_up => try movePage(app, -1),
-        .page_down => try movePage(app, 1),
+        .page_up => try moveScreen(app, -1, false),
+        .page_down => try moveScreen(app, 1, false),
         .home => {
             if (app.focus == .sidebar) {
                 app.sidebar.selected = 0;
@@ -232,6 +245,7 @@ pub const Does = enum {
     editor,
     search,
     filter_objects,
+    find,
     filter_rows,
     columns,
     sort,
@@ -347,15 +361,18 @@ pub fn offered(action: Action, caps: database.Caps, has_files: bool) bool {
 
 /// The single letters are vi's wherever vi has one for the thing: `y` yanks,
 /// `m` marks, `w` and `b` move by a column, `H` `M` `L` go to the top, middle
-/// and bottom of the screen. What those letters did here before is on `g` and
+/// and bottom of the screen, `/` looks for text and `n` and `N` go to the next
+/// and the last place it is. What those letters did here before is on `g` and
 /// the letter it used to be - `gm` for the messages `m` opened, `gv` for the
-/// value `v` showed - which is one rule to remember rather than eight new keys.
+/// value `v` showed, `gN` for the renaming `N` did - which is one rule to
+/// remember rather than nine new keys.
 pub const actions = [_]Action{
     .{ .keys = "d", .does = .browse, .label = "browse the selected table", .also = "data rows open select", .needs = .sidebar },
     .{ .keys = "S", .does = .structure, .label = "structure of the table", .also = "columns indexes keys schema create" },
     .{ .keys = "s", .does = .editor, .label = "write and run SQL", .plain = "write and run a command", .also = "query editor statement console" },
     .{ .keys = "F", .does = .search, .label = "search every table", .also = "find text grep", .wants = .sql },
-    .{ .keys = "/", .does = .filter_objects, .label = "filter the object list", .also = "search find tables" },
+    .{ .keys = "/", .does = .filter_objects, .label = "filter the object list", .also = "search find tables go to jump", .needs = .sidebar },
+    .{ .keys = "/", .does = .find, .label = "find in the rows", .also = "search text look for grep next match", .needs = .main },
     .{ .keys = "W", .does = .filter_rows, .label = "filter the rows", .also = "where condition" },
     .{ .keys = "gw", .does = .columns, .label = "choose visible columns", .also = "hide show" },
     .{ .keys = "o", .does = .sort, .label = "sort by this column", .also = "order asc desc" },
@@ -373,7 +390,7 @@ pub const actions = [_]Action{
     .{ .keys = "K", .does = .foreign_key, .label = "add a foreign key", .also = "reference relation", .wants = .relations },
     .{ .keys = "gV", .does = .view, .label = "create a view", .also = "new", .wants = .relations },
     .{ .keys = "T", .does = .trigger, .label = "create a trigger", .also = "new", .wants = .relations },
-    .{ .keys = "N", .does = .rename, .label = "rename the table", .also = "move", .wants = .tables },
+    .{ .keys = "gN", .does = .rename, .label = "rename the table", .also = "move", .wants = .tables },
     .{ .keys = "Y", .does = .copy_table, .label = "copy the table", .also = "duplicate", .wants = .tables },
     .{ .keys = "X", .does = .truncate, .label = "empty the table", .also = "truncate delete all", .wants = .ddl },
     .{ .keys = "D", .does = .drop, .label = "drop the table", .also = "delete remove", .wants = .tables },
@@ -394,7 +411,9 @@ pub const actions = [_]Action{
     .{ .keys = "q", .does = .quit, .label = "quit", .also = "exit close" },
 };
 
-/// The action a key, or two, belongs to.
+/// The action a key, or two, belongs to. Where a key is one thing in the list
+/// and another in the rows - `/` is - this answers with the first, and the key
+/// handler asks which pane it is in before it gets here.
 fn actionTyped(keys: []const u8) ?Action {
     for (actions) |action| {
         if (std.mem.eql(u8, action.keys, keys)) {
@@ -737,12 +756,18 @@ fn afterPrefix(app: *App, pending: u21, key: Key) !void {
             'g' => {
                 if (app.focus == .sidebar) {
                     app.sidebar.selected = 0;
+                } else if (paged(app.view)) {
+                    app.pager.scroll = 0;
                 } else {
                     app.cursor.row = 0;
                 }
             },
             't' => app.nextTab(),
             'T' => app.prevTab(),
+            // The page of rows the engine hands over, which `n` and `p` turned
+            // before `n` was given to what `/` found.
+            'n' => try movePage(app, 1),
+            'p' => try movePage(app, -1),
             '1'...'9' => app.selectTab(point - '1'),
             // And what the letters did before vi's meanings took them: `gm` is
             // the messages `m` used to open. They are in the table of actions
@@ -964,6 +989,11 @@ fn click(app: *App, mouse: term.Mouse, size: term.Size) !void {
     switch (mouse.button) {
         .wheel_up, .wheel_down => {
             const delta: i32 = if (mouse.button == .wheel_down) 1 else -1;
+            // Over a screen that is read, the wheel reads on.
+            if (!in_sidebar and paged(app.view)) {
+                app.pager.by(delta * 3);
+                return;
+            }
             const was = app.focus;
             app.focus = if (in_sidebar) .sidebar else .main;
             var steps: usize = 0;
@@ -995,32 +1025,26 @@ fn click(app: *App, mouse: term.Mouse, size: term.Size) !void {
         }
         return;
     }
-    if (app.view != .grid or mouse.row < 3) {
+    if (app.view != .grid or mouse.row < 2) {
         return;
     }
+    // Which column, by the layout that drew it.
+    const column = draw.columnAt(app, size, mouse.col);
     app.focus = .main;
+    if (mouse.row == 2) {
+        // A click on a column's name sorts by it, as `o` on it does.
+        if (column) |index| {
+            app.cursor.col = index;
+            try sort(app);
+        }
+        return;
+    }
     const row = app.cursor.row_scroll + (mouse.row - 3);
     if (row < app.grid.rows.items.len) {
         app.cursor.row = row;
     }
-    // Walk the visible columns to find which one the click landed in.
-    var x: usize = side;
-    var index = app.cursor.col_scroll;
-    var seen: usize = 0;
-    while (index < app.grid.cols.items.len) : (index += 1) {
-        if (app.isHidden(index)) {
-            continue;
-        }
-        const w = @min(@max(app.grid.widths.items[index], 3), app.grid.text_limit) + 1;
-        if (mouse.col >= x and mouse.col < x + w) {
-            app.cursor.col = index;
-            break;
-        }
-        x += w;
-        seen += 1;
-        if (x > size.cols) {
-            break;
-        }
+    if (column) |index| {
+        app.cursor.col = index;
     }
 }
 
@@ -1114,16 +1138,42 @@ fn perform(app: *App, does: Does) !void {
             }
         },
         .structure => {
-            if (!app.hasTable()) {
+            // Of the table the cursor is on, where the cursor is in the list:
+            // somebody who moved to a name there and asked for its structure
+            // was shown the structure of whatever was open instead.
+            const other = if (app.focus == .sidebar)
+                if (app.current()) |object|
+                    if (app.grid.name) |name| !std.mem.eql(u8, name, object.name) else true
+                else
+                    false
+            else
+                !app.hasTable();
+            if (other) {
                 if (app.current()) |object| {
                     try app.openTable(object.name);
                 }
+            } else if (app.view == .structure) {
+                // And back to the rows, which is what the footer there has
+                // always said `S` does.
+                app.view = .grid;
+                return;
             }
             app.view = .structure;
+            app.focus = .main;
         },
-        .messages => app.view = if (app.view == .messages) .grid else .messages,
-        .info => app.view = if (app.view == .info) .grid else .info,
-        .relations => app.view = if (app.view == .relations) .grid else .relations,
+        .messages => read(app, .messages),
+        .info => read(app, .info),
+        .relations => read(app, .relations),
+        .find => {
+            if (app.view != .grid or app.grid.rows.items.len == 0) {
+                app.complain("there are no rows here to look in", .{});
+                return;
+            }
+            app.focus = .main;
+            app.cursor.find_from = .{ app.cursor.row, app.cursor.col };
+            app.grid.find.clearRetainingCapacity();
+            try ask(app, .find, " /");
+        },
         .connections => app.view = .connections,
         .reload => {
             try app.loadObjects();
@@ -1182,9 +1232,21 @@ fn perform(app: *App, does: Does) !void {
     }
 }
 
+/// Put one of the screens that are read up, or take it down again. The
+/// keys go to it while it is up: it is what was asked for, and what `j` is
+/// most likely meant for.
+fn read(app: *App, view: app_mod.View) void {
+    if (app.view == view) {
+        app.view = .grid;
+        return;
+    }
+    app.view = view;
+    app.focus = .main;
+}
+
 /// The keys that move about rather than do something, which is why they are
 /// not in the table of actions. A test holds the table to not taking one.
-pub const MOVING = "jkhlwbgGHML0^$npz'`mtvVC";
+pub const MOVING = "jkhlwbgGHML0^$nNpz'`mV";
 
 /// A key in the grid or the object list. What it does is in the table of
 /// actions if it does anything; what is left moves the cursor, or waits for a
@@ -1192,15 +1254,18 @@ pub const MOVING = "jkhlwbgGHML0^$npz'`mtvVC";
 fn letter(app: *App, point: u21) !void {
     var typed: [4]u8 = undefined;
     const len = std.unicode.utf8Encode(point, &typed) catch return;
+    // `/` looks in the pane it is pressed in: for a name in the list, for text
+    // in the rows.
+    if (point == '/') {
+        const in_rows = app.view == .grid and app.focus == .main and app.grid.rows.items.len != 0;
+        return perform(app, if (in_rows) .find else .filter_objects);
+    }
     if (actionTyped(typed[0..len])) |action| {
         return perform(app, action.does);
     }
     switch (point) {
-        // The same thing under a second key.
-        't' => try perform(app, .browse),
         ' ' => try perform(app, .mark),
         'V' => try app.markRange(),
-        'C' => try perform(app, .yank),
 
         'j' => try move(app, 1),
         'k' => try move(app, -1),
@@ -1242,8 +1307,12 @@ fn letter(app: *App, point: u21) !void {
                 app.cursor.col = at - 1;
             }
         },
-        'n' => try movePage(app, 1),
-        'p' => try movePage(app, -1),
+        'n' => app.findAgain(true),
+        'N' => app.findAgain(false),
+        // Where `n` and this turned the page. One of the two had to go to what
+        // `/` found, and a pair that is only half there is worse than a pair
+        // somewhere else - so this one says where they went.
+        'p' => app.say("gp is the page before, gn the next - ctrl+b and ctrl+f go by a screen", .{}),
         // And the keys that wait for another. The footer lists what it can be.
         'g', 'z', 'm' => app.typing.prefix = point,
         '\'', '`' => app.typing.prefix = '\'',
@@ -1312,6 +1381,91 @@ fn moveColumn(app: *App, delta: i32) void {
         }
     }
     app.cursor.col = next;
+}
+
+/// The screens that are read from top to bottom rather than worked in.
+fn paged(view: app_mod.View) bool {
+    return switch (view) {
+        .structure, .messages, .info, .relations => true,
+        else => false,
+    };
+}
+
+/// Moving about one of those. True when the key was one that does.
+fn scrollPager(app: *App, key: Key) bool {
+    const page: isize = @intCast(@max(1, app.pager.page));
+    const by: isize = switch (key) {
+        .char => |point| switch (point) {
+            'j' => 1,
+            'k' => -1,
+            'G' => std.math.maxInt(i32),
+            else => return false,
+        },
+        .down => 1,
+        .up => -1,
+        .page_down => page,
+        .page_up => -page,
+        .home => -std.math.maxInt(i32),
+        .end => std.math.maxInt(i32),
+        .ctrl => |code| switch (code) {
+            'd' => @divTrunc(page + 1, 2),
+            'u' => -@divTrunc(page + 1, 2),
+            'f' => page,
+            'b' => -page,
+            else => return false,
+        },
+        else => return false,
+    };
+    app.pager.by(by);
+    return true;
+}
+
+/// Up or down by a screen of rows, or half of one - of the rows in hand, and
+/// on to the next page of them where those run out, the way `j` goes on.
+fn moveScreen(app: *App, direction: i32, half: bool) !void {
+    if (app.focus == .sidebar) {
+        const count = app.visibleCount();
+        if (count == 0) {
+            return;
+        }
+        const shown = @max(1, app.sidebar.shown);
+        const by = if (half) (shown + 1) / 2 else shown;
+        app.sidebar.selected = if (direction > 0)
+            @min(app.sidebar.selected + by, count - 1)
+        else
+            app.sidebar.selected -| by;
+        return;
+    }
+    const count = app.grid.rows.items.len;
+    if (count == 0) {
+        return;
+    }
+    const page = @max(1, app.cursor.page);
+    // A line of the screen before stays on the one after, so the eye has
+    // somewhere to start from.
+    const by = if (half) (page + 1) / 2 else @max(1, page -| 1);
+    if (direction > 0) {
+        if (app.cursor.row + 1 >= count) {
+            if (app.hasTable() and app.grid.page + 1 < app.pages()) {
+                app.cursor.row = 0;
+                app.cursor.row_scroll = 0;
+                try movePage(app, 1);
+            }
+            return;
+        }
+        app.cursor.row = @min(app.cursor.row + by, count - 1);
+        app.cursor.row_scroll = @min(app.cursor.row_scroll + by, count -| page);
+        return;
+    }
+    if (app.cursor.row == 0) {
+        if (app.hasTable() and app.grid.page > 0) {
+            try movePage(app, -1);
+            app.cursor.row = app.grid.rows.items.len -| 1;
+        }
+        return;
+    }
+    app.cursor.row -|= by;
+    app.cursor.row_scroll -|= by;
 }
 
 /// `r` reads the table once; this keeps reading it. The view stays at the end,
@@ -1556,8 +1710,10 @@ fn onFiles(app: *App, key: Key) !void {
             'x' => try askRemove(app),
             'n' => try ask(app, .new_dir, " new directory: "),
             '/' => try ask(app, .go_to, " go to: "),
-            'r' => try askRename(app),
-            'R' => {
+            // `r` reads again here as it does in the grid; it renamed, and
+            // `R` read again, which was the grid's two keys the other way up.
+            'N' => try askRename(app),
+            'r' => {
                 manager.reload();
                 app.say("reloaded", .{});
             },
@@ -1634,6 +1790,8 @@ fn typing(app: *App, key: Key) !void {
                     app.sidebar.filter.clearRetainingCapacity();
                     app.sidebar.selected = 0;
                 }
+            } else if (prompt.kind == .find) {
+                app.findOff(true);
             }
             close(app);
         },
@@ -1644,7 +1802,27 @@ fn typing(app: *App, key: Key) !void {
             defer app.allocator.free(line);
             close(app);
             switch (kind) {
-                .filter => {},
+                // Enter on a name that was typed for goes to it. The list stays
+                // narrowed, for the next of them; the table that is already open
+                // is left as it is, page and filter and all.
+                .filter => if (app.view != .connections and line.len != 0) {
+                    if (app.current()) |object| {
+                        const open_already = if (app.grid.name) |name| std.mem.eql(u8, name, object.name) else false;
+                        if (!open_already) {
+                            try app.openTable(object.name);
+                        }
+                        app.view = .grid;
+                        app.focus = .main;
+                    }
+                },
+                .find => {
+                    app.cursor.find_from = null;
+                    if (line.len == 0) {
+                        app.findOff(false);
+                    } else {
+                        app.sayFound();
+                    }
+                },
                 .password => try app.connectWithPassword(line),
                 .confirm => {
                     if (line.len != 0 and (line[0] == 'y' or line[0] == 'Y')) {
@@ -1740,6 +1918,9 @@ fn typing(app: *App, key: Key) !void {
 /// connection list on the other, since `/` means the same thing on both.
 fn refilter(app: *App) !void {
     const prompt = app.typing.prompt orelse return;
+    if (prompt.kind == .find) {
+        return app.findTyped(prompt.buffer.items);
+    }
     if (prompt.kind != .filter) {
         return;
     }

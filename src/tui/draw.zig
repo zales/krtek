@@ -557,12 +557,24 @@ fn sidebar(app: *App, width: usize, rows: usize) void {
 }
 
 /// Which columns the grid shows on this frame, and how wide each one is.
-const Layout = struct {
+pub const Layout = struct {
     columns: []const usize, // indexes into app.grid.cols
     widths: []const usize,
+    /// The first of them is held where it is while the others scroll under it.
+    pinned: bool = false,
+    /// How many columns there are to show, and which of them the ones that
+    /// scroll are: from `first`, up to but not including `last`.
+    shown: usize = 0,
+    first: usize = 0,
+    last: usize = 0,
 };
 
-fn layout(app: *App, available: usize, columns: []usize, widths: []usize) Layout {
+/// How wide a column is drawn, before whatever is left over is handed out.
+fn columnWidth(app: *App, index: usize) usize {
+    return @min(@max(app.grid.widths.items[index], 3), app.grid.text_limit);
+}
+
+pub fn layout(app: *App, available: usize, columns: []usize, widths: []usize) Layout {
     // Hidden columns take no part in the layout at all.
     var shown: usize = 0;
     for (0..app.grid.cols.items.len) |i| {
@@ -585,11 +597,19 @@ fn layout(app: *App, available: usize, columns: []usize, widths: []usize) Layout
         app.cursor.col_scroll = at;
     }
     while (true) {
+        // The first column stays where it is once the others have scrolled: it
+        // is the key far more often than not, and a row of values with nothing
+        // to say whose they are is a row to scroll back from. Not where it
+        // would take more than a third of the room - a first column that wide
+        // is the text, and holding it leaves nowhere for the rest.
+        const first_width = columnWidth(app, columns[0]);
+        const pinned = app.cursor.col_scroll > 0 and (first_width + 1) * 3 <= available;
+        const room = if (pinned) available - (first_width + 1) else available;
         var used: usize = 0;
         var last = app.cursor.col_scroll;
         while (last < shown) {
-            const w = @min(@max(app.grid.widths.items[columns[last]], 3), app.grid.text_limit);
-            if (used + w + 1 > available and last > app.cursor.col_scroll) {
+            const w = columnWidth(app, columns[last]);
+            if (used + w + 1 > room and last > app.cursor.col_scroll) {
                 break;
             }
             used += w + 1;
@@ -597,13 +617,17 @@ fn layout(app: *App, available: usize, columns: []usize, widths: []usize) Layout
         }
         if (at < last or app.cursor.col_scroll + 1 >= shown) {
             var n: usize = 0;
+            if (pinned) {
+                widths[0] = first_width;
+                n = 1;
+            }
             var i = app.cursor.col_scroll;
             while (i < last and n < widths.len) : ({
                 i += 1;
                 n += 1;
             }) {
                 columns[n] = columns[i];
-                widths[n] = @min(@max(app.grid.widths.items[columns[i]], 3), app.grid.text_limit);
+                widths[n] = columnWidth(app, columns[i]);
             }
             // Whatever is left over goes to the last column, up to what it would
             // have taken without a clip. `text_limit` is there to stop one wide
@@ -617,14 +641,43 @@ fn layout(app: *App, available: usize, columns: []usize, widths: []usize) Layout
                 }
                 if (used_now < available) {
                     const natural = @max(app.grid.widths.items[columns[n - 1]], 3);
-                    const room = available - used_now;
-                    widths[n - 1] += @min(room, natural -| widths[n - 1]);
+                    const spare = available - used_now;
+                    widths[n - 1] += @min(spare, natural -| widths[n - 1]);
                 }
             }
-            return .{ .columns = columns[0..n], .widths = widths[0..n] };
+            return .{
+                .columns = columns[0..n],
+                .widths = widths[0..n],
+                .pinned = pinned,
+                .shown = shown,
+                .first = app.cursor.col_scroll,
+                .last = last,
+            };
         }
         app.cursor.col_scroll += 1;
     }
+}
+
+/// Which column of the grid is drawn at this place across the screen, if one
+/// is. The mouse asks, and is answered from the layout the drawing used - the
+/// two were worked out apart before, and stopped agreeing as soon as the last
+/// column was given the room nobody else wanted.
+pub fn columnAt(app: *App, size: Size, x: usize) ?usize {
+    const side = app_mod.sidebarWidth(size.cols);
+    if (x < side or size.cols <= side + 1) {
+        return null;
+    }
+    var indexes: [128]usize = undefined;
+    var widths: [128]usize = undefined;
+    const plan = layout(app, size.cols - side - 1, &indexes, &widths);
+    var from: usize = side;
+    for (plan.widths, 0..) |w, n| {
+        if (x >= from and x < from + w + 1) {
+            return plan.columns[n];
+        }
+        from += w + 1;
+    }
+    return null;
 }
 
 fn grid(app: *App, size: Size, side: usize, rows: usize) void {
@@ -686,6 +739,24 @@ fn grid(app: *App, size: Size, side: usize, rows: usize) void {
     var widths: [128]usize = undefined;
     const plan = layout(app, width - 1, &indexes, &widths);
 
+    // Which columns these are, where they are not all of them: at the right of
+    // the title line, with an arrow on the side there are more. A table of
+    // thirty columns looked like a table of five until `l` was held down.
+    if (plan.first > 0 or plan.last < plan.shown) {
+        var which: [48]u8 = undefined;
+        const text = std.mem.print(&which, "columns {d}-{d} of {d}", .{ plan.first + 1, plan.last, plan.shown }) catch "";
+        const w = term.width(text) + 5;
+        if (text.len != 0 and width > used + w + 2) {
+            screen.moveTo(1, left + width - w);
+            screen.style(.{ .fg = C.accent, .bold = true });
+            _ = write(app, if (plan.first > 0) "‹ " else "  ", 2);
+            screen.style(.{ .fg = C.dim });
+            _ = write(app, text, w);
+            screen.style(.{ .fg = C.accent, .bold = true });
+            _ = write(app, if (plan.last < plan.shown) " › " else "   ", 3);
+        }
+    }
+
     // Header row.
     screen.moveTo(2, left);
     screen.style(.{ .bg = C.bar, .fg = C.dim, .bold = true });
@@ -693,8 +764,13 @@ fn grid(app: *App, size: Size, side: usize, rows: usize) void {
     for (plan.widths, 0..) |w, n| {
         const index = plan.columns[n];
         const sorted = app.grid.order != null and std.mem.eql(u8, app.grid.order.?, app.grid.cols.items[index]);
+        if (plan.pinned and n == 1) {
+            screen.style(.{ .bg = C.bar, .fg = C.faint });
+            screen.put("│");
+        } else {
+            screen.put(" ");
+        }
         screen.style(.{ .bg = C.bar, .fg = if (sorted) C.accent else C.dim, .bold = true });
-        screen.put(" ");
         pad(app, app.grid.cols.items[index], w, false);
         x += w + 1;
     }
@@ -735,13 +811,28 @@ fn grid(app: *App, size: Size, side: usize, rows: usize) void {
             }
             const cell = row.cells[index];
             const on_cell = on_row and index == app.cursor.col;
-            screen.style(.{
+            // What `/` is looking for, underlined wherever it is on screen.
+            const hit = app.hasFound(r, index);
+            const style: term.Style = .{
                 .bg = if (on_cell) C.accent else if (on_row) C.selected else null,
                 .fg = if (on_cell) 16 else if (marked) C.warn else cell.colour(),
                 .italic = cell.kind == .nul,
-                .bold = marked and !on_cell,
-            });
-            screen.put(if (marked and n == 0) "*" else " ");
+                .bold = (marked or hit) and !on_cell,
+                .underline = hit,
+                .underline_colour = if (hit and !on_cell) C.warn else null,
+            };
+            if (plan.pinned and n == 1) {
+                // The rule between the column that stays and the ones that move.
+                screen.style(.{ .bg = if (on_row) C.selected else null, .fg = C.faint });
+                screen.put("│");
+                screen.style(style);
+            } else {
+                var lead = style;
+                lead.underline = false;
+                screen.style(lead);
+                screen.put(if (marked and n == 0) "*" else " ");
+                screen.style(style);
+            }
             pad(app, cell.text, w, cell.kind == .int or cell.kind == .float);
         }
         screen.reset();
@@ -772,6 +863,81 @@ fn grid(app: *App, size: Size, side: usize, rows: usize) void {
     }
 }
 
+/// The lines of a screen that may be longer than the window: which of them is
+/// on screen, and where.
+///
+/// The structure of a table, the last batch, the database information and the
+/// relations were each drawn from the top until the room ran out, and that was
+/// the end of them - thirty columns into a table, its indexes, its foreign keys
+/// and its definition were simply not there. Each line is asked for through
+/// this now, drawn or passed over, and all of them are counted, so the keys
+/// know how far there is to go.
+const Lines = struct {
+    app: *App,
+    left: usize,
+    /// The last row of the screen there is to draw on; the first is the third.
+    last: usize,
+    skip: usize,
+    count: usize = 0,
+
+    fn begin(app: *App, left: usize, rows: usize) Lines {
+        // Another screen starts at its top, whatever the last one was left at.
+        if (app.pager.view != app.view) {
+            app.pager = .{ .view = app.view };
+        }
+        const page = @max(1, rows -| 1);
+        return .{ .app = app, .left = left, .last = rows, .skip = @min(app.pager.scroll, app.pager.lines -| page) };
+    }
+
+    /// The next line: true with the cursor at its start, false when it is
+    /// above or below what is on screen.
+    fn next(self: *Lines) bool {
+        const n = self.count;
+        self.count += 1;
+        if (n < self.skip) {
+            return false;
+        }
+        const row = 2 + (n - self.skip);
+        if (row > self.last) {
+            return false;
+        }
+        self.app.screen.moveTo(row, self.left);
+        return true;
+    }
+
+    /// Blank what the lines did not reach, and leave behind how many there
+    /// were. On the title line, at the right: which of them these are.
+    fn end(self: *Lines, width: usize) void {
+        const screen = self.app.screen;
+        var row = 2 + (self.count -| self.skip);
+        while (row <= self.last) : (row += 1) {
+            screen.moveTo(row, self.left);
+            screen.reset();
+            screen.clearToEol();
+        }
+        const page = @max(1, self.last -| 1);
+        self.app.pager.page = page;
+        self.app.pager.lines = self.count;
+        self.app.pager.scroll = @min(self.skip, self.count -| page);
+        if (self.count <= page) {
+            return;
+        }
+        var buf: [64]u8 = undefined;
+        const where = std.mem.print(&buf, "lines {d}-{d} of {d}   j k scroll ", .{
+            self.skip + 1,
+            @min(self.skip + page, self.count),
+            self.count,
+        }) catch return;
+        const w = term.width(where);
+        if (width > w + 24) {
+            screen.moveTo(1, self.left + width - w);
+            screen.style(.{ .fg = C.faint });
+            _ = write(self.app, where, w);
+            screen.reset();
+        }
+    }
+};
+
 fn structure(app: *App, size: Size, side: usize, rows: usize) void {
     const screen = app.screen;
     const left = side;
@@ -791,13 +957,12 @@ fn structure(app: *App, size: Size, side: usize, rows: usize) void {
     _ = write(app, table.name, width);
     screen.clearToEol();
 
-    var line: usize = 2;
-    line = section(app, left, width, line, rows, "COLUMNS");
+    var lines = Lines.begin(app, left, rows);
+    section(&lines, width, "COLUMNS");
     for (app.conn.columns(scratch, table) catch &[_]database.Column{}) |column| {
-        if (line > rows) {
-            break;
+        if (!lines.next()) {
+            continue;
         }
-        screen.moveTo(line, left);
         var used: usize = 0;
         screen.style(.{ .fg = C.text });
         used += write(app, "  ", width);
@@ -808,35 +973,33 @@ fn structure(app: *App, size: Size, side: usize, rows: usize) void {
         used += 22;
         if (column.notnull) {
             screen.style(.{ .fg = C.warn });
-            used += write(app, "NOT NULL ", width - used);
+            used += write(app, "NOT NULL ", width -| used);
         } else {
             screen.style(.{ .fg = C.nul, .italic = true });
-            used += write(app, "null ", width - used);
+            used += write(app, "null ", width -| used);
         }
         if (column.pk) {
             screen.style(.{ .fg = C.accent });
-            used += write(app, "PRIMARY ", width - used);
+            used += write(app, "PRIMARY ", width -| used);
         }
         if (column.unique) {
             screen.style(.{ .fg = C.accent });
-            used += write(app, "UNIQUE ", width - used);
+            used += write(app, "UNIQUE ", width -| used);
         }
         if (column.dflt) |value| {
             screen.style(.{ .fg = C.faint });
-            used += write(app, "default ", width - used);
-            used += write(app, value, if (width > used) width - used else 0);
+            used += write(app, "default ", width -| used);
+            used += write(app, value, width -| used);
         }
         screen.reset();
         screen.clearToEol();
-        line += 1;
     }
 
-    line = section(app, left, width, line, rows, "INDEXES");
+    section(&lines, width, "INDEXES");
     for (app.conn.indexes(scratch, table) catch &[_]database.Index{}) |index| {
-        if (line > rows) {
-            break;
+        if (!lines.next()) {
+            continue;
         }
-        screen.moveTo(line, left);
         var used: usize = 0;
         screen.style(.{ .fg = C.accent });
         used += write(app, "  ", width);
@@ -846,80 +1009,69 @@ fn structure(app: *App, size: Size, side: usize, rows: usize) void {
         pad(app, index.columns, 30, false);
         used += 30;
         screen.style(.{ .fg = C.faint });
-        used += write(app, " ", width - used);
-        used += write(app, index.name, if (width > used) width - used else 0);
+        used += write(app, " ", width -| used);
+        used += write(app, index.name, width -| used);
         if (index.partial) {
-            used += write(app, " partial", if (width > used) width - used else 0);
+            used += write(app, " partial", width -| used);
         }
         screen.reset();
         screen.clearToEol();
-        line += 1;
     }
 
-    line = section(app, left, width, line, rows, "FOREIGN KEYS");
+    section(&lines, width, "FOREIGN KEYS");
     for (app.conn.foreignKeys(scratch, table) catch &[_]database.ForeignKey{}) |key| {
-        if (line > rows) {
-            break;
+        if (!lines.next()) {
+            continue;
         }
-        screen.moveTo(line, left);
         var used: usize = 0;
         screen.style(.{ .fg = C.text });
         used += write(app, "  ", width);
         pad(app, key.column, 22, false);
         used += 22;
         screen.style(.{ .fg = C.faint });
-        used += write(app, "-> ", width - used);
+        used += write(app, "-> ", width -| used);
         screen.style(.{ .fg = C.accent });
-        used += write(app, key.target_table, width - used);
+        used += write(app, key.target_table, width -| used);
         screen.style(.{ .fg = C.dim });
-        used += write(app, ".", width - used);
-        used += write(app, key.target_column, width - used);
+        used += write(app, ".", width -| used);
+        used += write(app, key.target_column, width -| used);
         screen.style(.{ .fg = C.faint });
-        used += write(app, "   on update ", width - used);
-        used += write(app, key.on_update, width - used);
-        used += write(app, ", on delete ", width - used);
-        used += write(app, key.on_delete, if (width > used) width - used else 0);
+        used += write(app, "   on update ", width -| used);
+        used += write(app, key.on_update, width -| used);
+        used += write(app, ", on delete ", width -| used);
+        used += write(app, key.on_delete, width -| used);
         screen.reset();
         screen.clearToEol();
-        line += 1;
     }
 
-    line = section(app, left, width, line, rows, "DEFINITION");
+    section(&lines, width, "DEFINITION");
     {
         const definition = (app.conn.definition(scratch, table) catch null) orelse "";
         var it = std.mem.splitScalar(u8, definition, '\n');
         while (it.next()) |part| {
-            if (line > rows) {
-                break;
+            if (!lines.next()) {
+                continue;
             }
-            screen.moveTo(line, left);
             screen.style(.{ .fg = C.dim });
             _ = write(app, "  ", width);
             // A tab would land on the terminal's own stop and break the column.
             const expanded = expandTabs(scratch, part) catch part;
-            _ = write(app, expanded, width - 2);
+            _ = write(app, expanded, width -| 2);
             screen.clearToEol();
-            line += 1;
         }
     }
-    while (line <= rows) : (line += 1) {
-        screen.moveTo(line, left);
-        screen.reset();
-        screen.clearToEol();
-    }
+    lines.end(width);
 }
 
-fn section(app: *App, left: usize, width: usize, line: usize, rows: usize, title: []const u8) usize {
-    if (line > rows) {
-        return line;
+fn section(lines: *Lines, width: usize, title: []const u8) void {
+    if (!lines.next()) {
+        return;
     }
-    const screen = app.screen;
-    screen.moveTo(line, left);
+    const screen = lines.app.screen;
     screen.style(.{ .fg = C.faint, .bold = true });
-    _ = write(app, " ", width);
-    _ = write(app, title, width - 1);
+    _ = write(lines.app, " ", width);
+    _ = write(lines.app, title, width -| 1);
     screen.clearToEol();
-    return line + 1;
 }
 
 /// Two panes side by side, each one a place and a path in it. Which pane the
@@ -1044,47 +1196,52 @@ fn messages(app: *App, size: Size, side: usize, rows: usize) void {
     _ = write(app, " last batch", width);
     screen.clearToEol();
 
-    var line: usize = 2;
-    for (app.report.list.items, 0..) |report, n| {
-        if (line + 1 > rows) {
-            break;
-        }
-        screen.moveTo(line, left);
-        screen.style(.{ .fg = if (report.failure != null) C.danger else C.dim });
-        var buf: [32]u8 = undefined;
-        var used: usize = write(app, std.mem.print(&buf, " {d} ", .{n + 1}) catch " ", width);
-        screen.style(.{ .fg = C.text });
-        used += write(app, report.sql, width - used - 22);
-        screen.style(.{ .fg = C.faint });
-        var right: [48]u8 = undefined;
-        const stats = if (report.result_set)
-            "  result set, shown in the grid"
-        else
-            std.mem.print(&right, "  {d} rows, {d} chg, {d:.1} ms", .{ report.rows, report.changes, report.ms }) catch "";
-        used += write(app, stats, if (width > used) width - used else 0);
-        screen.clearToEol();
-        line += 1;
-        if (report.failure) |message| {
-            if (line > rows) {
-                break;
-            }
-            screen.moveTo(line, left);
-            screen.style(.{ .fg = C.danger });
-            _ = write(app, "   ", width);
-            _ = write(app, message, width - 3);
-            screen.clearToEol();
-            line += 1;
-        }
-    }
     if (app.report.list.items.len == 0) {
         note(app, left, width, "nothing has been run yet");
-        line = 3;
+        var blank: usize = 3;
+        while (blank <= rows) : (blank += 1) {
+            screen.moveTo(blank, left);
+            screen.reset();
+            screen.clearToEol();
+        }
+        return;
     }
-    while (line <= rows) : (line += 1) {
-        screen.moveTo(line, left);
-        screen.reset();
-        screen.clearToEol();
+    var lines = Lines.begin(app, left, rows);
+    for (app.report.list.items, 0..) |report, n| {
+        if (lines.next()) {
+            screen.style(.{ .fg = if (report.failure != null) C.danger else C.dim });
+            var buf: [32]u8 = undefined;
+            var used: usize = write(app, std.mem.print(&buf, " {d} ", .{n + 1}) catch " ", width);
+            screen.style(.{ .fg = C.text });
+            used += write(app, report.sql, width -| used -| 22);
+            screen.style(.{ .fg = C.faint });
+            var right: [48]u8 = undefined;
+            const stats = if (report.result_set)
+                "  result set, shown in the grid"
+            else
+                std.mem.print(&right, "  {d} rows, {d} chg, {d:.1} ms", .{ report.rows, report.changes, report.ms }) catch "";
+            used += write(app, stats, width -| used);
+            screen.clearToEol();
+        }
+        // All of what the engine said, on as many lines as it takes. It was
+        // one line cut at the edge of the window, and the half that was cut -
+        // the name of the column, the place in the statement - is the half
+        // somebody opened this screen for.
+        if (report.failure) |message| {
+            var rest: []const u8 = message;
+            while (rest.len != 0) {
+                const piece = wrapRow(&rest, width -| 4);
+                if (!lines.next()) {
+                    continue;
+                }
+                screen.style(.{ .fg = C.danger });
+                _ = write(app, "   ", width);
+                _ = write(app, piece.text, width -| 3);
+                screen.clearToEol();
+            }
+        }
     }
+    lines.end(width);
 }
 
 pub const HELP = [_][2][]const u8{
@@ -1095,14 +1252,17 @@ pub const HELP = [_][2][]const u8{
     .{ "w b 0 $", "next, previous, first, last column" },
     .{ "tab", "sidebar / grid" },
     .{ "gg G", "first, last row" },
+    .{ "ctrl+d ctrl+u", "down, up half a screen" },
+    .{ "ctrl+f ctrl+b", "down, up a screen; pgdn pgup too" },
     .{ "H M L", "top, middle, bottom of the screen" },
     .{ "zt zz zb", "this row to the top, middle, bottom" },
-    .{ "n p", "next, previous page" },
+    .{ "gn gp", "next, previous page of rows" },
     .{ ":12 :$", "row 12 of the page, the last one" },
     .{ "ma 'a", "leave a mark here, go back to it" },
-    .{ "/", "filter the object list" },
-    .{ "d t", "data of the selected table" },
-    .{ "S", "structure" },
+    .{ "/", "in the list: filter it, enter opens the first" },
+    .{ "/", "in the rows: find text; n N next, previous" },
+    .{ "d", "data of the selected table" },
+    .{ "S", "structure, and back; j k scroll it" },
     .{ "gb gL", "database info, relations" },
     .{ "gm", "report of the last batch" },
     .{ "r", "reload" },
@@ -1129,7 +1289,7 @@ pub const HELP = [_][2][]const u8{
     .{ "c a", "create, alter a table" },
     .{ "I K", "index, foreign key" },
     .{ "gV T", "view, trigger" },
-    .{ "N Y", "rename, copy a table" },
+    .{ "gN Y", "rename, copy a table" },
     .{ "D X", "drop, empty" },
     .{ "", "DATA" },
     .{ "s", "the editor: SQL where there is SQL, the engine's own commands where there is not" },
@@ -1145,7 +1305,8 @@ pub const HELP = [_][2][]const u8{
     .{ "/", "go to a path" },
     .{ "space", "mark, and unmark" },
     .{ "c", "copy over, directories and all" },
-    .{ "n r x", "new directory, rename, remove" },
+    .{ "n N x", "new directory, rename, remove" },
+    .{ "r", "read both panes again" },
     .{ "", "IN THE EDITOR" },
     .{ "esc", "normal mode; once more puts the editor away, keeping what is in it" },
     .{ "i a o O", "type again: here, after, on a new line below, above" },
@@ -1714,11 +1875,12 @@ fn footerHints(app: *App) []const u8 {
             // What `g` goes to, and what the letters after it did on their own
             // before they were given to vi. Ten things do not fit in eighty
             // columns, and the two that go are the two vi already taught.
-            'g' => fitted(
-                app,
-                " g top   t T tabs   v value   w columns   y clone   m messages   b info   L relations   M import   V view",
-                " v value  w columns  y clone  m messages  b info  L relations  M import  V view",
-            ),
+            'g' => fitted(app, &.{
+                " g top   n p page   t T tabs   v value   w columns   y clone   m messages   b info   L relations   M import   V view   N rename",
+                " g top   n p page   v value   w columns   y clone   m messages   b info   L relations   M import   V view   N rename",
+                " n p page  v value  w columns  y clone  m messages  b info  L relations  M import  V view  N rename",
+                " n p page  v value  w columns  y clone  m messages  b info  L relations",
+            }),
             'z' => " t this row to the top   z the middle   b the bottom   esc nothing",
             'x' => " x deletes this row   esc nothing",
             'm' => " a-z leaves that mark on this row   esc nothing",
@@ -1781,21 +1943,20 @@ fn footerHints(app: *App) []const u8 {
         return out.items;
     }
     return switch (app.view) {
-        .connections => fitted(
-            app,
+        .connections => fitted(app, &.{
             " enter connect   t in a new tab   / filter   a add   e edit   x remove   r read-only   q quit",
             " enter connect   t new tab   / filter   a add   e edit   x remove   r read-only",
-        ),
+        }),
         // Only what the engine will do: a key in this line that answers with a
         // refusal is a line that was wrong.
         .structure => if (app.caps().no_ddl.len != 0)
-            " S data   ctrl+k commands"
+            " S data   j k scroll   ctrl+k commands"
         else if (app.caps().no_tables.len != 0)
-            " a alter   S data   ctrl+k commands"
+            " a alter   S data   j k scroll   ctrl+k commands"
         else if (app.caps().no_relations.len != 0)
-            " a alter   N rename   S data   ctrl+k commands"
+            " a alter   gN rename   S data   j k scroll   ctrl+k commands"
         else
-            " a alter   I index   K key   N rename   S data   ctrl+k commands",
+            " a alter   I index   K key   gN rename   S data   j k scroll   ctrl+k commands",
 
         .messages => " gm back   s sql   r reload   ctrl+k commands",
         // Handled above, from what the engine said can be done.
@@ -1803,16 +1964,22 @@ fn footerHints(app: *App) []const u8 {
         .help => " ? back   ctrl+k commands",
         .info => " gb back   ctrl+k commands",
         .relations => " gL back   d browse   ctrl+k commands",
-        .files => " tab other pane   enter opens   c copy   space mark   n mkdir   r rename   x remove   q back",
+        .files => " tab other pane   enter opens   c copy   space mark   n mkdir   N rename   x remove   q back",
         .grid => rowHints(app),
     };
 }
 
-/// The longer way of saying it where the terminal has room for it. A hint that
-/// is cut off is worse than one that says less: what goes missing is whatever
-/// was at the end, and that is where quitting and the palette are.
-fn fitted(app: *App, long: []const u8, short: []const u8) []const u8 {
-    return if (term.width(long) <= app.screen.size().cols) long else short;
+/// The longest way of saying it that the terminal has room for, of however
+/// many ways there are, longest first. A hint that is cut off is worse than
+/// one that says less: what goes missing is whatever was at the end, and that
+/// is where quitting and the palette are.
+fn fitted(app: *App, ways: []const []const u8) []const u8 {
+    for (ways) |way| {
+        if (term.width(way) <= app.screen.size().cols) {
+            return way;
+        }
+    }
+    return ways[ways.len - 1];
 }
 
 /// What to press on a row, less whatever this engine will not do. A hint for
@@ -2425,32 +2592,26 @@ fn info(app: *App, size: Size, side: usize, rows: usize) void {
     _ = write(app, app.caps().label, width);
     screen.clearToEol();
 
-    var line: usize = 2;
-    line = labelled(app, left, width, line, rows, "connection", app.conn.describe());
-    line = labelled(app, left, width, line, rows, "version", app.conn.version());
-    line = section(app, left, width, line, rows, "SETTINGS");
+    var lines = Lines.begin(app, left, rows);
+    labelled(&lines, width, "connection", app.conn.describe());
+    labelled(&lines, width, "version", app.conn.version());
+    section(&lines, width, "SETTINGS");
     for (app.conn.settings(arena.allocator()) catch &[_]database.Setting{}) |setting| {
-        if (line > rows) {
-            break;
-        }
         const bad = std.mem.eql(u8, setting.label, "integrity") and !std.mem.eql(u8, setting.value, "ok");
         if (bad) {
-            screen.moveTo(line, left);
+            if (!lines.next()) {
+                continue;
+            }
             screen.style(.{ .fg = C.danger });
             _ = write(app, "  ", width);
             pad(app, setting.label, 18, false);
-            _ = write(app, setting.value, if (width > 22) width - 22 else 0);
+            _ = write(app, setting.value, width -| 22);
             screen.clearToEol();
-            line += 1;
             continue;
         }
-        line = labelled(app, left, width, line, rows, setting.label, setting.value);
+        labelled(&lines, width, setting.label, setting.value);
     }
-    while (line <= rows) : (line += 1) {
-        screen.moveTo(line, left);
-        screen.reset();
-        screen.clearToEol();
-    }
+    lines.end(width);
 }
 
 /// Replace tabs with two spaces so indentation survives inside a panel.
@@ -2466,19 +2627,17 @@ fn expandTabs(scratch: std.mem.Allocator, line: []const u8) ![]const u8 {
     return out.items;
 }
 
-fn labelled(app: *App, left: usize, width: usize, line: usize, rows: usize, label: []const u8, value: []const u8) usize {
-    if (line > rows) {
-        return line;
+fn labelled(lines: *Lines, width: usize, label: []const u8, value: []const u8) void {
+    if (!lines.next()) {
+        return;
     }
-    const screen = app.screen;
-    screen.moveTo(line, left);
+    const screen = lines.app.screen;
     screen.style(.{ .fg = C.dim });
-    _ = write(app, "  ", width);
-    pad(app, label, 18, false);
+    _ = write(lines.app, "  ", width);
+    pad(lines.app, label, 18, false);
     screen.style(.{ .fg = C.text });
-    _ = write(app, value, if (width > 22) width - 22 else 0);
+    _ = write(lines.app, value, width -| 22);
     screen.clearToEol();
-    return line + 1;
 }
 
 /// Every foreign key in the database, as one overview of how it hangs together.
@@ -2493,19 +2652,16 @@ fn relations(app: *App, size: Size, side: usize, rows: usize) void {
 
     var arena = std.heap.ArenaAllocator.init(app.allocator);
     defer arena.deinit();
-    var line: usize = 2;
-    var found: usize = 0;
+    var lines = Lines.begin(app, left, rows);
     for (app.sidebar.objects.items) |object| {
         if (!std.mem.eql(u8, object.kind, "table")) {
             continue;
         }
         const keys = app.foreignKeyDefs(arena.allocator(), object.name) catch continue;
         for (keys) |key| {
-            if (line > rows) {
-                break;
+            if (!lines.next()) {
+                continue;
             }
-            found += 1;
-            screen.moveTo(line, left);
             screen.style(.{ .fg = C.text });
             var used: usize = write(app, "  ", width);
             pad(app, object.name, 20, false);
@@ -2514,27 +2670,22 @@ fn relations(app: *App, size: Size, side: usize, rows: usize) void {
             pad(app, key.column, 18, false);
             used += 18;
             screen.style(.{ .fg = C.faint });
-            used += write(app, "-> ", width - used);
+            used += write(app, "-> ", width -| used);
             screen.style(.{ .fg = C.accent });
-            used += write(app, key.target_table, width - used);
+            used += write(app, key.target_table, width -| used);
             screen.style(.{ .fg = C.dim });
-            used += write(app, ".", width - used);
-            used += write(app, key.target_column, width - used);
+            used += write(app, ".", width -| used);
+            used += write(app, key.target_column, width -| used);
             screen.style(.{ .fg = C.faint });
-            used += write(app, "   ", width - used);
-            used += write(app, key.on_delete, if (width > used) width - used else 0);
+            used += write(app, "   ", width -| used);
+            used += write(app, key.on_delete, width -| used);
             screen.clearToEol();
-            line += 1;
         }
     }
+    const found = lines.count;
+    lines.end(width);
     if (found == 0) {
         note(app, left, width, "no foreign keys in this database");
-        line = 3;
-    }
-    while (line <= rows) : (line += 1) {
-        screen.moveTo(line, left);
-        screen.reset();
-        screen.clearToEol();
     }
 }
 

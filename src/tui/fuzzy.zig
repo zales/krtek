@@ -93,6 +93,81 @@ fn greedy(haystack: []const u8, needle: []const u8, from: usize, hit: *Hit) ?u16
     return points + @as(u16, @intCast(@min(20, 40 / (haystack.len + 1))));
 }
 
+/// One code point, and how many bytes it took. A byte that is not the start of
+/// a well formed one is taken as itself, so text that is not UTF-8 can still be
+/// searched: it is compared byte for byte, which is all there is to compare.
+fn pointAt(text: []const u8, at: usize) struct { point: u21, len: usize } {
+    const len = std.unicode.utf8ByteSequenceLength(text[at]) catch return .{ .point = text[at], .len = 1 };
+    if (at + len > text.len) {
+        return .{ .point = text[at], .len = 1 };
+    }
+    const point = std.unicode.utf8Decode(text[at .. at + len]) catch return .{ .point = text[at], .len = 1 };
+    return .{ .point = point, .len = len };
+}
+
+/// A letter without its case, for the alphabets this is likely to meet: ASCII,
+/// Latin-1 and Latin Extended-A, which is where `Č` and `ř` and `ő` live. Not
+/// the whole of Unicode - a table of that is larger than this program's other
+/// tables together - and what it does not know it leaves alone, so a letter
+/// from anywhere else still matches itself.
+pub fn fold(point: u21) u21 {
+    return switch (point) {
+        'A'...'Z' => point + 0x20,
+        0xc0...0xd6, 0xd8...0xde => point + 0x20,
+        // Pairs, the capital first: Ā ā, Ă ă ... Ķ ķ. Not the two Turkish i's
+        // in the middle of them, whose other halves are in ASCII.
+        0x100...0x12f, 0x132...0x137 => point | 1,
+        // And the other way round from here: ĸ stands alone, then Ĺ ĺ ... Ň ň.
+        0x139...0x148 => if (point & 1 == 1) point + 1 else point,
+        0x14a...0x177 => point | 1,
+        0x178 => 0xff,
+        0x179...0x17e => if (point & 1 == 1) point + 1 else point,
+        else => point,
+    };
+}
+
+/// Where `needle` is in `haystack` whatever the case of either, or null.
+/// Empty is found nowhere: nothing typed is nothing looked for.
+pub fn find(haystack: []const u8, needle: []const u8) ?usize {
+    if (needle.len == 0 or needle.len > haystack.len * 4) {
+        return null;
+    }
+    var from: usize = 0;
+    while (from < haystack.len) {
+        var i = from;
+        var j: usize = 0;
+        while (j < needle.len and i < haystack.len) {
+            const here = pointAt(haystack, i);
+            const wanted = pointAt(needle, j);
+            if (fold(here.point) != fold(wanted.point)) {
+                break;
+            }
+            i += here.len;
+            j += wanted.len;
+        }
+        if (j >= needle.len) {
+            return from;
+        }
+        from += pointAt(haystack, from).len;
+    }
+    return null;
+}
+
+test "text is found whatever its case, in the alphabets people here write in" {
+    try std.testing.expectEqual(@as(?usize, 6), find("Karel Čapek", "čap"));
+    try std.testing.expectEqual(@as(?usize, 6), find("karel čapek", "ČAP"));
+    try std.testing.expectEqual(@as(?usize, 0), find("ŽLUŤOUČKÝ KŮŇ", "žluťoučký kůň"));
+    try std.testing.expectEqual(@as(?usize, 0), find("Řehoř", "řEHOŘ"));
+    try std.testing.expect(find("Hrabal", "hrabe") == null);
+    try std.testing.expect(find("anything", "") == null);
+    try std.testing.expect(find("ab", "abc") == null);
+    // Not UTF-8 at all: compared as the bytes it is, and never read past the end.
+    try std.testing.expectEqual(@as(?usize, 1), find("a\xffb", "\xffB"));
+    try std.testing.expect(find("\xc5", "\xc5\x99") == null);
+    // What has no other case is itself.
+    try std.testing.expectEqual(@as(?usize, 6), find("東京都", "都"));
+}
+
 test "letters have to appear in order, and the score prefers the obvious match" {
     try std.testing.expect(match("drop the table", "dropt", null) != null);
     try std.testing.expect(match("drop the table", "zz", null) == null);

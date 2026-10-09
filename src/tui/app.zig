@@ -152,7 +152,7 @@ pub const Palette = struct {
     at: usize = 0,
 };
 
-pub const PromptKind = enum { command, filter, edit, confirm, password, new_dir, rename_file, remove_files, overwrite, go_to, remove_rows, forget_saved };
+pub const PromptKind = enum { command, filter, find, edit, confirm, password, new_dir, rename_file, remove_files, overwrite, go_to, remove_rows, forget_saved };
 
 pub const Prompt = struct {
     kind: PromptKind,
@@ -601,6 +601,9 @@ const Cursor = struct {
     /// Where `V` started a run of them: a row of the page in hand, until `V`
     /// again ticks everything from there to the cursor.
     range_from: ?usize = null,
+    /// Where the cursor was when `/` was pressed: what is typed is looked for
+    /// from there, and esc goes back to it.
+    find_from: ?[2]usize = null,
     /// Column indexes put away, by index into the grid's own columns.
     hidden: std.ArrayList(usize) = .empty,
     /// How many rows the grid has room for, as last drawn: what "the middle of
@@ -703,6 +706,8 @@ const Grid = struct {
     /// it must not then report a count as though it had worked.
     failed: bool = false,
     text_limit: usize = 44, // widest column in the grid
+    /// What `/` is looking for in the rows on the page, if anything.
+    find: std.ArrayList(u8) = .empty,
 
     fn clearConditions(self: *Grid, allocator: std.mem.Allocator) void {
         for (self.conditions.items) |condition| {
@@ -724,11 +729,35 @@ const Grid = struct {
         self.clearConditions(allocator);
         self.conditions.deinit(allocator);
         self.where_text.deinit(allocator);
+        self.find.deinit(allocator);
         self.schema.deinit(allocator);
         self.title.deinit(allocator);
         self.cols.deinit(allocator);
         self.widths.deinit(allocator);
         self.rows.deinit(allocator);
+    }
+};
+
+/// Where a screen that is read rather than worked in is scrolled to: the
+/// structure of a table, the report of the last batch, the database
+/// information and the relations. Each is longer than a window is tall as soon
+/// as the table has thirty columns, and what did not fit was simply not drawn.
+pub const Pager = struct {
+    scroll: usize = 0,
+    /// How many lines the screen had room for and how many there were, as last
+    /// drawn - the drawing is what counts them, and the keys need to be told.
+    page: usize = 1,
+    lines: usize = 0,
+    /// Which screen that was. Another one starts at its top.
+    view: View = .grid,
+
+    pub fn by(self: *Pager, delta: isize) void {
+        const last = self.lines -| self.page;
+        if (delta < 0) {
+            self.scroll -|= @intCast(-delta);
+        } else {
+            self.scroll = @min(self.scroll +| @as(usize, @intCast(delta)), last);
+        }
     }
 };
 
@@ -781,6 +810,7 @@ pub const Tab = struct {
     marks: [26]?Mark = @splat(null),
     typing: Typing,
     help: Help = .{},
+    pager: Pager = .{},
     report: Reporting,
     files: ?*Files.Manager = null,
     running: Running = .{},
@@ -871,6 +901,7 @@ pub const App = struct {
 
     typing: Typing,
     help: Help = .{},
+    pager: Pager = .{},
     history: std.ArrayList([]const u8) = .empty,
     report: Reporting,
 
@@ -2491,6 +2522,7 @@ pub const App = struct {
         self.cursor.hidden.clearRetainingCapacity();
         self.clearConditions();
         self.grid.where_text.clearRetainingCapacity();
+        self.grid.find.clearRetainingCapacity();
         self.view = .grid;
         try self.reload();
     }
@@ -2810,6 +2842,105 @@ pub const App = struct {
         if (!self.grid.failed) {
             self.say("the filter is off", .{});
         }
+    }
+
+    // --- finding text in the rows on the page ---
+
+    /// Whether this cell has what is being looked for in it. A NULL has no
+    /// text: the word the grid draws there is the grid's.
+    pub fn hasFound(self: *App, row: usize, column: usize) bool {
+        if (self.grid.find.items.len == 0 or row >= self.grid.rows.items.len) {
+            return false;
+        }
+        const cells = self.grid.rows.items[row].cells;
+        if (column >= cells.len or cells[column].kind == .nul or self.isHidden(column)) {
+            return false;
+        }
+        return fuzzy.find(cells[column].text, self.grid.find.items) != null;
+    }
+
+    /// Go to the next cell that has it, or the one before: across the row, then
+    /// down, and round from the end to the beginning. `here` lets the cell the
+    /// search starts on be the answer, which is what typing wants - the next
+    /// letter must not jump off a cell that still matches. False when no cell
+    /// on the page has it.
+    pub fn findStep(self: *App, forward: bool, here: bool) bool {
+        const rows = self.grid.rows.items.len;
+        const cols = self.grid.cols.items.len;
+        if (rows == 0 or cols == 0 or self.grid.find.items.len == 0) {
+            return false;
+        }
+        const cells = rows * cols;
+        const start = @min(self.cursor.row, rows - 1) * cols + @min(self.cursor.col, cols - 1);
+        var steps: usize = if (here) 0 else 1;
+        while (steps <= cells) : (steps += 1) {
+            const at = if (forward) (start + steps) % cells else (start + cells - (steps % cells)) % cells;
+            if (self.hasFound(at / cols, at % cols)) {
+                self.cursor.row = at / cols;
+                self.cursor.col = at % cols;
+                self.focus = .main;
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /// Say which of the cells that have it the cursor is on, and of how many.
+    pub fn sayFound(self: *App) void {
+        const cols = self.grid.cols.items.len;
+        var count: usize = 0;
+        var at: usize = 0;
+        for (0..self.grid.rows.items.len) |row| {
+            for (0..cols) |column| {
+                if (!self.hasFound(row, column)) {
+                    continue;
+                }
+                count += 1;
+                if (row < self.cursor.row or (row == self.cursor.row and column <= self.cursor.col)) {
+                    at = count;
+                }
+            }
+        }
+        if (count == 0) {
+            self.complain("{s} is not in the rows on this page", .{self.grid.find.items});
+        } else {
+            self.say("/{s}   {d} of {d} on this page   n next   N previous   esc clears", .{ self.grid.find.items, at, count });
+        }
+    }
+
+    /// `n` and `N`.
+    pub fn findAgain(self: *App, forward: bool) void {
+        if (self.grid.find.items.len == 0) {
+            self.say("nothing is being looked for - / looks for text in these rows, gn and gp turn the page", .{});
+            return;
+        }
+        _ = self.findStep(forward, false);
+        self.sayFound();
+    }
+
+    /// What is typed after `/`, as it is typed: looked for from where the
+    /// cursor was when the key was pressed.
+    pub fn findTyped(self: *App, text: []const u8) !void {
+        self.grid.find.clearRetainingCapacity();
+        try self.grid.find.appendSlice(self.allocator, text);
+        if (self.cursor.find_from) |origin| {
+            self.cursor.row = @min(origin[0], self.grid.rows.items.len -| 1);
+            self.cursor.col = @min(origin[1], self.grid.cols.items.len -| 1);
+        }
+        _ = self.findStep(true, true);
+    }
+
+    /// Stop looking, and go back to where the looking started if it did not
+    /// get as far as an enter.
+    pub fn findOff(self: *App, back: bool) void {
+        if (back) {
+            if (self.cursor.find_from) |origin| {
+                self.cursor.row = @min(origin[0], self.grid.rows.items.len -| 1);
+                self.cursor.col = @min(origin[1], self.grid.cols.items.len -| 1);
+            }
+        }
+        self.cursor.find_from = null;
+        self.grid.find.clearRetainingCapacity();
     }
 
     pub fn isHidden(self: *App, column: usize) bool {
