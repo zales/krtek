@@ -815,8 +815,20 @@ pub const Ddl = struct {
     ///
     /// `context.before` is the table as it is now. With nothing there - a caller
     /// that did not ask the server - everything is said, as it was.
+    ///
+    /// `context.removed` is the columns to drop, and nothing was written for
+    /// them: a column taken out of the form was simply not in `cols`, and what
+    /// is not there is not looked at. They go last, after everything that might
+    /// be refused, except one whose name is wanted again - that one has to be
+    /// out of the way first. No CASCADE: a view that reads the column is a
+    /// reason to be told, not something to lose along with it.
     pub fn alterTable(_: Ddl, out: *List, a: std.mem.Allocator, table: db.Table, new_name: []const u8, cols: []const db.Column, context: db.AlterContext) !void {
         var current = table;
+        for (context.removed) |name| {
+            if (db.AlterContext.takenAgain(cols, name)) {
+                try dropColumn(out, a, current, name);
+            }
+        }
         for (cols) |column| {
             if (column.original.len == 0) {
                 try out.appendSlice(a, "ALTER TABLE ");
@@ -890,6 +902,11 @@ pub const Ddl = struct {
                 }
             }
         }
+        for (context.removed) |name| {
+            if (!db.AlterContext.takenAgain(cols, name)) {
+                try dropColumn(out, a, current, name);
+            }
+        }
         if (new_name.len != 0 and !std.mem.eql(u8, new_name, table.name)) {
             try out.appendSlice(a, "ALTER TABLE ");
             try db.quoteTable(out, a, current);
@@ -898,6 +915,14 @@ pub const Ddl = struct {
             try out.appendSlice(a, ";\n");
             current.name = new_name;
         }
+    }
+
+    fn dropColumn(out: *List, a: std.mem.Allocator, table: db.Table, name: []const u8) !void {
+        try out.appendSlice(a, "ALTER TABLE ");
+        try db.quoteTable(out, a, table);
+        try out.appendSlice(a, " DROP COLUMN ");
+        try db.quoteName(out, a, name);
+        try out.appendSlice(a, ";\n");
     }
 
     pub fn addForeignKey(_: Ddl, out: *List, a: std.mem.Allocator, table: db.Table, key: db.ForeignKey, context: db.AlterContext) !void {
@@ -1468,6 +1493,44 @@ test "a default taken away is dropped, and one that was never there is not" {
         "ALTER TABLE \"t\" ALTER COLUMN \"open\" DROP NOT NULL;\n", out.text.items);
 }
 
+test "a column taken out of the form is dropped, and last unless its name is wanted again" {
+    var out = Written{};
+    defer out.deinit();
+    const table = db.Table{ .schema = "shop", .name = "orders" };
+    const now = [_]db.Column{
+        .{ .name = "id", .type = "integer", .notnull = true, .pk = true },
+        .{ .name = "note", .type = "text" },
+        .{ .name = "total", .type = "numeric" },
+        // Added by somebody else while the form was open: on the server, and
+        // in neither list the form has.
+        .{ .name = "theirs", .type = "integer" },
+    };
+    try (Ddl{}).alterTable(&out.text, std.testing.allocator, table, "sales", &.{
+        .{ .name = "id", .type = "integer", .notnull = true, .pk = true, .original = "id" },
+        // A new column under the name of one that was removed.
+        .{ .name = "total", .type = "text" },
+        .{ .name = "weight", .type = "numeric" },
+    }, .{ .before = &now, .removed = &.{ "note", "total" } });
+    // The one in the way goes first, and the other after everything the server
+    // might refuse - but while the table still has the name they know it by.
+    try std.testing.expectEqualStrings("ALTER TABLE \"shop\".\"orders\" DROP COLUMN \"total\";\n" ++
+        "ALTER TABLE \"shop\".\"orders\" ADD COLUMN \"total\" text;\n" ++
+        "ALTER TABLE \"shop\".\"orders\" ADD COLUMN \"weight\" numeric;\n" ++
+        "ALTER TABLE \"shop\".\"orders\" DROP COLUMN \"note\";\n" ++
+        "ALTER TABLE \"shop\".\"orders\" RENAME TO \"sales\";\n", out.text.items);
+    // What the form never showed is not the form's to drop.
+    try out.lacks("theirs");
+
+    // A column that is on the server and not in the list is not thereby
+    // removed: only one that is said to be.
+    var quiet = Written{};
+    defer quiet.deinit();
+    try (Ddl{}).alterTable(&quiet.text, std.testing.allocator, table, "", &.{
+        .{ .name = "id", .type = "integer", .notnull = true, .pk = true, .original = "id" },
+    }, .{ .before = &now });
+    try std.testing.expectEqualStrings("", quiet.text.items);
+}
+
 // Against a real server, and only where one is offered: `KRTEK_POSTGRES` holds
 // a target, and tests/postgres.sh is what offers it - with
 // `zig build test -Dagainst=KRTEK_POSTGRES=…`, which is what makes the tests
@@ -1571,6 +1634,44 @@ test "every schema statement this writes is one the server takes" {
     out.clearRetainingCapacity();
     try dialect.alterTable(&out, arena, table, "", after, try self.alterContext(arena, table, after));
     try testing.expectEqualStrings("", out.items);
+
+    // A column taken out of the form, which nothing was written for: the form
+    // closed and the column was still there. Two of them here - one simply
+    // removed, and one removed with a new column put in under its name, which
+    // only works with the old one dropped first.
+    try check(self, arena, "two columns to remove", "ALTER TABLE krtek_ddl.orders ADD COLUMN spare text DEFAULT 'x', ADD COLUMN swap text");
+    const shown = try self.columns(arena, table);
+    // And one that arrives while the form is open. It is in the catalog at the
+    // moment of saving and in nothing the form has, and it has to survive.
+    try check(self, arena, "a column from somebody else", "ALTER TABLE krtek_ddl.orders ADD COLUMN theirs integer");
+    var names: std.ArrayList([]const u8) = .empty;
+    var left: std.ArrayList(db.Column) = .empty;
+    for (shown) |column| {
+        try names.append(arena, column.original);
+        if (!std.mem.eql(u8, column.name, "spare") and !std.mem.eql(u8, column.name, "swap")) {
+            try left.append(arena, column);
+        }
+    }
+    try left.append(arena, .{ .name = "swap", .type = "integer" });
+    var removing = try self.alterContext(arena, table, left.items);
+    removing.removed = try db.removedColumns(arena, names.items, left.items);
+    try testing.expectEqual(@as(usize, 2), removing.removed.len);
+    out.clearRetainingCapacity();
+    try dialect.alterTable(&out, arena, table, "", left.items, removing);
+    try check(self, arena, "an alter that removes", out.items);
+    var swapped = false;
+    var has_theirs = false;
+    for (try self.columns(arena, table)) |column| {
+        try testing.expect(!std.mem.eql(u8, column.name, "spare"));
+        if (std.mem.eql(u8, column.name, "swap")) {
+            swapped = true;
+            try testing.expectEqualStrings("integer", column.type);
+        }
+        has_theirs = has_theirs or std.mem.eql(u8, column.name, "theirs");
+    }
+    try testing.expect(swapped);
+    try testing.expect(has_theirs);
+    try check(self, arena, "and theirs goes back", "ALTER TABLE krtek_ddl.orders DROP COLUMN theirs, DROP COLUMN swap");
 
     out.clearRetainingCapacity();
     try dialect.addForeignKey(&out, arena, table, .{

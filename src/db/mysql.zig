@@ -903,8 +903,19 @@ pub const Ddl = struct {
 
     /// MySQL alters in place. A changed column is written with CHANGE, which
     /// takes the whole new definition and can rename at the same time.
+    ///
+    /// `context.removed` is the columns to drop, which nothing was written for:
+    /// a column taken out of the form was not in `cols`, so the form closed and
+    /// the column stayed. They go last, after everything that might be refused
+    /// - nothing here is in a transaction, and a statement that fails should
+    /// not find the column already gone - except one whose name is wanted
+    /// again, which has to be out of the way first.
     pub fn alterTable(_: Ddl, out: *List, a: std.mem.Allocator, table: db.Table, new_name: []const u8, cols: []const db.Column, context: db.AlterContext) !void {
-        _ = context;
+        for (context.removed) |name| {
+            if (db.AlterContext.takenAgain(cols, name)) {
+                try dropColumn(out, a, table, name);
+            }
+        }
         for (cols) |column| {
             try out.appendSlice(a, "ALTER TABLE ");
             try db.quoteTable(out, a, table);
@@ -919,6 +930,11 @@ pub const Ddl = struct {
             }
             try out.appendSlice(a, ";\n");
         }
+        for (context.removed) |name| {
+            if (!db.AlterContext.takenAgain(cols, name)) {
+                try dropColumn(out, a, table, name);
+            }
+        }
         if (new_name.len != 0 and !std.mem.eql(u8, new_name, table.name)) {
             try out.appendSlice(a, "RENAME TABLE ");
             try db.quoteTable(out, a, table);
@@ -926,6 +942,14 @@ pub const Ddl = struct {
             try db.quoteName(out, a, new_name);
             try out.appendSlice(a, ";\n");
         }
+    }
+
+    fn dropColumn(out: *List, a: std.mem.Allocator, table: db.Table, name: []const u8) !void {
+        try out.appendSlice(a, "ALTER TABLE ");
+        try db.quoteTable(out, a, table);
+        try out.appendSlice(a, " DROP COLUMN ");
+        try db.quoteName(out, a, name);
+        try out.appendSlice(a, ";\n");
     }
 
     pub fn addForeignKey(_: Ddl, out: *List, a: std.mem.Allocator, table: db.Table, key: db.ForeignKey, context: db.AlterContext) !void {
@@ -1230,6 +1254,34 @@ test "a default is quoted unless it is an expression" {
     try std.testing.expect(isExpression("(json_array())"));
     try std.testing.expect(!isExpression("0"));
     try std.testing.expect(!isExpression("hello"));
+}
+
+test "a column taken out of the form is dropped, and last unless its name is wanted again" {
+    var scratch = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer scratch.deinit();
+    const arena = scratch.allocator();
+    const table = db.Table{ .schema = "demo", .name = "orders" };
+    var out: List = .empty;
+    try (Ddl{}).alterTable(&out, arena, table, "sales", &.{
+        .{ .name = "id", .type = "int", .notnull = true, .dflt = "AUTO_INCREMENT", .original = "id" },
+        // A new column under the name of one that was removed - and a name has
+        // no case here, so `Total` is in the way of `total`.
+        .{ .name = "Total", .type = "text" },
+    }, .{ .removed = &.{ "note", "total" } });
+    // The one in the way goes first, and the other after everything the server
+    // might refuse - but before the table stops answering to its name.
+    try std.testing.expectEqualStrings("ALTER TABLE \"demo\".\"orders\" DROP COLUMN \"total\";\n" ++
+        "ALTER TABLE \"demo\".\"orders\" CHANGE COLUMN \"id\" \"id\" int NOT NULL AUTO_INCREMENT;\n" ++
+        "ALTER TABLE \"demo\".\"orders\" ADD COLUMN \"Total\" text;\n" ++
+        "ALTER TABLE \"demo\".\"orders\" DROP COLUMN \"note\";\n" ++
+        "RENAME TABLE \"demo\".\"orders\" TO \"sales\";\n", out.items);
+
+    // Nothing said to be removed is nothing dropped.
+    out.clearRetainingCapacity();
+    try (Ddl{}).alterTable(&out, arena, table, "", &.{
+        .{ .name = "id", .type = "int", .notnull = true, .original = "id" },
+    }, .{});
+    try std.testing.expect(std.mem.find(u8, out.items, "DROP COLUMN") == null);
 }
 
 // ------------------------------------------------- the C declarations we use

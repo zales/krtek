@@ -1221,7 +1221,92 @@ pub const AlterContext = struct {
     /// place: what is the same in both is then not said again. Empty where the
     /// engine did not look, and then everything is said.
     before: []const Column = &.{},
+    /// The columns this alter takes away, by the names the table has for them.
+    /// Said by whoever asked for the alter, and not worked out from `before`:
+    /// that is the table at the moment of saving, and a column somebody else
+    /// added while the form was open is in it and was never in the form - it
+    /// would be dropped for having been added.
+    removed: []const []const u8 = &.{},
+    /// SQL Server keeps a default as a constraint of its own, under a name it
+    /// made up, and will not drop a column that still has one. So these are the
+    /// table's, for the one in the way to be dropped first. Empty elsewhere.
+    defaults: []const NamedDefault = &.{},
+
+    /// Whether a removed column's name is one the new list uses again: a column
+    /// added under it, or another renamed to it. That removal has to be written
+    /// before anything else is, and it is the only one that does - the rest come
+    /// last, so that an alter the server refuses halfway has dropped nothing.
+    ///
+    /// Without regard to case, because MySQL and SQL Server have none in a
+    /// column's name. Where PostgreSQL does, going first costs nothing.
+    pub fn takenAgain(cols: []const Column, name: []const u8) bool {
+        for (cols) |column| {
+            if (std.ascii.eqlIgnoreCase(column.name, name) and !std.mem.eql(u8, column.original, name)) {
+                return true;
+            }
+        }
+        return false;
+    }
 };
+
+/// A default that is a constraint: the column it is on and what it is called.
+pub const NamedDefault = struct {
+    column: []const u8,
+    name: []const u8,
+};
+
+/// What an alter form took away: the columns it was opened on that no column it
+/// came back with used to be. A renamed column still says what it was, so it is
+/// not one of them, and a column the form never showed cannot be.
+pub fn removedColumns(a: std.mem.Allocator, shown: []const []const u8, cols: []const Column) ![]const []const u8 {
+    var gone: std.ArrayList([]const u8) = .empty;
+    for (shown) |name| {
+        const kept = for (cols) |column| {
+            if (std.mem.eql(u8, column.original, name)) {
+                break true;
+            }
+        } else false;
+        if (!kept) {
+            try gone.append(a, name);
+        }
+    }
+    return gone.items;
+}
+
+test "a column an alter form no longer lists is one it removed" {
+    var scratch = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer scratch.deinit();
+    const arena = scratch.allocator();
+    const shown = [_][]const u8{ "id", "nazev", "cena", "poznamka" };
+    const gone = try removedColumns(arena, &shown, &.{
+        .{ .name = "id", .original = "id" },
+        // Renamed, which is not removed: it still says what it was.
+        .{ .name = "jmeno", .original = "nazev" },
+        // Added under the name of one that went, which does not bring it back.
+        .{ .name = "cena", .original = "" },
+        // And one the form never showed, which nothing here can take away.
+        .{ .name = "cizi", .original = "cizi" },
+    });
+    try std.testing.expectEqual(@as(usize, 2), gone.len);
+    try std.testing.expectEqualStrings("cena", gone[0]);
+    try std.testing.expectEqualStrings("poznamka", gone[1]);
+
+    // Nothing shown is nothing removed - a caller that did not say.
+    try std.testing.expectEqual(@as(usize, 0), (try removedColumns(arena, &.{}, &.{.{ .name = "a", .original = "a" }})).len);
+}
+
+test "a removed column goes first only when its name is wanted again" {
+    const cols = [_]Column{
+        .{ .name = "id", .original = "id" },
+        .{ .name = "Cena", .original = "" },
+        .{ .name = "nazev", .original = "titul" },
+    };
+    try std.testing.expect(AlterContext.takenAgain(&cols, "cena"));
+    try std.testing.expect(AlterContext.takenAgain(&cols, "nazev"));
+    try std.testing.expect(!AlterContext.takenAgain(&cols, "poznamka"));
+    // A column that kept its name is not somebody taking it.
+    try std.testing.expect(!AlterContext.takenAgain(&cols, "id"));
+}
 
 /// Whether a SQL statement is one that only reads. The first word decides it,
 /// and anything not on the list is taken to write - a `WITH … DELETE` exists and

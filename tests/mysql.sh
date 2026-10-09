@@ -177,4 +177,25 @@ printf 'SELECT co FROM demo.zaznam\n' | $MYSQL -N 2>/dev/null | grep -qx 'Hedvik
 	|| fail "the trigger from the form did not fire"
 echo "ok: and it fires"
 
+# A column taken out of the alter form, which nothing was written for: the form
+# closed, said nothing, and the column was still in the table. Only SQLite acted
+# on it, because SQLite writes the table again from the columns it is handed.
+# Two go here - `stara` is simply removed, and `cena` is removed with a new
+# column put in under its name, which only works with the old one dropped first.
+$MYSQL >/dev/null 2>&1 <<'SQL'
+CREATE TABLE demo.sloupce (id int NOT NULL PRIMARY KEY, nazev varchar(80) NOT NULL, stara text, cena int);
+INSERT INTO demo.sloupce VALUES (1, 'šroub', 'pryč', 5);
+SQL
+# The table is picked by name. Then eleven tabs to the third column's name: the
+# table's own field, and five to a column. A row removed leaves the cursor on the
+# one that moved up into its place.
+# Five statements, because every column that stays is said again here.
+screen "a column removed in the alter form is dropped" "5 statement(s), 0 row(s) affected" \
+	'{sleep}' '/' 'sloupce' '{enter}' '{sleep}' '{enter}' '{sleep}' 'a' '{sleep}' \
+	'{tab}{tab}{tab}{tab}{tab}{tab}{tab}{tab}{tab}{tab}{tab}' '{ctrl-k}' '{ctrl-k}' \
+	'{ctrl-n}' 'cena' '{ctrl-s}' '{sleep}'
+printf "SELECT GROUP_CONCAT(CONCAT(COLUMN_NAME, ' ', DATA_TYPE) ORDER BY ORDINAL_POSITION) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = 'demo' AND TABLE_NAME = 'sloupce'\n" \
+	| $MYSQL -N 2>/dev/null | grep -qx 'id int,nazev varchar,cena text' || fail "the columns removed in the form are not what the table lost"
+echo "ok: and the server no longer has it"
+
 echo "all good"

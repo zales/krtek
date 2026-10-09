@@ -657,9 +657,24 @@ pub const Db = struct {
         return list.items;
     }
 
-    /// SQL Server alters in place, so an alter has nothing to carry over.
-    pub fn alterContext(_: *Db, _: std.mem.Allocator, _: db.Table, cols: []const db.Column) db.Error!db.AlterContext {
-        return .{ .columns = cols };
+    /// SQL Server alters in place, so an alter has nothing to carry over. What
+    /// it does need is the names of the table's defaults: each is a constraint
+    /// of its own, called whatever the server called it, and a column that has
+    /// one cannot be dropped until the constraint has been - by that name.
+    pub fn alterContext(self: *Db, arena: std.mem.Allocator, table: db.Table, cols: []const db.Column) db.Error!db.AlterContext {
+        var sql: List = .empty;
+        try sql.appendSlice(arena,
+            \\SELECT c.name, d.name FROM sys.default_constraints d
+            \\ JOIN sys.columns c ON c.object_id = d.parent_object_id AND c.column_id = d.parent_column_id
+            \\ WHERE d.parent_object_id =
+        );
+        try appendObjectId(&sql, arena, table);
+        const reply = try self.ask(arena, sql.items);
+        var defaults: std.ArrayList(db.NamedDefault) = .empty;
+        for (reply.rows) |row| {
+            try defaults.append(arena, .{ .column = text(row, 0), .name = text(row, 1) });
+        }
+        return .{ .columns = cols, .defaults = defaults.items };
     }
 
     /// `OBJECT_ID('"schema"."name"')`, which every catalog query keys off.
@@ -831,8 +846,18 @@ pub const Ddl = struct {
     /// A default is a constraint of its own here rather than part of the column,
     /// so ALTER COLUMN cannot carry one: changing a column's type leaves its
     /// default alone, which is why none is written.
+    ///
+    /// `context.removed` is the columns to drop, which nothing was written for:
+    /// a column taken out of the form was not in `cols`, so the form closed and
+    /// the column stayed. They go last, after everything that might be refused,
+    /// except one whose name is wanted again - that one has to be out of the
+    /// way first.
     pub fn alterTable(_: Ddl, out: *List, a: std.mem.Allocator, table: db.Table, new_name: []const u8, cols: []const db.Column, context: db.AlterContext) !void {
-        _ = context;
+        for (context.removed) |name| {
+            if (db.AlterContext.takenAgain(cols, name)) {
+                try dropColumn(out, a, table, name, context.defaults);
+            }
+        }
         for (cols) |column| {
             if (column.original.len != 0 and !std.mem.eql(u8, column.original, column.name)) {
                 try out.appendSlice(a, "EXEC sp_rename ");
@@ -856,9 +881,36 @@ pub const Ddl = struct {
             }
             try out.appendSlice(a, ";\n");
         }
+        for (context.removed) |name| {
+            if (!db.AlterContext.takenAgain(cols, name)) {
+                try dropColumn(out, a, table, name, context.defaults);
+            }
+        }
         if (new_name.len != 0 and !std.mem.eql(u8, new_name, table.name)) {
             try renameTable(.{}, out, a, table, new_name);
         }
+    }
+
+    /// The column's default first, where it has one: the server refuses to drop
+    /// a column that a constraint still depends on, and a default is one. The
+    /// only one taken with it - a key or an index over the column is somebody's
+    /// decision, and the refusal is what says it is there.
+    fn dropColumn(out: *List, a: std.mem.Allocator, table: db.Table, name: []const u8, defaults: []const db.NamedDefault) !void {
+        for (defaults) |default| {
+            if (!std.ascii.eqlIgnoreCase(default.column, name)) {
+                continue;
+            }
+            try out.appendSlice(a, "ALTER TABLE ");
+            try db.quoteTable(out, a, table);
+            try out.appendSlice(a, " DROP CONSTRAINT ");
+            try db.quoteName(out, a, default.name);
+            try out.appendSlice(a, ";\n");
+        }
+        try out.appendSlice(a, "ALTER TABLE ");
+        try db.quoteTable(out, a, table);
+        try out.appendSlice(a, " DROP COLUMN ");
+        try db.quoteName(out, a, name);
+        try out.appendSlice(a, ";\n");
     }
 
     pub fn addForeignKey(_: Ddl, out: *List, a: std.mem.Allocator, table: db.Table, key: db.ForeignKey, context: db.AlterContext) !void {
@@ -1153,6 +1205,47 @@ test "a renamed column is a procedure call, and the rest is an alter" {
     try testing.expect(std.mem.find(u8, out.items, "EXEC sp_rename '\"dbo\".\"t\"', 'u';") != null);
 }
 
+test "a column taken out of the form is dropped, and its default before it" {
+    var scratch = std.heap.ArenaAllocator.init(testing.allocator);
+    defer scratch.deinit();
+    const arena = scratch.allocator();
+    const table = db.Table{ .schema = "dbo", .name = "t" };
+    var out: List = .empty;
+    try (Ddl{}).alterTable(&out, arena, table, "u", &.{
+        .{ .name = "id", .original = "id", .type = "int", .notnull = true },
+        // A new column under the name of one that was removed.
+        .{ .name = "cena", .original = "", .type = "money" },
+    }, .{
+        .removed = &.{ "popis", "cena" },
+        .defaults = &.{
+            .{ .column = "cena", .name = "DF__t__cena__5EBF139D" },
+            .{ .column = "popis", .name = "DF_popis" },
+            // A default on a column that stays is left where it is.
+            .{ .column = "id", .name = "DF_id" },
+        },
+    });
+    // The one in the way goes first, and the other after everything the server
+    // might refuse - but before the table stops answering to its name.
+    try testing.expectEqualStrings("ALTER TABLE \"dbo\".\"t\" DROP CONSTRAINT \"DF__t__cena__5EBF139D\";\n" ++
+        "ALTER TABLE \"dbo\".\"t\" DROP COLUMN \"cena\";\n" ++
+        "ALTER TABLE \"dbo\".\"t\" ALTER COLUMN \"id\" int NOT NULL;\n" ++
+        "ALTER TABLE \"dbo\".\"t\" ADD \"cena\" money NULL;\n" ++
+        "ALTER TABLE \"dbo\".\"t\" DROP CONSTRAINT \"DF_popis\";\n" ++
+        "ALTER TABLE \"dbo\".\"t\" DROP COLUMN \"popis\";\n" ++
+        "EXEC sp_rename '\"dbo\".\"t\"', 'u';\n", out.items);
+
+    // A column with no default is one statement, and nothing said to be
+    // removed is nothing dropped.
+    out.clearRetainingCapacity();
+    try (Ddl{}).alterTable(&out, arena, table, "", &.{}, .{ .removed = &.{"popis"} });
+    try testing.expectEqualStrings("ALTER TABLE \"dbo\".\"t\" DROP COLUMN \"popis\";\n", out.items);
+    out.clearRetainingCapacity();
+    try (Ddl{}).alterTable(&out, arena, table, "", &.{
+        .{ .name = "id", .original = "id", .type = "int", .notnull = true },
+    }, .{});
+    try testing.expect(std.mem.find(u8, out.items, "DROP") == null);
+}
+
 // Against a real server, and only where one is offered: `KRTEK_MSSQL` holds
 // `host:port:user:password`. Everything here happens in `tempdb`, which is what
 // SQL Server keeps for exactly this and empties when it restarts.
@@ -1241,6 +1334,35 @@ test "every schema statement this writes is one the server takes" {
         .{ .name = "jmeno", .original = "nazev", .type = "nvarchar(120)", .notnull = true },
     }, .{});
     try check(self, "alter", out.items);
+
+    // A column taken out of the form, which nothing was written for: the form
+    // closed and the column was still there. Both of these have a default, and
+    // a default here is a constraint under a name the server made up - the
+    // column cannot go until that has, and that name is only in the catalog.
+    // `vymena` comes back as a new column, so it has to be dropped first.
+    try check(self, "dva sloupce k odebrani", "ALTER TABLE dbo.krtek_ddl ADD navic int NOT NULL DEFAULT 7, vymena nvarchar(10) NULL DEFAULT 'x'");
+    var removing = try self.alterContext(arena, table, &.{});
+    removing.removed = &.{ "navic", "vymena" };
+    // The table's three defaults, of which two are in the way.
+    try testing.expectEqual(@as(usize, 3), removing.defaults.len);
+    out.clearRetainingCapacity();
+    try dialect.alterTable(&out, arena, table, "", &.{
+        .{ .name = "vymena", .original = "", .type = "int" },
+    }, removing);
+    try check(self, "alter, ktery ubira", out.items);
+    var swapped = false;
+    for (try self.columns(arena, table)) |one| {
+        try testing.expect(!std.mem.eql(u8, one.name, "navic"));
+        if (std.mem.eql(u8, one.name, "vymena")) {
+            swapped = true;
+            try testing.expectEqualStrings("int", one.type);
+        }
+        // A default on a column that stayed is still on it.
+        if (std.mem.eql(u8, one.name, "cena")) {
+            try testing.expectEqualStrings("0", one.dflt.?);
+        }
+    }
+    try testing.expect(swapped);
 
     out.clearRetainingCapacity();
     try dialect.createView(&out, arena, .{ .schema = "dbo", .name = "krtek_pohled" }, "SELECT \"id\", \"jmeno\" FROM \"dbo\".\"krtek_ddl\"");

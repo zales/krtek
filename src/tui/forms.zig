@@ -131,6 +131,13 @@ pub fn openTableForm(self: *App, alter: bool) !void {
         try form.note("altering rebuilds the table; CHECK constraints and generated columns are lost");
     }
     const columns = if (alter) try self.columnDefs(form.arena.allocator(), table_label) else &[_]database.Column{};
+    // What the table had when the form opened, which is what a row removed
+    // from it is later told by.
+    const shown = try form.arena.allocator().alloc([]const u8, columns.len);
+    for (columns, shown) |column, *name| {
+        name.* = column.original;
+    }
+    form.shown = shown;
     if (columns.len == 0) {
         // The engine's first type, which is the integer-ish one in every list.
         const first = self.conn.ddl().types();
@@ -659,7 +666,13 @@ pub fn buildTable(self: *App, sql: *std.ArrayList(u8), a: std.mem.Allocator, for
     // Whatever this engine has to preserve across an alter - on SQLite the
     // foreign keys and the indexes, with the renames applied.
     const target = database.Table{ .schema = self.grid.schema.items, .name = form.table };
-    const context = try self.conn.alterContext(a, target, columns.items);
+    var context = try self.conn.alterContext(a, target, columns.items);
+    // A column taken out of the form is one to drop. Only SQLite acted on
+    // it, by writing the table again without it; PostgreSQL, MySQL and SQL
+    // Server were handed the columns that were left and nothing about the
+    // one that was not, so the form closed, said nothing, and the column
+    // stayed.
+    context.removed = try database.removedColumns(a, form.shown, columns.items);
     try self.conn.ddl().alterTable(sql, a, target, name, columns.items, context);
 }
 

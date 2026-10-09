@@ -241,6 +241,34 @@ screen "and the connection is still good afterwards" "po_zruseni" \
 echo "the unit tests that want a server"
 zig build test -Dagainst="KRTEK_MSSQL=127.0.0.1:$PORT:sa:$PASSWORD"
 
+# A column taken out of the alter form, which nothing was written for: the form
+# closed, said nothing, and the column was still in the table. Two go here, and
+# both have a default - which on this engine is a constraint under a name the
+# server made up, and a column cannot be dropped while it has one. `stara` is
+# simply removed, and `cena` is removed with a new column put in under its name,
+# which only works with the old one dropped first.
+$SQLCMD -b -d demo -Q "
+CREATE TABLE dbo.sloupce (
+  id int NOT NULL,
+  nazev nvarchar(80) NOT NULL,
+  stara nvarchar(20) NULL DEFAULT 'x',
+  cena int NULL DEFAULT 0
+);
+INSERT INTO dbo.sloupce (id, nazev) VALUES (1, 'sroub');"
+# Eleven tabs to the third column's name: the table's own field, and five to a
+# column. A row removed leaves the cursor on the one that moved up into its place.
+# Seven statements: every column that stays is said again here, and each of the
+# two that go is its default and then itself.
+screen "a column removed in the alter form is dropped" "7 statement(s), " \
+	'{sleep}' / s l o u p c e '{enter}' '{sleep}' '{enter}' '{sleep}' 'a' '{sleep}' \
+	'{tab}{tab}{tab}{tab}{tab}{tab}{tab}{tab}{tab}{tab}{tab}' '{ctrl-k}' '{ctrl-k}' \
+	'{ctrl-n}' 'cena' '{ctrl-s}' '{sleep}'
+$SQLCMD -d demo -Q "SET NOCOUNT ON; SELECT STRING_AGG(c.name + ' ' + t.name, ',') WITHIN GROUP (ORDER BY c.column_id)
+	FROM sys.columns c JOIN sys.types t ON t.user_type_id = c.user_type_id
+	WHERE c.object_id = OBJECT_ID('dbo.sloupce')" -h -1 -W \
+	| grep -qx 'id int,nazev nvarchar,cena text' || fail "the columns removed in the form are not what the table lost"
+echo "ok: and the server no longer has it"
+
 # The screenshot on the website and in the README, which needs a server with
 # something interesting in it - so it is regenerated here rather than in
 # tests/shots.sh, where everything else comes from a SQLite file.

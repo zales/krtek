@@ -202,4 +202,25 @@ $PSQL -d demo -tAc 'SELECT co FROM zaznam' | grep -qx 'f-2' \
 	|| fail "the trigger from the form did not fire"
 echo "ok: and it fires"
 
+# A column taken out of the alter form, which nothing was written for: the form
+# closed, said nothing, and the column was still in the table. Only SQLite acted
+# on it, because SQLite writes the table again from the columns it is handed.
+# Two go here - `stara` is simply removed, and `cena` is removed with a new
+# column put in under its name, which only works with the old one dropped first.
+$PSQL -d demo >/dev/null <<'SQL'
+CREATE TABLE sloupce (id integer PRIMARY KEY, nazev text NOT NULL, stara text, cena integer);
+INSERT INTO sloupce VALUES (1, 'šroub', 'pryč', 5);
+SQL
+# The table is picked by name. Then eleven tabs to the third column's name: the
+# table's own field, and five to a column. A row removed leaves the cursor on the
+# one that moved up into its place.
+screen "a column removed in the alter form is dropped" "3 statement(s), 0 row(s) affected" \
+	'{sleep}' '/' 'sloupce' '{enter}' '{sleep}' '{enter}' '{sleep}' 'a' '{sleep}' \
+	'{tab}{tab}{tab}{tab}{tab}{tab}{tab}{tab}{tab}{tab}{tab}' '{ctrl-k}' '{ctrl-k}' \
+	'{ctrl-n}' 'cena' '{ctrl-s}' '{sleep}'
+$PSQL -d demo -tAc "SELECT string_agg(column_name || ' ' || data_type, ',' ORDER BY ordinal_position)
+	FROM information_schema.columns WHERE table_name = 'sloupce'" \
+	| grep -qx 'id integer,nazev text,cena text' || fail "the columns removed in the form are not what the table lost"
+echo "ok: and the server no longer has it"
+
 echo "all good"
