@@ -182,4 +182,20 @@ whole=$(python3 tests/screen.py "$ROOT/photos" '{sleep}' 'q' '{tab}' '{right}' '
 [ "$whole" = "9" ] || fail "gv on the size of 2015/soubor-01.txt should show 9, and shows '$whole'"
 echo "ok: gv shows the value under the cursor, and not the key of its row"
 
+# One object has one `modified`, whichever request answered for it. The grid is
+# a listing, which writes the time as 2026-10-09T20:11:46.999Z; `gv` asks for
+# the one key, which is a HEAD, and a HEAD says it in a header: Fri, 09 Oct 2026
+# 20:11:46 GMT. That is what the box showed, over a grid that had the same time
+# written the other way. It is the listing's form now, to the second - a header
+# has no milliseconds, and none are made up for it.
+listed=$(python3 tests/screen.py "$ROOT/photos" '{sleep}' 'q' '{sleep}' '{keep}' 2>&1 |
+	grep '2015/soubor-01.txt' | head -1 | awk '{ print $4 }')
+printf '%s' "$listed" | grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]+Z$' ||
+	fail "the grid should say when 2015/soubor-01.txt was modified, and says '$listed'"
+whole=$(python3 tests/screen.py "$ROOT/photos" '{sleep}' 'q' '{tab}' '{right}{right}' 'g' 'v' '{sleep}' '{keep}' 2>&1 |
+	grep -A1 'modified ─ enter/esc closes' | tail -1 | sed 's/\(.*\)│.*$/\1/; s/ *$//; s/^.*│ //')
+[ "$whole" = "${listed%.*}Z" ] ||
+	fail "gv on the modified of 2015/soubor-01.txt should show ${listed%.*}Z as the grid has it, and shows '$whole'"
+echo "ok: gv writes a time the way the grid does"
+
 echo "all good"

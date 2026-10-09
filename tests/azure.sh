@@ -132,6 +132,21 @@ whole=$(python3 tests/screen.py "$ROOT/photos" '{sleep}' 'q' '{tab}' '{right}' '
 [ "$whole" = "5" ] || fail "gv on the size of 2015 august trip.txt should show 5, and shows '$whole'"
 echo "ok: gv shows the value under the cursor, and not the name of its row"
 
+# One blob has one `modified`, whichever request answered for it. The grid is a
+# listing and `gv` asks for the one name, which is a HEAD. On S3 those two write
+# a time two ways and the driver has to bring them together; here both say it
+# as a header does, Fri, 09 Oct 2026 20:13:48 GMT, and the driver passes on what
+# it was given. This is here so that it stays so.
+when='[A-Z][a-z][a-z], [0-9][0-9] [A-Z][a-z][a-z] [0-9][0-9][0-9][0-9] [0-9][0-9]:[0-9][0-9]:[0-9][0-9] GMT'
+listed=$(python3 tests/screen.py "$ROOT/photos" '{sleep}' 'q' '{sleep}' '{keep}' 2>&1 |
+	grep '2015 august trip.txt' | head -1 | grep -o "$when" || true)
+[ -n "$listed" ] || fail "the grid should say when 2015 august trip.txt was modified"
+whole=$(python3 tests/screen.py "$ROOT/photos" '{sleep}' 'q' '{tab}' '{right}{right}' 'g' 'v' '{sleep}' '{keep}' 2>&1 |
+	grep -A1 'modified ─ enter/esc closes' | tail -1 | sed 's/\(.*\)│.*$/\1/; s/ *$//; s/^.*│ //')
+[ "$whole" = "$listed" ] ||
+	fail "gv on the modified of 2015 august trip.txt should show '$listed' as the grid has it, and shows '$whole'"
+echo "ok: gv writes a time the way the grid does"
+
 # --- and the file manager, which is the only way the copying is reachable ---
 #
 # None of the above goes near it: the table listing and the file listing are two
