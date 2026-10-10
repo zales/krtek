@@ -590,16 +590,25 @@ fn runScript(self: *App, form: *Form.Form, sql: []const u8) !void {
     // name of nothing.
     const moved = if (self.report.list.items.len != 0) renamed else null;
     switch (purpose) {
-        .rename_table => if (moved) |value| try self.openTable(value),
+        .rename_table => if (moved) |value| try openRenamed(self, value),
         .create_table, .copy_table, .view => self.say("created", .{}),
         // A table the alter form renamed is opened by its new name, as one
         // renamed under `N` is. Reading it again asked for the old one: the
         // rename had worked, the list said so, and the grid beside it was a
         // table that could not be read.
-        .alter_table => if (moved) |value| try self.openTable(value) else try self.reload(),
+        .alter_table => if (moved) |value| try openRenamed(self, value) else try self.reload(),
         .foreign_key, .index => try self.reload(),
         else => {},
     }
+}
+
+/// Open a table under the name it has just been given, with the cursor in the
+/// list on it. The list is in order of name and has been read again, so the
+/// place the cursor kept is whatever sorts there now: another table than the
+/// one in the grid, and the one enter would open.
+fn openRenamed(self: *App, name: []const u8) !void {
+    self.selectObject(name);
+    try self.openTable(name);
 }
 
 /// The row form as a change: which columns it sets, to what, and which row it
@@ -930,6 +939,95 @@ test "a table renamed in the alter form is read by its new name" {
     try bench.sees("novels  1-4 of 4");
     try bench.sees("pages");
     try testing.expectEqual(@as(usize, 2), bench.app.cursor.row);
+}
+
+test "the cursor in the list follows a table to where its new name sorts" {
+    // The list is read again after a rename, sorted by name, and the cursor
+    // kept the place it had: `books` renamed to sort above `authors` left it
+    // on `authors`, beside a grid of the other table, and enter opened that.
+    for ([_][]const u8{ "a", "N" }) |key| {
+        var bench = try Bench.open(BOOKS);
+        defer bench.close();
+        try bench.keys("j{enter}");
+        try bench.keys(key);
+        try bench.keys("{ctrl-u}aaa{ctrl-s}");
+        try bench.sees("aaa  1-4 of 4");
+        try testing.expectEqual(@as(usize, 0), bench.app.sidebar.selected);
+        try testing.expectEqualStrings("aaa", bench.app.current().?.name);
+        // And down the list as well as up it.
+        try bench.keys(key);
+        try bench.keys("{ctrl-u}zzz{ctrl-s}");
+        try bench.sees("zzz  1-4 of 4");
+        try testing.expectEqual(@as(usize, 1), bench.app.sidebar.selected);
+        try testing.expectEqualStrings("zzz", bench.app.current().?.name);
+        // So enter in the list, a step left of the grid's first column, opens
+        // the table that was already open.
+        try bench.keys("h{enter}");
+        try testing.expect(bench.app.typing.form == null);
+        try bench.sees("zzz  1-4 of 4");
+
+        // A rename that is refused moved nothing, and neither does the cursor.
+        try bench.keys(key);
+        try bench.keys("{ctrl-u}authors{ctrl-s}");
+        try bench.says("failed");
+        try testing.expectEqualStrings("zzz", bench.app.current().?.name);
+    }
+}
+
+test "the cursor follows a renamed table among what the filter leaves showing" {
+    for ([_][]const u8{ "a", "N" }) |key| {
+        var bench = try Bench.open(BOOKS ++ "CREATE TABLE boxes (id INTEGER PRIMARY KEY);");
+        defer bench.close();
+        // `authors` is out of the list and still in front of the other two, so
+        // a place in what is showing is not a place in the whole of it.
+        try bench.keys("/bo{enter}{enter}");
+        try bench.sees("books  1-4 of 4");
+        try testing.expectEqual(@as(usize, 2), bench.app.visibleCount());
+        try bench.keys(key);
+        try bench.keys("{ctrl-u}bozo{ctrl-s}");
+        try bench.sees("bozo  1-4 of 4");
+        try testing.expectEqual(@as(usize, 1), bench.app.sidebar.selected);
+        try testing.expectEqualStrings("bozo", bench.app.current().?.name);
+
+        // Renamed to what the filter hides, it is in the list no longer. The
+        // cursor stays on what is, as it does when a table is dropped.
+        try bench.keys(key);
+        try bench.keys("{ctrl-u}zzz{ctrl-s}");
+        try bench.sees("zzz  1-4 of 4");
+        try testing.expectEqual(@as(usize, 1), bench.app.visibleCount());
+        try testing.expectEqual(@as(usize, 0), bench.app.sidebar.selected);
+        try testing.expectEqualStrings("boxes", bench.app.current().?.name);
+    }
+}
+
+test "the list scrolls to a renamed table that sorts off the screen" {
+    // Forty tables in a list with room for a dozen.
+    var sql: std.ArrayList(u8) = .empty;
+    defer sql.deinit(testing.allocator);
+    for (0..40) |n| {
+        try sql.print(testing.allocator, "CREATE TABLE t{d:0>2} (id INTEGER PRIMARY KEY);", .{n});
+    }
+    for ([_][]const u8{ "a", "N" }) |key| {
+        var bench = try Bench.openWith(sql.items, .{ .size = .{ .rows = 16, .cols = 100 } });
+        defer bench.close();
+        try bench.lacks("t39");
+        try bench.keys("{enter}");
+        try bench.keys(key);
+        try bench.keys("{ctrl-u}zebra{ctrl-s}");
+        try testing.expectEqual(@as(usize, 39), bench.app.sidebar.selected);
+        try testing.expectEqualStrings("zebra", bench.app.current().?.name);
+        try testing.expect(bench.app.sidebar.scroll != 0);
+        try testing.expect(bench.app.sidebar.selected < bench.app.sidebar.scroll + bench.app.sidebar.shown);
+        try bench.sees("t39");
+        try bench.lacks("t00");
+        // And back to the top of it.
+        try bench.keys(key);
+        try bench.keys("{ctrl-u}aardvark{ctrl-s}");
+        try testing.expectEqual(@as(usize, 0), bench.app.sidebar.selected);
+        try testing.expectEqual(@as(usize, 0), bench.app.sidebar.scroll);
+        try bench.sees("t01");
+        try bench.lacks("t39");
+    }
 }
 
 test "the trigger form makes a trigger, and it fires" {

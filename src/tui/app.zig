@@ -1919,6 +1919,23 @@ pub const App = struct {
         return self.visibleAt(self.sidebar.selected);
     }
 
+    /// Put the cursor on the object of this name. It counts what the filter
+    /// leaves showing, as `visibleAt` does, so one the filter hides is not a
+    /// place it can be and it stays where it was. The drawing scrolls to it.
+    pub fn selectObject(self: *App, name: []const u8) void {
+        var seen: usize = 0;
+        for (self.sidebar.objects.items, 0..) |object, i| {
+            if (!self.matches(i)) {
+                continue;
+            }
+            if (std.mem.eql(u8, object.name, name)) {
+                self.sidebar.selected = seen;
+                return;
+            }
+            seen += 1;
+        }
+    }
+
     /// The first value of the first row as text; null when there is none.
     pub fn scalarText(self: *App, arena: std.mem.Allocator, sql: []const u8) !?[]const u8 {
         var rows = (self.conn.query(sql, null) catch return null) orelse return null;
