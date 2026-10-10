@@ -341,27 +341,6 @@ pub fn openColumnForm(self: *App) !void {
     }
 }
 
-/// Pick a schema on an engine that has them.
-pub fn openSchemaForm(self: *App) !void {
-    if (!self.caps().schemas) {
-        self.complain("{s} has no schemas", .{self.caps().label});
-        return;
-    }
-    const form = try self.newForm(.schema, "schema", "");
-    const list = try self.conn.schemas(form.arena.allocator());
-    if (list.len == 0) {
-        self.complain("no schema to switch to", .{});
-        return;
-    }
-    var at: usize = 0;
-    for (list, 0..) |name, i| {
-        if (std.mem.eql(u8, name, self.grid.schema.items)) {
-            at = i;
-        }
-    }
-    try form.choice("use", list, at);
-}
-
 /// Column definitions as the DDL generator wants them, including the
 /// single-column UNIQUE constraints, which only exist as indexes.
 pub fn tableNames(self: *App, arena: std.mem.Allocator, last: []const u8) ![]const []const u8 {
@@ -415,7 +394,6 @@ pub fn submitForm(self: *App) !void {
             self.closeForm();
             return;
         },
-        .schema => return submitSchema(self, form),
         .connection => try self.saveConnection(form),
 
         .create_table, .alter_table => try buildTable(self, &sql, a, form),
@@ -484,14 +462,6 @@ fn submitSearch(self: *App, form: *Form.Form) !void {
     }
     try searchEverything(self, needle);
     self.closeForm();
-}
-
-fn submitSchema(self: *App, form: *Form.Form) !void {
-    // Copied, because the form it was chosen in is closed before it is used.
-    const name = try self.allocator.dupe(u8, form.valueOf(0));
-    defer self.allocator.free(name);
-    self.closeForm();
-    try self.useSchema(name);
 }
 
 /// The index form as a statement. False where the form has nothing to make an

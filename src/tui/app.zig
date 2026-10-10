@@ -31,6 +31,7 @@ const connection_form = @import("connection_form.zig");
 const dialing = @import("dialing.zig");
 const file_actions = @import("file_actions.zig");
 const forms = @import("forms.zig");
+const picker_mod = @import("picker.zig");
 
 pub const Term = term.Term;
 pub const Connecting = dialing.Connecting;
@@ -808,6 +809,9 @@ pub const App = struct {
 
     saved: Saved,
     palette: ?Palette = null,
+    /// The list one thing is being picked out of, while it is open: the
+    /// schemas after `#`, or what a choice in a form can be. See `picker.zig`.
+    picker: ?picker_mod.Picker = null,
     /// The two panes, while the file manager is on screen. Null the rest of the
     /// time: a connection that holds rows has no business keeping one open.
     files: ?*Files.Manager = null,
@@ -867,8 +871,13 @@ pub const App = struct {
     pub const openSearchForm = forms.openSearchForm;
     pub const openFilterForm = forms.openFilterForm;
     pub const openColumnForm = forms.openColumnForm;
-    pub const openSchemaForm = forms.openSchemaForm;
     pub const submitForm = forms.submitForm;
+
+    // A list to pick one thing out of: picker.zig.
+    pub const openSchemaPicker = picker_mod.openSchemaPicker;
+    pub const openFieldPicker = picker_mod.openFieldPicker;
+    pub const closePicker = picker_mod.closePicker;
+    pub const takePicked = picker_mod.takePicked;
 
     // ----------------------------------------------------------- lifecycle
 
@@ -1827,6 +1836,7 @@ pub const App = struct {
         if (self.palette) |*open| {
             open.query.deinit(self.allocator);
         }
+        self.closePicker();
         for (self.history.items) |entry| {
             self.allocator.free(entry);
         }

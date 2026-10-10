@@ -11,6 +11,7 @@ const sql_syntax = @import("editor.zig");
 const fuzzy = @import("fuzzy.zig");
 const line_mod = @import("line.zig");
 const Files = @import("files.zig");
+const picker_mod = @import("picker.zig");
 
 const App = app_mod.App;
 const C = app_mod.C;
@@ -47,6 +48,9 @@ pub fn frame(app: *App, size: Size) !void {
         if (app.palette != null) {
             palettePanel(app, size, body_rows);
         }
+        if (app.picker != null) {
+            pickerPanel(app, size, body_rows);
+        }
         status(app, size);
         promptLine(app, size);
         try cursorAndFlush(app, size);
@@ -77,6 +81,9 @@ pub fn frame(app: *App, size: Size) !void {
     }
     if (app.palette != null) {
         palettePanel(app, size, body_rows);
+    }
+    if (app.picker != null) {
+        pickerPanel(app, size, body_rows);
     }
     status(app, size);
     promptLine(app, size);
@@ -1366,6 +1373,7 @@ pub const HELP = [_][2][]const u8{
     .{ "ctrl+s", "save" },
     .{ "tab shift+tab", "the next field, the one before; arrows go to everything" },
     .{ "left right", "in the text; or toggle, cycle a value" },
+    .{ "enter space", "on a choice: the list of what it can be, to pick from" },
     .{ "home end", "the ends of the text - ctrl+a ctrl+e too" },
     .{ "ctrl+w ctrl+u", "take back a word, clear the field" },
     .{ "ctrl+n ctrl+x", "add, remove a column row" },
@@ -1704,26 +1712,32 @@ fn note(app: *App, left: usize, width: usize, text: []const u8) void {
     screen.clearToEol();
 }
 
-/// The command palette, over whatever is behind it: a query line and the
-/// matches, each with the key that runs it, so using it teaches the key map.
-fn palettePanel(app: *App, size: Size, rows: usize) void {
-    const palette = &app.palette.?;
+/// One line of a list in a box: what it is called, which of its letters what
+/// was typed landed on, and what is said at the right of it.
+const ListRow = struct {
+    label: []const u8,
+    hit: fuzzy.Hit = .{},
+    hint: []const u8 = "",
+};
+
+/// A list in a box over whatever is behind it: a line that is typed into, the
+/// matches under it with the cursor on one, and a line that says the keys.
+///
+/// The command palette and the list a schema or a choice is picked from are
+/// the same panel. `list` is whichever of them it is, and says what is in it:
+/// `title`, `query`, `caret`, `placeholder`, `verb` - what enter does, in a
+/// word - `count`, `at`, and `row(n)` for the nth match.
+fn listPanel(app: *App, size: Size, rows: usize, list: anytype) void {
     const screen = app.screen;
     const width: usize = @min(size.cols -| 4, 66);
     const left = (size.cols -| width) / 2;
-    var found: [input.actions.len]usize = undefined;
-    const count = input.paletteFor(
-        palette.query.items,
-        if (app.connected) app.caps() else null,
-        app.connected and app.conn.files() != null,
-        &found,
-    );
+    const count: usize = list.count;
     const room: usize = if (rows > 6) @min(rows - 4, 12) else 3;
     const shown: usize = @min(count, room);
     // Keep the cursor in view when the list is longer than the panel.
     var from: usize = 0;
-    if (palette.at >= shown and shown != 0) {
-        from = palette.at + 1 - shown;
+    if (list.at >= shown and shown != 0) {
+        from = list.at + 1 - shown;
     }
 
     var line: usize = 2;
@@ -1731,12 +1745,12 @@ fn palettePanel(app: *App, size: Size, rows: usize) void {
     screen.style(.{ .bg = C.bar, .fg = C.accent, .bold = true });
     var used: usize = write(app, " › ", width -| 2);
     screen.style(.{ .bg = C.bar, .fg = C.text });
-    const part = line_mod.window(palette.query.items, palette.caret, width -| used -| 2);
+    const part = line_mod.window(list.query, list.caret, width -| used -| 2);
     app.typing.cursor = .{ .row = line, .col = left + 1 + used + part.cursor };
     used += write(app, part.text, width -| used -| 2);
     screen.style(.{ .bg = C.bar, .fg = C.faint });
-    if (palette.query.items.len == 0) {
-        used += write(app, "what do you want to do?", width -| used -| 2);
+    if (list.query.len == 0) {
+        used += write(app, list.placeholder, width -| used -| 2);
     }
     if (width > used + 2) {
         fill(app, ' ', width -| used -| 2);
@@ -1745,23 +1759,22 @@ fn palettePanel(app: *App, size: Size, rows: usize) void {
     var at: usize = from;
     while (at < from + shown) : (at += 1) {
         line += 1;
-        const action = input.actions[found[at]];
-        const here = at == palette.at;
+        const row: ListRow = list.row(at);
+        const here = at == list.at;
         screen.moveTo(line, left + 1);
         screen.style(.{ .bg = if (here) C.selected else C.bar, .fg = if (here) C.accent else C.text });
         var span: usize = write(app, if (here) " ❯ " else "   ", width -| 2);
-        const named = input.labelFor(action, if (app.connected) app.caps() else null);
-        span += writeMatched(app, named, input.paletteHit(found[at], palette.query.items), width -| span -| 2, .{
+        span += writeMatched(app, row.label, row.hit, width -| span -| 2, .{
             .bg = if (here) C.selected else C.bar,
             .fg = if (here) C.accent else C.text,
         });
         screen.style(.{ .bg = if (here) C.selected else C.bar, .fg = C.faint });
-        // The key, right where the eye ends up, so it is learned in passing.
-        const name = action.keys;
-        const gap = width -| span -| term.width(name) -| 4;
+        // What is said beside it, right where the eye ends up: the key that
+        // does the same, so it is learned in passing.
+        const gap = width -| span -| term.width(row.hint) -| 4;
         fill(app, ' ', gap);
         span += gap;
-        span += write(app, name, width -| span -| 2);
+        span += write(app, row.hint, width -| span -| 2);
         if (width > span + 2) {
             fill(app, ' ', width - span - 2);
         }
@@ -1778,7 +1791,9 @@ fn palettePanel(app: *App, size: Size, rows: usize) void {
     line += 1;
     screen.moveTo(line, left + 1);
     screen.style(.{ .bg = C.bar, .fg = C.faint });
-    var footer: usize = write(app, "   up down choose   enter run   esc close", width -| 2);
+    var footer: usize = write(app, "   up down choose   enter ", width -| 2);
+    footer += write(app, list.verb, width -| footer -| 2);
+    footer += write(app, "   esc close", width -| footer -| 2);
     if (count > shown) {
         var buf: [32]u8 = undefined;
         footer += write(app, std.mem.print(&buf, "   {d} more", .{count - shown}) catch "", width -| footer -| 2);
@@ -1787,7 +1802,79 @@ fn palettePanel(app: *App, size: Size, rows: usize) void {
         fill(app, ' ', width - footer - 2);
     }
     screen.reset();
-    box(app, 1, left, width, line + 1, "commands", "", C.accent);
+    box(app, 1, left, width, line + 1, list.title, "", C.accent);
+}
+
+/// The command palette, over whatever is behind it: a query line and the
+/// matches, each with the key that runs it, so using it teaches the key map.
+fn palettePanel(app: *App, size: Size, rows: usize) void {
+    const palette = &app.palette.?;
+    const Actions = struct {
+        app: *App,
+        title: []const u8 = "commands",
+        query: []const u8,
+        caret: usize,
+        placeholder: []const u8 = "what do you want to do?",
+        verb: []const u8 = "run",
+        found: [input.actions.len]usize = undefined,
+        count: usize = 0,
+        at: usize,
+
+        fn row(self: *const @This(), n: usize) ListRow {
+            const action = input.actions[self.found[n]];
+            return .{
+                .label = input.labelFor(action, if (self.app.connected) self.app.caps() else null),
+                .hit = input.paletteHit(self.found[n], self.query),
+                .hint = action.keys,
+            };
+        }
+    };
+    var list = Actions{ .app = app, .query = palette.query.items, .caret = palette.caret, .at = palette.at };
+    list.count = input.paletteFor(
+        palette.query.items,
+        if (app.connected) app.caps() else null,
+        app.connected and app.conn.files() != null,
+        &list.found,
+    );
+    listPanel(app, size, rows, &list);
+}
+
+/// The list one thing is picked out of - a schema, or what a choice in a form
+/// can be - in the palette's own panel. The one in force says so.
+fn pickerPanel(app: *App, size: Size, rows: usize) void {
+    const picker = &app.picker.?;
+    const Names = struct {
+        picker: *const picker_mod.Picker,
+        title: []const u8,
+        query: []const u8,
+        caret: usize,
+        placeholder: []const u8 = "type to narrow it",
+        verb: []const u8 = "takes it",
+        count: usize,
+        at: usize,
+
+        fn row(self: *const @This(), n: usize) ListRow {
+            const option = self.picker.found[n];
+            const name = self.picker.options[option];
+            const now = if (self.picker.current) |current| current == option else false;
+            return .{
+                // A choice may be of nothing - no mechanism, no type - and a
+                // line with nothing on it is not something to put a cursor on.
+                .label = if (name.len != 0) name else "(none)",
+                .hit = if (name.len != 0) self.picker.hit(option) else .{},
+                .hint = if (now) "now" else "",
+            };
+        }
+    };
+    const list = Names{
+        .picker = picker,
+        .title = picker.title,
+        .query = picker.query.items,
+        .caret = picker.caret,
+        .count = picker.count,
+        .at = picker.at,
+    };
+    listPanel(app, size, rows, &list);
 }
 
 /// The panel in the middle of the screen while a connection is being opened:
@@ -1958,7 +2045,15 @@ fn footerHints(app: *App) []const u8 {
             .insert => " -- INSERT --  esc normal mode  tab completes  ctrl+s runs  ctrl+p earlier",
         };
     }
+    if (app.picker != null) {
+        return " type to narrow it   up down choose   enter takes it   esc leaves it as it is";
+    }
     if (app.typing.form) |form| {
+        // On a choice, what there is to say is how to choose: the arrows for
+        // the one beside it, and the list for the one that is twenty away.
+        if (form.fields.items.len > form.cursor and form.fields.items[form.cursor].kind == .choice) {
+            return " left right the one beside it   enter the list of them   tab next   ctrl+s saves   esc cancels";
+        }
         // Not the palette here: a form takes what is typed, and a key that
         // opened something over it would take the typing away from it.
         return if (form.row_size != 0)
@@ -3083,19 +3178,22 @@ test "every screen is drawn inside the window, whatever size the window is" {
     };
     // A key that opens something, and the keys that put it away again.
     const screens = [_][2][]const u8{
-        .{ "", "" },              .{ "{enter}", "" },
-        .{ "S", "{esc}" },        .{ "?", "?" },
-        .{ "gb", "gb" },          .{ "gL", "gL" },
-        .{ "gm", "gm" },          .{ "{enter}gv", "{esc}" },
-        .{ "{enter}i", "{esc}" }, .{ "a", "{esc}" },
-        .{ "c", "{esc}" },        .{ "W", "{esc}" },
-        .{ "I", "{esc}" },        .{ "K", "{esc}" },
-        .{ "T", "{esc}" },        .{ "E", "{esc}" },
-        .{ "gM", "{esc}" },       .{ "s", "{esc}{esc}" },
-        .{ "{ctrl-k}", "{esc}" }, .{ ":", "{esc}" },
-        .{ "y", "{esc}" },        .{ "O", "{esc}" },
-        .{ "Oa", "{esc}{esc}" },  .{ "Oe", "{esc}{esc}" },
+        .{ "", "" },                            .{ "{enter}", "" },
+        .{ "S", "{esc}" },                      .{ "?", "?" },
+        .{ "gb", "gb" },                        .{ "gL", "gL" },
+        .{ "gm", "gm" },                        .{ "{enter}gv", "{esc}" },
+        .{ "{enter}i", "{esc}" },               .{ "a", "{esc}" },
+        .{ "c", "{esc}" },                      .{ "W", "{esc}" },
+        .{ "I", "{esc}" },                      .{ "K", "{esc}" },
+        .{ "T", "{esc}" },                      .{ "E", "{esc}" },
+        .{ "gM", "{esc}" },                     .{ "s", "{esc}{esc}" },
+        .{ "{ctrl-k}", "{esc}" },               .{ ":", "{esc}" },
+        .{ "y", "{esc}" },                      .{ "O", "{esc}" },
+        .{ "Oa", "{esc}{esc}" },                .{ "Oe", "{esc}{esc}" },
         .{ "{ctrl-t}", "[" },
+        // The list a choice is picked from, over the form that opened it.
+                          .{ "K{down}{enter}", "{esc}{esc}" },
+        .{ "K{down}{enter}zzz", "{esc}{esc}" },
     };
     for (sizes) |size| {
         var bench = try Bench.openWith(BOOKS, .{ .size = size });

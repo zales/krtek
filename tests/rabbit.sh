@@ -172,7 +172,8 @@ screen "x x removes the one under the cursor" "1 row deleted" "$ROOT/%2F" '{ente
 queues | grep -qx zgridu && fail "x left the queue on the broker"
 echo "ok: and the broker agrees about both"
 screen "an edit is refused, in the driver's own words" "declared rather than altered" "$ROOT/%2F" '{enter}' 'e'
-screen "a vhost is a schema, so # moves to another" "VHOST druhy" "$ROOT/%2F" '#' '{right}' '{ctrl-s}'
+# `#` is the list of them, to pick from: a few letters of the name and enter.
+screen "a vhost is a schema, so # lists them and enter moves to the one typed" "VHOST druhy" "$ROOT/%2F" '#' 'dru' '{enter}'
 
 # What comes out of a dump has to go back in: the topology of one vhost, replayed
 # into the other. Three things were wrong with it at once. A name was written
