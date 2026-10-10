@@ -8,6 +8,7 @@ const term = @import("term.zig");
 const database = @import("db");
 const dump_mod = @import("dump.zig");
 const draw = @import("draw.zig");
+const line_mod = @import("line.zig");
 
 const App = app_mod.App;
 const Key = term.Key;
@@ -40,7 +41,7 @@ pub fn handle(app: *App, key: Key, size: term.Size) !void {
         try onPalette(app, key);
         return;
     }
-    if (app.typing.editor != null) {
+    if (app.typingInEditor()) {
         try onEditor(app, key);
         return;
     }
@@ -67,11 +68,11 @@ pub fn handle(app: *App, key: Key, size: term.Size) !void {
         }
         switch (key) {
             .ctrl => |code| if (code == 'c') {
-                app.quit = true;
+                app.interrupt();
             },
             .escape => app.view = .connections,
             .char => |point| switch (point) {
-                'q' => app.quit = true,
+                'q' => app.leave(),
                 '?' => app.view = .connections,
                 ':' => try ask(app, .command, " :"),
                 else => {},
@@ -81,7 +82,7 @@ pub fn handle(app: *App, key: Key, size: term.Size) !void {
         return;
     }
     if (app.view == .files) {
-        try onFiles(app, key);
+        try onFiles(app, key, size);
         return;
     }
     if (app.view == .object) {
@@ -110,44 +111,83 @@ pub fn handle(app: *App, key: Key, size: term.Size) !void {
                 'p' => app.detail_at -|= app.detail_page,
                 'g' => app.detail_at = 0,
                 'G' => app.detail_at = last,
+                // The value that is being looked at, which is the one somebody
+                // wants. `y` closed the box like any other letter, and the value
+                // was then `y` and `c` away.
+                'y' => try dump_mod.copyCell(app),
                 else => app.detail = false,
             },
+            .mouse => |mouse| switch (mouse.button) {
+                .wheel_down => app.detail_at = @min(app.detail_at + 3, last),
+                .wheel_up => app.detail_at -|= 3,
+                else => {},
+            },
             .escape, .enter => app.detail = false,
+            // What ctrl+c does to anything that is open over the grid.
             .ctrl => |code| if (code == 'c') {
-                app.quit = true;
+                app.detail = false;
             },
             else => {},
         }
         return;
     }
 
+    if (paged(app.view) and app.focus == .main and scrollPager(app, key)) {
+        return;
+    }
+
     switch (key) {
         .ctrl => |code| switch (code) {
-            'c' => app.quit = true,
+            'c' => app.interrupt(),
             't' => try app.newTab(null),
             'w' => app.typing.prefix = WINDOW,
-            'd', 'f' => try movePage(app, 1),
-            'u', 'b' => try movePage(app, -1),
+            // By the screen, as in vi: half of it, or all of it. These used to
+            // turn the page of two hundred rows the engine handed over - so on a
+            // table of a hundred and twenty they did nothing at all, and nothing
+            // moved by a screen.
+            'd' => try moveScreen(app, 1, true),
+            'u' => try moveScreen(app, -1, true),
+            'f' => try moveScreen(app, 1, false),
+            'b' => try moveScreen(app, -1, false),
             'k', 'p' => try openPalette(app),
             'r' => try app.reload(),
             else => {},
         },
         .mouse => |mouse| try click(app, mouse, size),
         .tab, .back_tab => app.focus = if (app.focus == .sidebar) .main else .sidebar,
+        // One thing at a time, the nearest first: the screen that is not the
+        // grid, then whatever was started on the rows and not finished, then
+        // what narrows the list. The grid says `esc clears it` under a filter
+        // that matches nothing, so the filter is on the list too - last, and
+        // only where nothing is on screen for it to have been pressed at.
         .escape => {
             if (app.view != .grid) {
                 app.view = .grid;
+            } else if (app.cursor.range_from != null) {
+                app.cursor.range_from = null;
+                app.say("nothing marked", .{});
+            } else if (app.cursor.marked.items.len != 0) {
+                app.cursor.unmark(app.allocator);
+                app.say("unmarked", .{});
+            } else if (app.grid.find.items.len != 0) {
+                app.findOff(false);
+                app.say("no longer looking for anything", .{});
+            } else if (app.typing.docked) {
+                app.dropDocked();
+                app.say("the statement is put away - ctrl+p in the editor has it", .{});
             } else if (app.sidebar.filter.items.len > 0) {
                 app.sidebar.filter.clearRetainingCapacity();
                 app.sidebar.selected = 0;
+            } else if (app.isFiltered() and app.grid.rows.items.len == 0) {
+                try app.clearRowFilter();
             }
         },
         .up => try move(app, -1),
         .down => try move(app, 1),
         .left => moveColumn(app, -1),
         .right => moveColumn(app, 1),
-        .page_up => try movePage(app, -1),
-        .page_down => try movePage(app, 1),
+        .page_up => try moveScreen(app, -1, false),
+        .page_down => try moveScreen(app, 1, false),
         .home => {
             if (app.focus == .sidebar) {
                 app.sidebar.selected = 0;
@@ -218,6 +258,7 @@ pub const Does = enum {
     editor,
     search,
     filter_objects,
+    find,
     filter_rows,
     columns,
     sort,
@@ -333,15 +374,18 @@ pub fn offered(action: Action, caps: database.Caps, has_files: bool) bool {
 
 /// The single letters are vi's wherever vi has one for the thing: `y` yanks,
 /// `m` marks, `w` and `b` move by a column, `H` `M` `L` go to the top, middle
-/// and bottom of the screen. What those letters did here before is on `g` and
+/// and bottom of the screen, `/` looks for text and `n` and `N` go to the next
+/// and the last place it is. What those letters did here before is on `g` and
 /// the letter it used to be - `gm` for the messages `m` opened, `gv` for the
-/// value `v` showed - which is one rule to remember rather than eight new keys.
+/// value `v` showed, `gN` for the renaming `N` did - which is one rule to
+/// remember rather than nine new keys.
 pub const actions = [_]Action{
     .{ .keys = "d", .does = .browse, .label = "browse the selected table", .also = "data rows open select", .needs = .sidebar },
     .{ .keys = "S", .does = .structure, .label = "structure of the table", .also = "columns indexes keys schema create" },
     .{ .keys = "s", .does = .editor, .label = "write and run SQL", .plain = "write and run a command", .also = "query editor statement console" },
     .{ .keys = "F", .does = .search, .label = "search every table", .also = "find text grep", .wants = .sql },
-    .{ .keys = "/", .does = .filter_objects, .label = "filter the object list", .also = "search find tables" },
+    .{ .keys = "/", .does = .filter_objects, .label = "filter the object list", .also = "search find tables go to jump", .needs = .sidebar },
+    .{ .keys = "/", .does = .find, .label = "find in the rows", .also = "search look for grep match word", .needs = .main },
     .{ .keys = "W", .does = .filter_rows, .label = "filter the rows", .also = "where condition" },
     .{ .keys = "gw", .does = .columns, .label = "choose visible columns", .also = "hide show" },
     .{ .keys = "o", .does = .sort, .label = "sort by this column", .also = "order asc desc" },
@@ -359,7 +403,7 @@ pub const actions = [_]Action{
     .{ .keys = "K", .does = .foreign_key, .label = "add a foreign key", .also = "reference relation", .wants = .relations },
     .{ .keys = "gV", .does = .view, .label = "create a view", .also = "new", .wants = .relations },
     .{ .keys = "T", .does = .trigger, .label = "create a trigger", .also = "new", .wants = .relations },
-    .{ .keys = "N", .does = .rename, .label = "rename the table", .also = "move", .wants = .tables },
+    .{ .keys = "gN", .does = .rename, .label = "rename the table", .also = "move", .wants = .tables },
     .{ .keys = "Y", .does = .copy_table, .label = "copy the table", .also = "duplicate", .wants = .tables },
     .{ .keys = "X", .does = .truncate, .label = "empty the table", .also = "truncate delete all", .wants = .ddl },
     .{ .keys = "D", .does = .drop, .label = "drop the table", .also = "delete remove", .wants = .tables },
@@ -380,7 +424,9 @@ pub const actions = [_]Action{
     .{ .keys = "q", .does = .quit, .label = "quit", .also = "exit close" },
 };
 
-/// The action a key, or two, belongs to.
+/// The action a key, or two, belongs to. Where a key is one thing in the list
+/// and another in the rows - `/` is - this answers with the first, and the key
+/// handler asks which pane it is in before it gets here.
 fn actionTyped(keys: []const u8) ?Action {
     for (actions) |action| {
         if (std.mem.eql(u8, action.keys, keys)) {
@@ -700,11 +746,18 @@ fn afterPrefix(app: *App, pending: u21, key: Key) !void {
         else => {
             if (pending == 'y') {
                 app.say("nothing copied", .{});
+            } else if (pending == 'x') {
+                app.say("left alone", .{});
             }
             return;
         },
     };
     switch (pending) {
+        'x' => if (point == 'x') {
+            try app.deleteRowsNow();
+        } else {
+            app.say("left alone", .{});
+        },
         'y' => switch (point) {
             'c' => try dump_mod.copyCell(app),
             'r', 'y' => try dump_mod.copyRow(app),
@@ -716,12 +769,18 @@ fn afterPrefix(app: *App, pending: u21, key: Key) !void {
             'g' => {
                 if (app.focus == .sidebar) {
                     app.sidebar.selected = 0;
+                } else if (paged(app.view)) {
+                    app.pager.scroll = 0;
                 } else {
                     app.cursor.row = 0;
                 }
             },
             't' => app.nextTab(),
             'T' => app.prevTab(),
+            // The page of rows the engine hands over, which `n` and `p` turned
+            // before `n` was given to what `/` found.
+            'n' => try movePage(app, 1),
+            'p' => try movePage(app, -1),
             '1'...'9' => app.selectTab(point - '1'),
             // And what the letters did before vi's meanings took them: `gm` is
             // the messages `m` used to open. They are in the table of actions
@@ -786,33 +845,19 @@ fn onPalette(app: *App, key: Key) !void {
         .escape => closePalette(app),
         .ctrl => |code| switch (code) {
             'c', 'k' => closePalette(app),
-            'u' => {
-                palette.query.clearRetainingCapacity();
-                palette.at = 0;
-            },
             'n' => if (count != 0 and palette.at + 1 < count) {
                 palette.at += 1;
             },
             'p' => if (palette.at > 0) {
                 palette.at -= 1;
             },
-            else => {},
+            else => try typeInPalette(app, key),
         },
         .down => if (count != 0 and palette.at + 1 < count) {
             palette.at += 1;
         },
         .up => if (palette.at > 0) {
             palette.at -= 1;
-        },
-        .backspace => {
-            if (palette.query.items.len > 0) {
-                var cut = palette.query.items.len - 1;
-                while (cut > 0 and palette.query.items[cut] & 0xc0 == 0x80) {
-                    cut -= 1;
-                }
-                palette.query.shrinkRetainingCapacity(cut);
-                palette.at = 0;
-            }
         },
         .enter => {
             if (palette.at >= count) {
@@ -830,13 +875,16 @@ fn onPalette(app: *App, key: Key) !void {
             }
             try perform(app, action.does);
         },
-        .char => |point| {
-            var buf: [4]u8 = undefined;
-            const len = std.unicode.utf8Encode(point, &buf) catch return;
-            try palette.query.appendSlice(app.allocator, buf[0..len]);
-            palette.at = 0;
-        },
-        else => {},
+        else => try typeInPalette(app, key),
+    }
+}
+
+/// A key that is the query's own. What it says having changed, the best match
+/// is the first again.
+fn typeInPalette(app: *App, key: Key) !void {
+    const palette = &app.palette.?;
+    if (try line_mod.key(app.allocator, &palette.query, &palette.caret, key) == .changed) {
+        palette.at = 0;
     }
 }
 
@@ -859,7 +907,7 @@ fn onConnections(app: *App, key: Key) !void {
     const count = app.savedCount();
     switch (key) {
         .ctrl => |code| switch (code) {
-            'c' => app.quit = true,
+            'c' => app.interrupt(),
             't' => try app.newTab(null),
             'w' => app.typing.prefix = WINDOW,
             'd', 'f' => app.saved.at = @min(app.saved.at + app.saved.page(), count -| 1),
@@ -867,7 +915,7 @@ fn onConnections(app: *App, key: Key) !void {
             else => {},
         },
         .char => |point| switch (point) {
-            'q' => app.quit = true,
+            'q' => app.leave(),
             't' => try app.connectSavedInNewTab(),
             'a' => try app.openConnectionForm(false),
             'e' => try app.openConnectionForm(true),
@@ -876,7 +924,9 @@ fn onConnections(app: *App, key: Key) !void {
             ':' => try ask(app, .command, " :"),
             ']' => app.nextTab(),
             '[' => app.prevTab(),
-            'd' => try app.forgetSaved(),
+            // `x` is what removes, here as on a row and on a file. `d` did it
+            // before, and still does - asked about first now, like the other.
+            'x', 'd' => try app.forgetSaved(),
             'j' => if (count != 0 and app.saved.at + 1 < count) {
                 app.saved.at += 1;
             },
@@ -941,6 +991,11 @@ fn click(app: *App, mouse: term.Mouse, size: term.Size) !void {
     switch (mouse.button) {
         .wheel_up, .wheel_down => {
             const delta: i32 = if (mouse.button == .wheel_down) 1 else -1;
+            // Over a screen that is read, the wheel reads on.
+            if (!in_sidebar and paged(app.view)) {
+                app.pager.by(delta * 3);
+                return;
+            }
             const was = app.focus;
             app.focus = if (in_sidebar) .sidebar else .main;
             var steps: usize = 0;
@@ -972,32 +1027,36 @@ fn click(app: *App, mouse: term.Mouse, size: term.Size) !void {
         }
         return;
     }
-    if (app.view != .grid or mouse.row < 3) {
+    if (app.view != .grid) {
         return;
     }
+    // The grid starts lower while the statement that filled it is above it -
+    // and a click on the statement is where the typing goes back to.
+    const down = draw.dockedRows(app, if (size.rows > 3) size.rows - 3 else 1);
+    if (down != 0 and mouse.row >= 1 and mouse.row <= down) {
+        try app.openEditor();
+        return;
+    }
+    if (mouse.row < 2 + down) {
+        return;
+    }
+    // Which column, by the layout that drew it.
+    const column = draw.columnAt(app, size, mouse.col);
     app.focus = .main;
-    const row = app.cursor.row_scroll + (mouse.row - 3);
+    if (mouse.row == 2 + down) {
+        // A click on a column's name sorts by it, as `o` on it does.
+        if (column) |index| {
+            app.cursor.col = index;
+            try sort(app);
+        }
+        return;
+    }
+    const row = app.cursor.row_scroll + (mouse.row - 3 - down);
     if (row < app.grid.rows.items.len) {
         app.cursor.row = row;
     }
-    // Walk the visible columns to find which one the click landed in.
-    var x: usize = side;
-    var index = app.cursor.col_scroll;
-    var seen: usize = 0;
-    while (index < app.grid.cols.items.len) : (index += 1) {
-        if (app.isHidden(index)) {
-            continue;
-        }
-        const w = @min(@max(app.grid.widths.items[index], 3), app.grid.text_limit) + 1;
-        if (mouse.col >= x and mouse.col < x + w) {
-            app.cursor.col = index;
-            break;
-        }
-        x += w;
-        seen += 1;
-        if (x > size.cols) {
-            break;
-        }
+    if (column) |index| {
+        app.cursor.col = index;
     }
 }
 
@@ -1075,7 +1134,7 @@ fn perform(app: *App, does: Does) !void {
         return;
     }
     switch (does) {
-        .quit => app.quit = true,
+        .quit => app.leave(),
         .help => if (app.view == .help) {
             // Back to wherever the question was asked from, which is the file
             // manager when that is what is open.
@@ -1091,16 +1150,42 @@ fn perform(app: *App, does: Does) !void {
             }
         },
         .structure => {
-            if (!app.hasTable()) {
+            // Of the table the cursor is on, where the cursor is in the list:
+            // somebody who moved to a name there and asked for its structure
+            // was shown the structure of whatever was open instead.
+            const other = if (app.focus == .sidebar)
+                if (app.current()) |object|
+                    if (app.grid.name) |name| !std.mem.eql(u8, name, object.name) else true
+                else
+                    false
+            else
+                !app.hasTable();
+            if (other) {
                 if (app.current()) |object| {
                     try app.openTable(object.name);
                 }
+            } else if (app.view == .structure) {
+                // And back to the rows, which is what the footer there has
+                // always said `S` does.
+                app.view = .grid;
+                return;
             }
             app.view = .structure;
+            app.focus = .main;
         },
-        .messages => app.view = if (app.view == .messages) .grid else .messages,
-        .info => app.view = if (app.view == .info) .grid else .info,
-        .relations => app.view = if (app.view == .relations) .grid else .relations,
+        .messages => read(app, .messages),
+        .info => read(app, .info),
+        .relations => read(app, .relations),
+        .find => {
+            if (app.view != .grid or app.grid.rows.items.len == 0) {
+                app.complain("there are no rows here to look in", .{});
+                return;
+            }
+            app.focus = .main;
+            app.cursor.find_from = .{ app.cursor.row, app.cursor.col };
+            app.grid.find.clearRetainingCapacity();
+            try ask(app, .find, " /");
+        },
         .connections => app.view = .connections,
         .reload => {
             try app.loadObjects();
@@ -1159,9 +1244,21 @@ fn perform(app: *App, does: Does) !void {
     }
 }
 
+/// Put one of the screens that are read up, or take it down again. The
+/// keys go to it while it is up: it is what was asked for, and what `j` is
+/// most likely meant for.
+fn read(app: *App, view: app_mod.View) void {
+    if (app.view == view) {
+        app.view = .grid;
+        return;
+    }
+    app.view = view;
+    app.focus = .main;
+}
+
 /// The keys that move about rather than do something, which is why they are
 /// not in the table of actions. A test holds the table to not taking one.
-pub const MOVING = "jkhlwbgGHML0^$npz'`mtvVC";
+pub const MOVING = "jkhlwbgGHML0^$nNpz'`mV";
 
 /// A key in the grid or the object list. What it does is in the table of
 /// actions if it does anything; what is left moves the cursor, or waits for a
@@ -1169,14 +1266,18 @@ pub const MOVING = "jkhlwbgGHML0^$npz'`mtvVC";
 fn letter(app: *App, point: u21) !void {
     var typed: [4]u8 = undefined;
     const len = std.unicode.utf8Encode(point, &typed) catch return;
+    // `/` looks in the pane it is pressed in: for a name in the list, for text
+    // in the rows.
+    if (point == '/') {
+        const in_rows = app.view == .grid and app.focus == .main and app.grid.rows.items.len != 0;
+        return perform(app, if (in_rows) .find else .filter_objects);
+    }
     if (actionTyped(typed[0..len])) |action| {
         return perform(app, action.does);
     }
     switch (point) {
-        // The same thing under a second key.
-        't' => try perform(app, .browse),
-        ' ', 'v', 'V' => try perform(app, .mark),
-        'C' => try perform(app, .yank),
+        ' ' => try perform(app, .mark),
+        'V' => try app.markRange(),
 
         'j' => try move(app, 1),
         'k' => try move(app, -1),
@@ -1218,8 +1319,12 @@ fn letter(app: *App, point: u21) !void {
                 app.cursor.col = at - 1;
             }
         },
-        'n' => try movePage(app, 1),
-        'p' => try movePage(app, -1),
+        'n' => app.findAgain(true),
+        'N' => app.findAgain(false),
+        // Where `n` and this turned the page. One of the two had to go to what
+        // `/` found, and a pair that is only half there is worse than a pair
+        // somewhere else - so this one says where they went.
+        'p' => app.say("gp is the page before, gn the next - ctrl+b and ctrl+f go by a screen", .{}),
         // And the keys that wait for another. The footer lists what it can be.
         'g', 'z', 'm' => app.typing.prefix = point,
         '\'', '`' => app.typing.prefix = '\'',
@@ -1288,6 +1393,91 @@ fn moveColumn(app: *App, delta: i32) void {
         }
     }
     app.cursor.col = next;
+}
+
+/// The screens that are read from top to bottom rather than worked in.
+fn paged(view: app_mod.View) bool {
+    return switch (view) {
+        .structure, .messages, .info, .relations => true,
+        else => false,
+    };
+}
+
+/// Moving about one of those. True when the key was one that does.
+fn scrollPager(app: *App, key: Key) bool {
+    const page: isize = @intCast(@max(1, app.pager.page));
+    const by: isize = switch (key) {
+        .char => |point| switch (point) {
+            'j' => 1,
+            'k' => -1,
+            'G' => std.math.maxInt(i32),
+            else => return false,
+        },
+        .down => 1,
+        .up => -1,
+        .page_down => page,
+        .page_up => -page,
+        .home => -std.math.maxInt(i32),
+        .end => std.math.maxInt(i32),
+        .ctrl => |code| switch (code) {
+            'd' => @divTrunc(page + 1, 2),
+            'u' => -@divTrunc(page + 1, 2),
+            'f' => page,
+            'b' => -page,
+            else => return false,
+        },
+        else => return false,
+    };
+    app.pager.by(by);
+    return true;
+}
+
+/// Up or down by a screen of rows, or half of one - of the rows in hand, and
+/// on to the next page of them where those run out, the way `j` goes on.
+fn moveScreen(app: *App, direction: i32, half: bool) !void {
+    if (app.focus == .sidebar) {
+        const count = app.visibleCount();
+        if (count == 0) {
+            return;
+        }
+        const shown = @max(1, app.sidebar.shown);
+        const by = if (half) (shown + 1) / 2 else shown;
+        app.sidebar.selected = if (direction > 0)
+            @min(app.sidebar.selected + by, count - 1)
+        else
+            app.sidebar.selected -| by;
+        return;
+    }
+    const count = app.grid.rows.items.len;
+    if (count == 0) {
+        return;
+    }
+    const page = @max(1, app.cursor.page);
+    // A line of the screen before stays on the one after, so the eye has
+    // somewhere to start from.
+    const by = if (half) (page + 1) / 2 else @max(1, page -| 1);
+    if (direction > 0) {
+        if (app.cursor.row + 1 >= count) {
+            if (app.hasTable() and app.grid.page + 1 < app.pages()) {
+                app.cursor.row = 0;
+                app.cursor.row_scroll = 0;
+                try movePage(app, 1);
+            }
+            return;
+        }
+        app.cursor.row = @min(app.cursor.row + by, count - 1);
+        app.cursor.row_scroll = @min(app.cursor.row_scroll + by, count -| page);
+        return;
+    }
+    if (app.cursor.row == 0) {
+        if (app.hasTable() and app.grid.page > 0) {
+            try movePage(app, -1);
+            app.cursor.row = app.grid.rows.items.len -| 1;
+        }
+        return;
+    }
+    app.cursor.row -|= by;
+    app.cursor.row_scroll -|= by;
 }
 
 /// `r` reads the table once; this keeps reading it. The view stays at the end,
@@ -1365,7 +1555,7 @@ fn onObject(app: *App, key: Key) !void {
         },
         .char => |point| {
             if (point == 'q') {
-                app.quit = true;
+                app.leave();
                 return;
             }
             for (app.object.actions) |action| {
@@ -1398,7 +1588,7 @@ fn onObject(app: *App, key: Key) !void {
             else => {},
         },
         .ctrl => |code| switch (code) {
-            'c' => app.quit = true,
+            'c' => app.interrupt(),
             'k', 'p' => try openPalette(app),
             else => {},
         },
@@ -1493,7 +1683,7 @@ fn edit(app: *App) !void {
 /// The two panes. Everything here acts on the pane the cursor is in, and `tab`
 /// is what moves the cursor to the other one - which is the whole of what makes
 /// copying between two places one keystroke.
-fn onFiles(app: *App, key: Key) !void {
+fn onFiles(app: *App, key: Key, size: term.Size) !void {
     const manager = app.files orelse {
         app.view = .grid;
         return;
@@ -1501,12 +1691,23 @@ fn onFiles(app: *App, key: Key) !void {
     const pane = manager.here();
     switch (key) {
         .ctrl => |code| switch (code) {
-            'c' => app.quit = true,
+            'c' => app.interrupt(),
             'd' => pane.move(10),
             'u' => pane.move(-10),
             else => {},
         },
         .tab, .back_tab => manager.swap(),
+        // The wheel moves in the pane it is over, without taking the keys there.
+        .mouse => |mouse| {
+            const delta: isize = switch (mouse.button) {
+                .wheel_down => 3,
+                .wheel_up => -3,
+                else => return,
+            };
+            const split = size.cols - (if (size.cols > 5) (size.cols - 1) / 2 else 2) - 1;
+            const over = if (mouse.col < split) &manager.left else &manager.right;
+            over.move(delta);
+        },
         .up => pane.move(-1),
         .down => pane.move(1),
         .page_up => pane.move(-20),
@@ -1532,8 +1733,10 @@ fn onFiles(app: *App, key: Key) !void {
             'x' => try askRemove(app),
             'n' => try ask(app, .new_dir, " new directory: "),
             '/' => try ask(app, .go_to, " go to: "),
-            'r' => try askRename(app),
-            'R' => {
+            // `r` reads again here as it does in the grid; it renamed, and
+            // `R` read again, which was the grid's two keys the other way up.
+            'N' => try askRename(app),
+            'r' => {
                 manager.reload();
                 app.say("reloaded", .{});
             },
@@ -1610,6 +1813,8 @@ fn typing(app: *App, key: Key) !void {
                     app.sidebar.filter.clearRetainingCapacity();
                     app.sidebar.selected = 0;
                 }
+            } else if (prompt.kind == .find) {
+                app.findOff(true);
             }
             close(app);
         },
@@ -1620,7 +1825,27 @@ fn typing(app: *App, key: Key) !void {
             defer app.allocator.free(line);
             close(app);
             switch (kind) {
-                .filter => {},
+                // Enter on a name that was typed for goes to it. The list stays
+                // narrowed, for the next of them; the table that is already open
+                // is left as it is, page and filter and all.
+                .filter => if (app.view != .connections and line.len != 0) {
+                    if (app.current()) |object| {
+                        const open_already = if (app.grid.name) |name| std.mem.eql(u8, name, object.name) else false;
+                        if (!open_already) {
+                            try app.openTable(object.name);
+                        }
+                        app.view = .grid;
+                        app.focus = .main;
+                    }
+                },
+                .find => {
+                    app.cursor.find_from = null;
+                    if (line.len == 0) {
+                        app.findOff(false);
+                    } else {
+                        app.sayFound();
+                    }
+                },
                 .password => try app.connectWithPassword(line),
                 .confirm => {
                     if (line.len != 0 and (line[0] == 'y' or line[0] == 'Y')) {
@@ -1630,7 +1855,10 @@ fn typing(app: *App, key: Key) !void {
                         app.clearPending();
                     }
                 },
-                .command => try app.command(line),
+                .command => {
+                    app.rememberCommand(line);
+                    try app.command(line);
+                },
                 .edit => try app.saveCell(line),
                 .new_dir => if (line.len != 0) try app.makeFileDir(line),
                 .go_to => if (line.len != 0) try app.goToPath(line),
@@ -1656,52 +1884,59 @@ fn typing(app: *App, key: Key) !void {
                         app.say("left alone", .{});
                     }
                 },
+                .forget_saved => {
+                    if (line.len != 0 and (line[0] == 'y' or line[0] == 'Y')) {
+                        try app.forgetSavedNow();
+                    } else {
+                        app.say("left alone", .{});
+                    }
+                },
+                .make_file => {
+                    if (line.len != 0 and (line[0] == 'y' or line[0] == 'Y')) {
+                        try app.makeAndOpen();
+                    } else {
+                        app.say("nothing made", .{});
+                    }
+                },
             }
         },
-        .backspace => {
-            if (prompt.buffer.items.len > 0) {
-                // Remove a whole codepoint, not a byte.
-                var cut = prompt.buffer.items.len - 1;
-                while (cut > 0 and prompt.buffer.items[cut] & 0xc0 == 0x80) {
-                    cut -= 1;
-                }
-                prompt.buffer.shrinkRetainingCapacity(cut);
-                try refilter(app);
+        .ctrl => |name| if (name == 'c') {
+            if (prompt.kind == .find) {
+                app.findOff(true);
             }
+            close(app);
+            return;
         },
-        .ctrl => |name| switch (name) {
-            'c' => close(app),
-            'u' => {
-                prompt.buffer.clearRetainingCapacity();
-                try refilter(app);
-            },
-            else => {},
-        },
+        // What was typed after `:` before, and only there. These brought the
+        // statements back into whatever line was open - a value being edited,
+        // a password - which is somewhere they were never typed.
         .up, .down => {
-            if (app.history.items.len == 0) {
+            if (prompt.kind != .command or app.commands.items.len == 0) {
                 return;
             }
-            const last = app.history.items.len - 1;
+            const last = app.commands.items.len - 1;
             const at = switch (key) {
                 .up => if (prompt.history_at) |value| (if (value == 0) 0 else value - 1) else last,
                 else => if (prompt.history_at) |value| (if (value >= last) last else value + 1) else last,
             };
             prompt.history_at = at;
             prompt.buffer.clearRetainingCapacity();
-            try prompt.buffer.appendSlice(app.allocator, app.history.items[at]);
-        },
-        .char => |point| {
-            var buf: [4]u8 = undefined;
-            const len = std.unicode.utf8Encode(point, &buf) catch return;
-            try prompt.buffer.appendSlice(app.allocator, buf[0..len]);
-            try refilter(app);
+            try prompt.buffer.appendSlice(app.allocator, app.commands.items[at]);
+            prompt.at = line_mod.END;
+            return;
         },
         .tab => {
             if (prompt.kind == .edit) {
-                try prompt.buffer.append(app.allocator, ' ');
+                try line_mod.insert(app.allocator, &prompt.buffer, &prompt.at, " ");
             }
+            return;
         },
         else => {},
+    }
+    // Everything else is the line's: where the cursor goes in it, and what is
+    // put in and taken out there.
+    if (try line_mod.key(app.allocator, &prompt.buffer, &prompt.at, key) == .changed) {
+        try refilter(app);
     }
 }
 
@@ -1709,6 +1944,9 @@ fn typing(app: *App, key: Key) !void {
 /// connection list on the other, since `/` means the same thing on both.
 fn refilter(app: *App) !void {
     const prompt = app.typing.prompt orelse return;
+    if (prompt.kind == .find) {
+        return app.findTyped(prompt.buffer.items);
+    }
     if (prompt.kind != .filter) {
         return;
     }
@@ -1819,20 +2057,35 @@ test "the cursor moves by vi's letters and stops at the edges" {
     try testing.expectEqual(@as(usize, 0), cursor.col);
 }
 
-test "x deletes the row the cursor is on, and the marked rows where some are marked" {
+test "x and x again deletes the row the cursor is on, and marked rows are asked about by their count" {
     var bench = try Bench.open(BOOKS);
     defer bench.close();
+    // One x is a question, and any other key is no.
     try bench.keys("j{enter}jx");
-    try bench.says("1 row(s) deleted");
+    try bench.says("x again deletes this row");
+    try bench.expectAsked("SELECT count(*) FROM books", "4");
+    try bench.keys("j");
+    try bench.expectAsked("SELECT count(*) FROM books", "4");
+    // And that key was the answer and nothing else: the cursor is where it was.
+    try testing.expectEqual(@as(usize, 1), bench.app.cursor.row);
+
+    try bench.keys("xx");
+    try bench.says("1 row deleted");
     try bench.expectAsked("SELECT title FROM books ORDER BY id", "RUR Žert Saturnin");
     try bench.sees("books  1-3 of 3");
     try bench.lacks("Krakatit");
 
-    // Two marked, the cursor on a third: the marked ones go and that one stays.
-    try bench.keys("gg{space}j{space}j");
+    // Space ticks a row and steps to the next, so two of them is two rows
+    // ticked and the cursor on a third: the ticked ones go and that one stays.
+    try bench.keys("gg{space}{space}");
     try testing.expectEqual(@as(usize, 2), bench.app.cursor.marked.items.len);
+    try testing.expectEqual(@as(usize, 2), bench.app.cursor.row);
+    try bench.sees("2 marked");
     try bench.keys("x");
-    try bench.says("2 row(s) deleted");
+    try testing.expectEqual(PromptKind.remove_rows, bench.app.typing.prompt.?.kind);
+    try bench.says("delete 2 marked rows?");
+    try bench.keys("y{enter}");
+    try bench.says("2 rows deleted");
     try bench.expectAsked("SELECT title FROM books ORDER BY id", "Saturnin");
     try testing.expectEqual(@as(usize, 0), bench.app.cursor.marked.items.len);
 }
@@ -1862,14 +2115,15 @@ test "i opens a form for a new row, and ctrl+s puts it in the table" {
     try bench.keys("j{enter}i");
     try bench.sees("new row");
     // Each column a field and a box that says it is NULL, in the order of the
-    // table; the key is left as it is and SQLite numbers the row itself.
-    try bench.keys("{tab}{tab}Bylo nás pět{tab}{tab}1946{tab}{tab}1{ctrl-s}");
+    // table, and tab goes from one value to the next past the boxes; the key
+    // is left as it is and SQLite numbers the row itself.
+    try bench.keys("{tab}Bylo nás pět{tab}1946{tab}1{ctrl-s}");
     try bench.says("row inserted");
     try bench.expectAsked("SELECT id || ':' || title || ':' || year || ':' || author FROM books WHERE year = 1946", "5:Bylo nás pět:1946:1");
     try bench.sees("books  1-5 of 5");
 
     // Escape closes a form and inserts nothing.
-    try bench.keys("i{tab}{tab}never{esc}");
+    try bench.keys("i{tab}never{esc}");
     try testing.expect(bench.app.typing.form == null);
     try bench.expectAsked("SELECT count(*) FROM books", "5");
 }
@@ -1887,7 +2141,7 @@ test "o sorts by the column under the cursor, then the other way" {
     try testing.expectEqualStrings("Žert", bench.app.grid.rows.items[0].cells[1].text);
 }
 
-test "the editor runs what was written in it, and keeps what was not run" {
+test "the editor runs what was written in it, leaves a statement that reads over its rows, and keeps what was not run" {
     var bench = try Bench.open(BOOKS);
     defer bench.close();
     try bench.keys("s");
@@ -1897,17 +2151,25 @@ test "the editor runs what was written in it, and keeps what was not run" {
     try bench.sees("query result");
     try testing.expectEqual(@as(usize, 2), bench.app.grid.rows.items.len);
     try testing.expectEqualStrings("RUR", bench.app.grid.rows.items[0].cells[0].text);
-    try bench.says("1 statement(s), 0 row(s) affected");
+    try bench.says("2 rows");
+    // One that only reads stays as a strip above what it brought back, with
+    // the keys handed to the grid, and `s` puts the typing back after it.
+    try bench.sees("s edits it again");
+    try bench.keys("j");
+    try testing.expectEqual(@as(usize, 1), bench.app.cursor.row);
+    try bench.keys("s");
+    try bench.sees("[INSERT]");
+    try bench.sees("order by year");
 
     // Two statements: both run, and the one with rows is what is shown.
-    try bench.keys("s{ctrl-u}");
+    try bench.keys("{ctrl-u}");
     try bench.typed("update books set year = year + 1 where id = 1; select year from books where id = 1");
     try bench.keys("{ctrl-s}");
-    try bench.says("2 statement(s), 1 row(s) affected");
     try testing.expectEqualStrings("1921", bench.app.grid.rows.items[0].cells[0].text);
+    try bench.expectAsked("SELECT year FROM books WHERE id = 1", "1921");
 
     // Put away with escape, what was being written is there the next time.
-    try bench.keys("s{ctrl-u}");
+    try bench.keys("{esc}{esc}s{ctrl-u}");
     try bench.typed("select 1 -- not yet");
     try bench.keys("{esc}{esc}");
     try testing.expect(bench.app.typing.editor == null);
@@ -1921,9 +2183,11 @@ test "a statement the engine refuses is said, and the rest of the batch still ru
     try bench.keys("s");
     try bench.typed("select * from nowhere; delete from books where id = 4");
     try bench.keys("{ctrl-s}");
-    try bench.says("1 of 2 statement(s) failed");
+    try bench.says("1 of 2 statements failed");
     try bench.expectAsked("SELECT count(*) FROM books", "3");
-    try bench.keys("gm");
+    // The editor stays open over a run that did not go through, with what the
+    // engine said under the statement.
+    try testing.expect(bench.app.typing.editor != null);
     try bench.sees("no such table: nowhere");
 }
 
@@ -1996,14 +2260,19 @@ test "a command on the : line changes how much is on a page, and n and p turn it
     try bench.keys("j{enter}:limit 3{enter}");
     try bench.sees("books  1-3 of 4   page 1/2");
     try bench.lacks("Saturnin");
-    try bench.keys("n");
+    try bench.keys("gn");
     try bench.sees("books  4-4 of 4   page 2/2");
     try bench.sees("Saturnin");
     // There is no third page to turn to.
-    try bench.keys("n");
+    try bench.keys("gn");
     try bench.sees("page 2/2");
-    try bench.keys("p");
+    try bench.keys("gp");
     try bench.sees("page 1/2");
+    // `n` alone is the next of what is being looked for, and says where the
+    // page keys went when nothing is.
+    try bench.keys("n");
+    try bench.sees("page 1/2");
+    try bench.says("gn and gp turn the page");
 
     // What is not a command says so and changes nothing.
     try bench.keys(":nonsense{enter}");
@@ -2014,9 +2283,13 @@ test "a command on the : line changes how much is on a page, and n and p turn it
 test "the filter on the list narrows it, and escape brings it all back" {
     var bench = try Bench.open(BOOKS);
     defer bench.close();
+    // Enter opens the first of what is left, and leaves the list narrowed.
     try bench.keys("/boo{enter}");
     try testing.expectEqual(@as(usize, 1), bench.app.visibleCount());
-    try bench.keys("/{ctrl-u}{enter}");
+    try bench.sees("books  1-4 of 4");
+    try testing.expectEqual(app_mod.Focus.main, bench.app.focus);
+    // Escape in the list is what widens it again.
+    try bench.keys("{tab}{esc}");
     try testing.expectEqual(@as(usize, 2), bench.app.visibleCount());
 }
 

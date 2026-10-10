@@ -452,8 +452,10 @@ if command -v helm >/dev/null 2>&1; then
 	}
 	echo "ok: helm releases are read out of the secrets helm keeps them in"
 else
-	out=$(python3 tests/screen.py "$ROOT" 's' 'GET releases' '{ctrl-s}' '{sleep}' 'gm' '{sleep}' '{keep}' 2>&1)
-	printf '%s' "$out" | grep -qi "statement(s) failed" && fail "GET releases should answer even where there is nothing to list"
+	# A statement that failed leaves the editor open over what the engine said,
+	# so the editor still being there is what a failure looks like.
+	out=$(python3 tests/screen.py "$ROOT" 's' 'GET releases' '{ctrl-s}' '{sleep}' '{keep}' 2>&1)
+	printf '%s' "$out" | grep -q "\[INSERT\]\|failed" && fail "GET releases should answer even where there is nothing to list"
 	echo "ok: helm releases answer on a cluster with none (no helm to install one)"
 fi
 
@@ -691,11 +693,10 @@ echo "ok: EXEC -t hands the terminal over for something full screen"
 
 # And what it says when the pod is not there, rather than a hung terminal.
 #
-# `m` because that is where a failed statement puts what went wrong: the line
-# along the bottom says how many failed and offers the details, and the details
-# are where the name is. This check used to read the bottom line and had not
-# been run since it stopped being there.
-missing=$(python3 tests/screen.py "$ROOT" 's' 'EXEC nosuchpod' '{ctrl-s}' '{sleep}' 'gm' '{sleep}' '{keep}' 2>&1)
+# What went wrong is under the statement, in the editor that stays open over a
+# run that failed, and its first line is along the bottom. It was behind `gm`
+# before that, and on the bottom line before that.
+missing=$(python3 tests/screen.py "$ROOT" 's' 'EXEC nosuchpod' '{ctrl-s}' '{sleep}' '{keep}' 2>&1)
 printf '%s' "$missing" | grep -qi "nosuchpod" || {
 	printf '%s\n' "$missing" >&2
 	fail "EXEC on a missing pod should name it"

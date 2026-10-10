@@ -6,6 +6,7 @@
 const std = @import("std");
 const ask = @import("db").ask;
 const term = @import("term.zig");
+const line_mod = @import("line.zig");
 
 pub const Kind = union(enum) {
     text,
@@ -20,6 +21,9 @@ pub const Field = struct {
     label: []const u8,
     kind: Kind,
     text: std.ArrayList(u8) = .empty,
+    /// Where in the text the cursor is, as a byte offset. After the end until
+    /// it is moved, which is where a field that was just filled in wants it.
+    at: usize = line_mod.END,
     on: bool = false,
     pick: usize = 0,
     /// Drawn on the same line as the field before it.
@@ -238,6 +242,31 @@ pub const Form = struct {
         }
     }
 
+    /// The box beside a value that says the value is NULL.
+    fn isNullBox(self: *Form, index: usize) bool {
+        const one = self.field(index) orelse return false;
+        return one.kind == .toggle and one.inline_with_previous and std.mem.eql(u8, one.label, "null");
+    }
+
+    /// The next field somebody types into, which is what `tab` goes to. The
+    /// form for a row has a NULL box after every value, and `tab` stopped on
+    /// each: two presses a column, forty for a table of twenty. The boxes are
+    /// still there for the arrows, which go to everything.
+    fn nextValue(self: *Form, from: usize, delta: i32) usize {
+        var at = from;
+        while (true) {
+            const next = self.nextEditable(at, delta);
+            if (next == at) {
+                // Nothing further that way but boxes: stay, rather than end on one.
+                return if (self.isNullBox(at)) from else at;
+            }
+            at = next;
+            if (!self.isNullBox(at)) {
+                return at;
+            }
+        }
+    }
+
     /// Typing a value means the cell is no longer NULL, which is what the null
     /// checkbox next to it says.
     fn clearNullBeside(self: *Form, index: usize) void {
@@ -254,59 +283,55 @@ pub const Form = struct {
                 's' => return .submit,
                 'c' => return .cancel,
                 'n' => return .add_row,
-                'k' => return .remove_row,
-                'u' => {
-                    if (self.field(self.cursor)) |f| {
-                        if (f.kind == .text) {
-                            f.text.clearRetainingCapacity();
-                        }
-                    }
+                // `x` is what removes, here as everywhere else. It was `ctrl+k`,
+                // which everywhere else is the palette.
+                'x' => return .remove_row,
+                else => {},
+            },
+            .up => {
+                self.cursor = self.nextEditable(self.cursor, -1);
+                return .none;
+            },
+            .down => {
+                self.cursor = self.nextEditable(self.cursor, 1);
+                return .none;
+            },
+            .tab, .enter => {
+                self.cursor = self.nextValue(self.cursor, 1);
+                return .none;
+            },
+            .back_tab => {
+                self.cursor = self.nextValue(self.cursor, -1);
+                return .none;
+            },
+            else => {},
+        }
+        const f = self.field(self.cursor) orelse return .none;
+        switch (f.kind) {
+            .choice => |options| switch (key) {
+                .left, .right => {
+                    const delta: usize = if (key == .right) 1 else options.len - 1;
+                    f.pick = (f.pick + delta) % options.len;
                 },
                 else => {},
             },
-            .up => self.cursor = self.nextEditable(self.cursor, -1),
-            .down, .tab => self.cursor = self.nextEditable(self.cursor, 1),
-            .enter => self.cursor = self.nextEditable(self.cursor, 1),
-            .left, .right => {
-                if (self.field(self.cursor)) |f| {
-                    switch (f.kind) {
-                        .choice => |options| {
-                            const delta: usize = if (key == .right) 1 else options.len - 1;
-                            f.pick = (f.pick + delta) % options.len;
-                        },
-                        .toggle => f.on = !f.on,
-                        else => {},
-                    }
+            .toggle => switch (key) {
+                .left, .right => f.on = !f.on,
+                .char => |point| if (point == ' ') {
+                    f.on = !f.on;
+                },
+                else => {},
+            },
+            // Everything else a key can be is the line's own: where the cursor
+            // goes in it, and what is put in and taken out there.
+            .text => {
+                const did = line_mod.key(self.gpa(), &f.text, &f.at, key) catch .nothing;
+                // Typing a value means the cell is no longer NULL.
+                if (did == .changed and key == .char) {
+                    self.clearNullBeside(self.cursor);
                 }
             },
-            .backspace => {
-                if (self.field(self.cursor)) |f| {
-                    if (f.kind == .text and f.text.items.len > 0) {
-                        var cut = f.text.items.len - 1;
-                        while (cut > 0 and f.text.items[cut] & 0xc0 == 0x80) {
-                            cut -= 1;
-                        }
-                        f.text.shrinkRetainingCapacity(cut);
-                    }
-                }
-            },
-            .char => |point| {
-                if (self.field(self.cursor)) |f| {
-                    switch (f.kind) {
-                        .toggle => if (point == ' ') {
-                            f.on = !f.on;
-                        },
-                        .text => {
-                            var buf: [4]u8 = undefined;
-                            const len = std.unicode.utf8Encode(point, &buf) catch return .none;
-                            f.text.appendSlice(self.gpa(), buf[0..len]) catch {};
-                            self.clearNullBeside(self.cursor);
-                        },
-                        else => {},
-                    }
-                }
-            },
-            else => {},
+            .label => {},
         }
         return .none;
     }

@@ -19,6 +19,7 @@ comptime {
     _ = @import("forms.zig");
     _ = @import("fuzzy.zig");
     _ = @import("input.zig");
+    _ = @import("line.zig");
     _ = @import("term.zig");
 }
 
@@ -375,7 +376,7 @@ test "a tab gives back everything it holds" {
         .column = try a.dupe(u8, "born"),
         .value = try a.dupe(u8, "1900"),
     });
-    try tab.cursor.marked.append(a, 3);
+    try tab.cursor.marked.append(a, try app.ownFilters(a, &.{.{ .column = "id", .value = "3" }}));
     try tab.cursor.hidden.append(a, 1);
     tab.marks[0] = .{ .table = try a.dupe(u8, "authors"), .row = 2 };
     tab.marks[25] = .{ .table = null, .row = 7 };
@@ -409,7 +410,10 @@ test "every action has one line, one key and one way of being asked for" {
     for (input.actions, 0..) |action, i| {
         try std.testing.expect(action.keys.len != 0);
         for (input.actions[i + 1 ..]) |other| {
-            try std.testing.expect(!std.mem.eql(u8, action.keys, other.keys));
+            // One key, one thing - except where it is the same thing in each
+            // pane: `/` looks for a name in the list and for text in the rows.
+            const one_per_pane = action.needs != null and other.needs != null and action.needs.? != other.needs.?;
+            try std.testing.expect(one_per_pane or !std.mem.eql(u8, action.keys, other.keys));
         }
         // A key that moves the cursor is not also one that does something: the
         // table is asked first, so the action would win and the movement would
@@ -421,7 +425,7 @@ test "every action has one line, one key and one way of being asked for" {
 }
 
 test "what a key did before vi took it is behind g and that key" {
-    // `m` opened the messages, `v` the whole value, and so on for eight of
+    // `m` opened the messages, `v` the whole value, and so on for nine of
     // them. Each of those letters means what it means in vi now, and each of
     // those things is still one rule away.
     const input = @import("input.zig");
@@ -434,6 +438,7 @@ test "what a key did before vi took it is behind g and that key" {
         .{ .does = .clone, .keys = "gy" },
         .{ .does = .import, .keys = "gM" },
         .{ .does = .relations, .keys = "gL" },
+        .{ .does = .rename, .keys = "gN" },
     };
     for (moved) |one| {
         try std.testing.expectEqualStrings(one.keys, input.actionThat(one.does).keys);
@@ -441,7 +446,7 @@ test "what a key did before vi took it is behind g and that key" {
     // And the second key of `g` is not one `g` already has a use for.
     for (input.actions) |action| {
         if (action.keys.len == 2 and action.keys[0] == 'g') {
-            try std.testing.expect(std.mem.findScalar(u8, "gtT123456789", action.keys[1]) == null);
+            try std.testing.expect(std.mem.findScalar(u8, "gtTnp123456789", action.keys[1]) == null);
         }
     }
 }

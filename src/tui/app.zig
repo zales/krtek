@@ -21,6 +21,7 @@ const dump_mod = @import("dump.zig");
 const Editor = @import("editor.zig").Editor;
 const sql_syntax = @import("editor.zig");
 const fuzzy = @import("fuzzy.zig");
+const line_mod = @import("line.zig");
 const conns = @import("connections.zig");
 const keychain = @import("keychain.zig");
 const biometry = @import("biometry.zig");
@@ -171,15 +172,19 @@ pub const Spot = struct { row: usize, col: usize, block: bool = false };
 /// Its entries live in `input.zig`, next to the keys they stand for.
 pub const Palette = struct {
     query: std.ArrayList(u8) = .empty,
+    /// Where in the query the typing is.
+    caret: usize = line_mod.END,
     at: usize = 0,
 };
 
-pub const PromptKind = enum { command, filter, edit, confirm, password, new_dir, rename_file, remove_files, overwrite, go_to, remove_rows };
+pub const PromptKind = enum { command, filter, find, edit, confirm, password, new_dir, rename_file, remove_files, overwrite, go_to, remove_rows, forget_saved, make_file };
 
 pub const Prompt = struct {
     kind: PromptKind,
     label: []const u8,
     buffer: std.ArrayList(u8) = .empty,
+    /// Where in the buffer the typing is.
+    at: usize = line_mod.END,
     history_at: ?usize = null,
 };
 
@@ -320,6 +325,8 @@ const Reporting = struct {
     /// between a colour somebody reads past and one they stop at.
     status: std.ArrayList(u8) = .empty,
     status_error: bool = false,
+    /// Whether the last run left rows on the grid.
+    result: bool = false,
 
     fn deinit(self: *Reporting, allocator: std.mem.Allocator) void {
         self.status.deinit(allocator);
@@ -352,6 +359,15 @@ const Saved = struct {
     /// Which saved connection the open form is editing, so changing both its name
     /// and its target replaces that entry instead of adding a second one.
     editing: ?usize = null,
+    /// A file that is not there, waiting to hear whether it should be made, and
+    /// the way it was asked for: opened, opened and remembered, or `:open`.
+    making: std.ArrayList(u8) = .empty,
+    making_how: enum { none, connect, remember, reopen } = .none,
+    /// The answer was yes, and the file is being opened: this once, it is made.
+    /// Apart from `making_how`, which is still set after a question that was
+    /// walked away from - and the next name with a letter wrong in it must be
+    /// asked about too.
+    making_now: bool = false,
     /// Something somebody asked for is in the list and not in its file, because
     /// the file could not be written when it was put there. Kept rather than said
     /// once: most of what changes the list goes on to open a connection, and what
@@ -396,6 +412,20 @@ const Typing = struct {
     /// pressed twice to be sure of being in normal mode - so closing it cannot be
     /// what throws a statement away. The next time it opens, this is in it.
     draft: std.ArrayList(u8) = .empty,
+    /// The editor is open above the rows its statement brought back, and the
+    /// keys are the grid's: `s` puts the typing back in it.
+    ///
+    /// A statement and its result were never on the screen together. Running
+    /// one put the editor away, and changing a word of it was `s` for an empty
+    /// editor and `ctrl+p` for the statement again - every time round, in the
+    /// one loop that is gone round most. It stays now, as a strip over what it
+    /// brought back, for as long as that is what the grid is showing.
+    docked: bool = false,
+    /// What the engine said about the first statement of the last run that it
+    /// would not take, all of it. The editor stays open over a run that failed
+    /// and shows this under what was typed: the statement and what is wrong
+    /// with it are then on the screen together, which they never were.
+    failure: std.ArrayList(u8) = .empty,
 
     fn deinit(self: *Typing, allocator: std.mem.Allocator) void {
         if (self.prompt) |*prompt| {
@@ -409,6 +439,7 @@ const Typing = struct {
         }
         self.pending.deinit(allocator);
         self.draft.deinit(allocator);
+        self.failure.deinit(allocator);
         self.arena.deinit();
     }
 };
@@ -455,19 +486,85 @@ const Cursor = struct {
     col: usize = 0,
     row_scroll: usize = 0,
     col_scroll: usize = 0,
-    /// Row indexes ticked with space.
-    marked: std.ArrayList(usize) = .empty,
+    /// The rows ticked with space: what addresses each of them, as a copy of its
+    /// own. They used to be positions on the page, and a position stops being
+    /// the same row the moment the page is read again - turned, sorted, followed
+    /// - so `x` on the next page took a row nobody had ticked and nobody was on.
+    marked: std.ArrayList([]const database.ask.Filter) = .empty,
+    /// Where `V` started a run of them: a row of the page in hand, until `V`
+    /// again ticks everything from there to the cursor.
+    range_from: ?usize = null,
+    /// Where the cursor was when `/` was pressed: what is typed is looked for
+    /// from there, and esc goes back to it.
+    find_from: ?[2]usize = null,
     /// Column indexes put away, by index into the grid's own columns.
     hidden: std.ArrayList(usize) = .empty,
     /// How many rows the grid has room for, as last drawn: what "the middle of
     /// the screen" and "the bottom of it" are measured in.
     page: usize = 1,
 
+    /// Untick every row.
+    pub fn unmark(self: *Cursor, allocator: std.mem.Allocator) void {
+        for (self.marked.items) |key| {
+            freeFilters(allocator, key);
+        }
+        self.marked.clearRetainingCapacity();
+        self.range_from = null;
+    }
+
     fn deinit(self: *Cursor, allocator: std.mem.Allocator) void {
+        self.unmark(allocator);
         self.marked.deinit(allocator);
         self.hidden.deinit(allocator);
     }
 };
+
+/// A copy of what addresses a row, held by itself rather than in the arena of
+/// the page the row was read into.
+pub fn ownFilters(allocator: std.mem.Allocator, filters: []const database.ask.Filter) ![]const database.ask.Filter {
+    const out = try allocator.alloc(database.ask.Filter, filters.len);
+    var made: usize = 0;
+    errdefer {
+        for (out[0..made]) |one| {
+            allocator.free(one.column);
+            allocator.free(one.value);
+        }
+        allocator.free(out);
+    }
+    for (filters, out) |filter, *copy| {
+        const column = try allocator.dupe(u8, filter.column);
+        errdefer allocator.free(column);
+        copy.* = .{
+            .column = column,
+            .op = filter.op,
+            .value = try allocator.dupe(u8, filter.value),
+            .as_text = filter.as_text,
+        };
+        made += 1;
+    }
+    return out;
+}
+
+pub fn freeFilters(allocator: std.mem.Allocator, filters: []const database.ask.Filter) void {
+    for (filters) |one| {
+        allocator.free(one.column);
+        allocator.free(one.value);
+    }
+    allocator.free(filters);
+}
+
+/// Whether two keys address the same row.
+pub fn sameFilters(a: []const database.ask.Filter, b: []const database.ask.Filter) bool {
+    if (a.len != b.len) {
+        return false;
+    }
+    for (a, b) |one, other| {
+        if (one.op != other.op or !std.mem.eql(u8, one.column, other.column) or !std.mem.eql(u8, one.value, other.value)) {
+            return false;
+        }
+    }
+    return true;
+}
 
 /// The table on the screen: which one it is, what its columns are, the page
 /// of rows in hand and how that page was asked for.
@@ -502,6 +599,8 @@ const Grid = struct {
     /// it must not then report a count as though it had worked.
     failed: bool = false,
     text_limit: usize = 44, // widest column in the grid
+    /// What `/` is looking for in the rows on the page, if anything.
+    find: std.ArrayList(u8) = .empty,
 
     fn clearConditions(self: *Grid, allocator: std.mem.Allocator) void {
         for (self.conditions.items) |condition| {
@@ -523,11 +622,35 @@ const Grid = struct {
         self.clearConditions(allocator);
         self.conditions.deinit(allocator);
         self.where_text.deinit(allocator);
+        self.find.deinit(allocator);
         self.schema.deinit(allocator);
         self.title.deinit(allocator);
         self.cols.deinit(allocator);
         self.widths.deinit(allocator);
         self.rows.deinit(allocator);
+    }
+};
+
+/// Where a screen that is read rather than worked in is scrolled to: the
+/// structure of a table, the report of the last batch, the database
+/// information and the relations. Each is longer than a window is tall as soon
+/// as the table has thirty columns, and what did not fit was simply not drawn.
+pub const Pager = struct {
+    scroll: usize = 0,
+    /// How many lines the screen had room for and how many there were, as last
+    /// drawn - the drawing is what counts them, and the keys need to be told.
+    page: usize = 1,
+    lines: usize = 0,
+    /// Which screen that was. Another one starts at its top.
+    view: View = .grid,
+
+    pub fn by(self: *Pager, delta: isize) void {
+        const last = self.lines -| self.page;
+        if (delta < 0) {
+            self.scroll -|= @intCast(-delta);
+        } else {
+            self.scroll = @min(self.scroll +| @as(usize, @intCast(delta)), last);
+        }
     }
 };
 
@@ -580,6 +703,7 @@ pub const Tab = struct {
     marks: [26]?Mark = @splat(null),
     typing: Typing,
     help: Help = .{},
+    pager: Pager = .{},
     report: Reporting,
     files: ?*Files.Manager = null,
     running: Running = .{},
@@ -670,10 +794,17 @@ pub const App = struct {
 
     typing: Typing,
     help: Help = .{},
+    pager: Pager = .{},
     history: std.ArrayList([]const u8) = .empty,
+    /// What was typed after `:`, for the arrows there to bring back. Apart from
+    /// the statements, which is what those arrows brought back before: an
+    /// `update` in the line that takes `limit 50`, and in a password.
+    commands: std.ArrayList([]const u8) = .empty,
     report: Reporting,
 
     quit: bool = false,
+    /// When ctrl+c was last pressed with nothing to stop, in milliseconds.
+    interrupted: f64 = -1e12,
 
     saved: Saved,
     palette: ?Palette = null,
@@ -796,12 +927,13 @@ pub const App = struct {
         } else {
             const found = self.saved.list.items.items.len - self.saved.list.savedCount();
             if (found != 0) {
-                self.say("{d} saved, {d} from the kubeconfig - enter connects, a adds, d removes", .{
+                self.say("{d} saved, {d} from the kubeconfig - enter connects, a adds, x removes", .{
                     self.saved.list.savedCount(),
                     found,
                 });
             } else {
-                self.say("{d} saved connection(s) - enter connects, a adds, d removes", .{self.saved.list.items.items.len});
+                const count = self.saved.list.items.items.len;
+                self.say("{d} saved connection{s} - enter connects, a adds, x removes", .{ count, plural(count) });
             }
         }
         return self;
@@ -810,6 +942,9 @@ pub const App = struct {
     /// Open a target and take it as the current connection. `remember` puts it in
     /// the saved list, without its password.
     pub fn connect(self: *App, target: []const u8, keep: bool) !void {
+        if (try self.askToMake(target, if (keep) .remember else .connect)) {
+            return;
+        }
         var report: std.ArrayList(u8) = .empty;
         defer report.deinit(self.allocator);
         var naming = std.heap.ArenaAllocator.init(self.allocator);
@@ -868,13 +1003,67 @@ pub const App = struct {
         try entered;
     }
 
+    /// Whether opening this would make a file that is not there, and if so the
+    /// question is on the screen and true comes back.
+    ///
+    /// SQLite makes the file it is asked to open, so a name with a letter wrong
+    /// in it was a new, empty database beside the real one, a screen that said
+    /// `0 objects`, and a file of no bytes left behind for somebody to find. A
+    /// new database is still one `y` away - which is how they are made here.
+    fn askToMake(self: *App, target: []const u8, how: @TypeOf(self.saved.making_how)) !bool {
+        if (self.saved.making_now) {
+            // The answer was yes, and this is the opening it was a yes to.
+            return false;
+        }
+        if (!wouldMake(self.allocator, target)) {
+            return false;
+        }
+        self.saved.making.clearRetainingCapacity();
+        try self.saved.making.appendSlice(self.allocator, target);
+        self.saved.making_how = how;
+        if (self.typing.prompt) |*old| {
+            old.buffer.deinit(self.allocator);
+        }
+        self.typing.prompt = .{ .kind = .make_file, .label = " type y to make it: " };
+        // The end of the path, where the line cannot hold all of it: the name
+        // is what somebody has to look at to see the letter that is wrong.
+        const said = " is not there - make a new, empty database?";
+        const end = endFor(target, self.screen.size().cols -| said.len -| 3);
+        self.say("{s}{s}{s}", .{ if (end.len < target.len) "…" else "", end, said });
+        return true;
+    }
+
+    /// The yes to that question.
+    pub fn makeAndOpen(self: *App) !void {
+        const how = self.saved.making_how;
+        const target = try self.allocator.dupe(u8, self.saved.making.items);
+        defer self.allocator.free(target);
+        self.saved.making_how = .none;
+        // Set for as long as the file is being opened, which is what lets it
+        // be made, and cleared whatever comes of it.
+        self.saved.making_now = true;
+        defer self.saved.making_now = false;
+        switch (how) {
+            .none => {},
+            .connect => try self.connect(target, false),
+            .remember => try self.connect(target, true),
+            .reopen => try self.reopen(target),
+        }
+    }
+
     /// What `connect` does with a connection once it has one.
     fn enter(self: *App, opened: database.Db, target: []const u8, keep: bool) !void {
         try self.take(opened, target);
         if (keep) {
             try self.rememberConnection(target);
         }
-        self.say("{s} - {s}", .{ self.conn.describe(), self.conn.version() });
+        // The end of what was opened where the line has no room for all of it,
+        // for the same reason the header keeps the end: that is where one file
+        // differs from the next, and the version comes after it.
+        const what = self.conn.describe();
+        const version = self.conn.version();
+        const end = endFor(what, self.screen.size().cols -| term.width(version) -| 6);
+        self.say("{s}{s} - {s}", .{ if (end.len < what.len) "…" else "", end, version });
         // Every way of changing the list that goes on to connect ends here, so
         // this is where a list that did not reach its file is said - after the
         // line above, which would otherwise be written over it.
@@ -928,7 +1117,7 @@ pub const App = struct {
         self.clearConditions();
         self.grid.where_text.clearRetainingCapacity();
         self.cursor.hidden.clearRetainingCapacity();
-        self.cursor.marked.clearRetainingCapacity();
+        self.cursor.unmark(self.allocator);
         self.sidebar.selected = 0;
         self.grid.page = 0;
         self.view = .grid;
@@ -941,8 +1130,57 @@ pub const App = struct {
 
     // --- the SQL editor ---
 
+    /// Whether the editor is open and has the keys - which it does not while it
+    /// is a strip over its own result.
+    pub fn typingInEditor(self: *App) bool {
+        return self.typing.editor != null and !self.typing.docked;
+    }
+
+    /// Whether every statement of this would do the same thing a second time,
+    /// by the engine's own account of each.
+    fn readsAgain(self: *App, sql: []const u8) bool {
+        var scratch = std.heap.ArenaAllocator.init(self.allocator);
+        defer scratch.deinit();
+        const statements = self.conn.split(scratch.allocator(), sql) catch return false;
+        var any = false;
+        for (statements) |statement| {
+            const text = std.mem.trim(u8, statement.sql, " \t\r\n;");
+            if (text.len == 0) {
+                continue;
+            }
+            if (!self.conn.repeatable(text)) {
+                return false;
+            }
+            any = true;
+        }
+        return any;
+    }
+
+    /// Put the editor that was left over a result away, statement and all. The
+    /// statement is in the history, where one that was run is looked for; what
+    /// the editor opens with next is nothing, as it always was after a run.
+    pub fn dropDocked(self: *App) void {
+        if (!self.typing.docked) {
+            return;
+        }
+        if (self.typing.editor) |*open| {
+            open.deinit();
+        }
+        self.typing.editor = null;
+        self.typing.docked = false;
+        self.typing.failure.clearRetainingCapacity();
+    }
+
     pub fn openEditor(self: *App) !void {
-        if (self.typing.editor != null) {
+        if (self.typing.editor) |*open| {
+            // Over its result: the typing goes back into it, after what is
+            // there, which is where the next word of a statement goes.
+            if (self.typing.docked) {
+                self.typing.docked = false;
+                open.cursor = open.text.items.len;
+                open.enterInsert();
+                self.say("the statement is as it was run - ctrl+u empties it", .{});
+            }
             return;
         }
         self.typing.editor = Editor.init(self.allocator);
@@ -974,6 +1212,8 @@ pub const App = struct {
             open.deinit();
         }
         self.typing.editor = null;
+        self.typing.docked = false;
+        self.typing.failure.clearRetainingCapacity();
     }
 
     /// Run what is in the editor and close it, so the result is what is on
@@ -1006,14 +1246,41 @@ pub const App = struct {
             return;
         }
         const talking = self.conn.sessionIn().len != 0;
+        // A statement that takes the terminal over has the screen to itself
+        // until it ends, and the editor is put away before it starts.
+        const takes_over = self.conn.wantsTerminal(std.mem.trim(u8, owned, " \t\r\n;"));
         if (talking) {
             editor.clear();
             editor.settle();
-        } else {
+        } else if (takes_over) {
             self.closeEditor();
             self.typing.draft.clearRetainingCapacity();
         }
         try self.runBatch(owned);
+        // The editor is put away once what was in it has run, so the result is
+        // what is on screen - and stays where it is over a run that did not go
+        // through, with what the engine said under it. It used to close either
+        // way: a slip of one letter was the editor gone, a line saying only
+        // that something had failed, `gm` to find out what, and `s` to get the
+        // statement back.
+        //
+        // And over a run that brought rows back it stays too, as a strip above
+        // them with the keys handed to the grid: see `Typing.docked`.
+        if (!talking and !takes_over and self.typing.editor != null and !self.report.status_error) {
+            self.typing.draft.clearRetainingCapacity();
+            // Only over something that reads. What stays in the editor is what
+            // `s` and a few more letters run again, and a statement that wrote
+            // and then brought rows back is not one to be run twice by a hand
+            // that expected an empty editor.
+            if (self.report.result and !self.hasTable() and self.conn.sessionIn().len == 0 and self.readsAgain(owned)) {
+                self.typing.docked = true;
+                self.typing.editor.?.closeCompletion();
+                self.typing.editor.?.scroll = 0;
+            } else {
+                self.closeEditor();
+                self.typing.draft.clearRetainingCapacity();
+            }
+        }
         // Opening one, or leaving it, changes which of the two this is.
         if (self.conn.sessionIn().len == 0 and self.typing.editor != null and talking) {
             self.closeEditor();
@@ -1391,6 +1658,9 @@ pub const App = struct {
         self.admitUnwritten();
     }
 
+    /// `x` on a saved connection: asked about before it goes, because what goes
+    /// with it - the password in the keychain - is not somewhere to get it back
+    /// from, and the key beside this one in the grid only shows a table's rows.
     pub fn forgetSaved(self: *App) !void {
         const chosen = self.chosenSaved() orelse return;
         const going = self.saved.list.items.items[chosen];
@@ -1398,6 +1668,23 @@ pub const App = struct {
         // it came from is where it lives.
         if (going.found) {
             self.complain("{s} comes from the kubeconfig - remove the context there", .{going.name});
+            return;
+        }
+        if (self.typing.prompt) |*old| {
+            old.buffer.deinit(self.allocator);
+        }
+        self.typing.prompt = .{ .kind = .forget_saved, .label = " type y to remove: " };
+        self.say("remove {s} from the list{s}?", .{
+            going.name,
+            if (going.keeps.inKeychain()) ", and its password from the keychain" else "",
+        });
+    }
+
+    /// And after the yes.
+    pub fn forgetSavedNow(self: *App) !void {
+        const chosen = self.chosenSaved() orelse return;
+        const going = self.saved.list.items.items[chosen];
+        if (going.found) {
             return;
         }
         var name: [128]u8 = undefined;
@@ -1536,6 +1823,7 @@ pub const App = struct {
         self.saved.list.deinit();
         self.saved.path.deinit(self.allocator);
         self.saved.pending.deinit(self.allocator);
+        self.saved.making.deinit(self.allocator);
         if (self.palette) |*open| {
             open.query.deinit(self.allocator);
         }
@@ -1543,6 +1831,22 @@ pub const App = struct {
             self.allocator.free(entry);
         }
         self.history.deinit(self.allocator);
+        for (self.commands.items) |entry| {
+            self.allocator.free(entry);
+        }
+        self.commands.deinit(self.allocator);
+    }
+
+    /// Keep a line typed after `:`, unless it is the one just before it.
+    pub fn rememberCommand(self: *App, text: []const u8) void {
+        if (text.len == 0) {
+            return;
+        }
+        if (self.commands.items.len != 0 and std.mem.eql(u8, self.commands.items[self.commands.items.len - 1], text)) {
+            return;
+        }
+        const copy = self.allocator.dupe(u8, text) catch return;
+        self.commands.append(self.allocator, copy) catch self.allocator.free(copy);
     }
 
     /// The screen to fall back to: the grid of whatever is open, or the list of
@@ -1776,6 +2080,8 @@ pub const App = struct {
             self.allocator.free(old);
         }
         self.grid.name = if (name) |value| try self.allocator.dupe(u8, value) else null;
+        // What was ticked was ticked in the table this stops being.
+        self.cursor.unmark(self.allocator);
         // A table on the grid is not a statement's rows any more, so nothing is
         // left behind for `r` to run instead of reading the table.
         if (name != null) {
@@ -1983,6 +2289,7 @@ pub const App = struct {
     // ----------------------------------------------------------- data load
 
     pub fn openTable(self: *App, name: []const u8) !void {
+        self.dropDocked();
         try self.setTable(name);
         self.grid.page = 0;
         self.cursor.row = 0;
@@ -1994,10 +2301,11 @@ pub const App = struct {
             self.grid.order = null;
         }
         self.grid.descending = false;
-        self.cursor.marked.clearRetainingCapacity();
+        self.cursor.unmark(self.allocator);
         self.cursor.hidden.clearRetainingCapacity();
         self.clearConditions();
         self.grid.where_text.clearRetainingCapacity();
+        self.grid.find.clearRetainingCapacity();
         self.view = .grid;
         try self.reload();
     }
@@ -2233,6 +2541,11 @@ pub const App = struct {
         // owns the memory this was read from.
         const again = try self.allocator.dupe(u8, self.follow.statement.items);
         defer self.allocator.free(again);
+        // The same statement again leaves the editor over it where it is;
+        // anything else that is run takes it away.
+        const docked = self.typing.docked;
+        self.typing.docked = false;
+        defer self.typing.docked = docked and self.typing.editor != null;
         try self.runBatchStopping(again, true);
 
         if (self.follow.ms != 0 and at_end and self.grid.rows.items.len != 0) {
@@ -2277,7 +2590,7 @@ pub const App = struct {
         if (self.follow.ms == 0 or self.view != .grid or !self.hasRows()) {
             return;
         }
-        if (self.typing.prompt != null or self.typing.form != null or self.typing.editor != null or self.files != null or self.detail) {
+        if (self.typing.prompt != null or self.typing.form != null or self.typingInEditor() or self.files != null or self.detail) {
             return;
         }
         self.reload() catch {};
@@ -2308,22 +2621,208 @@ pub const App = struct {
         self.grid.clearConditions(self.allocator);
     }
 
+    /// Show the whole table again.
+    pub fn clearRowFilter(self: *App) !void {
+        self.clearConditions();
+        self.grid.where_text.clearRetainingCapacity();
+        self.grid.page = 0;
+        try self.reload();
+        if (!self.grid.failed) {
+            self.say("the filter is off", .{});
+        }
+    }
+
+    // --- finding text in the rows on the page ---
+
+    /// Whether this cell has what is being looked for in it. A NULL has no
+    /// text: the word the grid draws there is the grid's.
+    pub fn hasFound(self: *App, row: usize, column: usize) bool {
+        if (self.grid.find.items.len == 0 or row >= self.grid.rows.items.len) {
+            return false;
+        }
+        const cells = self.grid.rows.items[row].cells;
+        if (column >= cells.len or cells[column].kind == .nul or self.isHidden(column)) {
+            return false;
+        }
+        return fuzzy.find(cells[column].text, self.grid.find.items) != null;
+    }
+
+    /// Go to the next cell that has it, or the one before: across the row, then
+    /// down, and round from the end to the beginning. `here` lets the cell the
+    /// search starts on be the answer, which is what typing wants - the next
+    /// letter must not jump off a cell that still matches. False when no cell
+    /// on the page has it.
+    pub fn findStep(self: *App, forward: bool, here: bool) bool {
+        const rows = self.grid.rows.items.len;
+        const cols = self.grid.cols.items.len;
+        if (rows == 0 or cols == 0 or self.grid.find.items.len == 0) {
+            return false;
+        }
+        const cells = rows * cols;
+        const start = @min(self.cursor.row, rows - 1) * cols + @min(self.cursor.col, cols - 1);
+        var steps: usize = if (here) 0 else 1;
+        while (steps <= cells) : (steps += 1) {
+            const at = if (forward) (start + steps) % cells else (start + cells - (steps % cells)) % cells;
+            if (self.hasFound(at / cols, at % cols)) {
+                self.cursor.row = at / cols;
+                self.cursor.col = at % cols;
+                self.focus = .main;
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /// Say which of the cells that have it the cursor is on, and of how many.
+    pub fn sayFound(self: *App) void {
+        const cols = self.grid.cols.items.len;
+        var count: usize = 0;
+        var at: usize = 0;
+        for (0..self.grid.rows.items.len) |row| {
+            for (0..cols) |column| {
+                if (!self.hasFound(row, column)) {
+                    continue;
+                }
+                count += 1;
+                if (row < self.cursor.row or (row == self.cursor.row and column <= self.cursor.col)) {
+                    at = count;
+                }
+            }
+        }
+        if (count == 0) {
+            self.complain("{s} is not in the rows on this page", .{self.grid.find.items});
+        } else {
+            self.say("/{s}   {d} of {d} on this page   n next   N previous   esc clears", .{ self.grid.find.items, at, count });
+        }
+    }
+
+    /// `n` and `N`.
+    pub fn findAgain(self: *App, forward: bool) void {
+        if (self.grid.find.items.len == 0) {
+            self.say("nothing is being looked for - / looks for text in these rows, gn and gp turn the page", .{});
+            return;
+        }
+        _ = self.findStep(forward, false);
+        self.sayFound();
+    }
+
+    /// What is typed after `/`, as it is typed: looked for from where the
+    /// cursor was when the key was pressed.
+    pub fn findTyped(self: *App, text: []const u8) !void {
+        self.grid.find.clearRetainingCapacity();
+        try self.grid.find.appendSlice(self.allocator, text);
+        if (self.cursor.find_from) |origin| {
+            self.cursor.row = @min(origin[0], self.grid.rows.items.len -| 1);
+            self.cursor.col = @min(origin[1], self.grid.cols.items.len -| 1);
+        }
+        _ = self.findStep(true, true);
+    }
+
+    /// Stop looking, and go back to where the looking started if it did not
+    /// get as far as an enter.
+    pub fn findOff(self: *App, back: bool) void {
+        if (back) {
+            if (self.cursor.find_from) |origin| {
+                self.cursor.row = @min(origin[0], self.grid.rows.items.len -| 1);
+                self.cursor.col = @min(origin[1], self.grid.cols.items.len -| 1);
+            }
+        }
+        self.cursor.find_from = null;
+        self.grid.find.clearRetainingCapacity();
+    }
+
     pub fn isHidden(self: *App, column: usize) bool {
         return std.mem.findScalar(usize, self.cursor.hidden.items, column) != null;
     }
 
-    pub fn isMarked(self: *App, row: usize) bool {
-        return std.mem.findScalar(usize, self.cursor.marked.items, row) != null;
+    /// Where in the list of ticked rows this key is, if it is there.
+    fn markedAt(self: *App, key: []const database.ask.Filter) ?usize {
+        for (self.cursor.marked.items, 0..) |one, at| {
+            if (sameFilters(one, key)) {
+                return at;
+            }
+        }
+        return null;
     }
 
+    /// Whether the row at this place on the page is ticked - or is about to be,
+    /// lying between where `V` was pressed and the cursor.
+    pub fn isMarked(self: *App, row: usize) bool {
+        if (row >= self.grid.rows.items.len) {
+            return false;
+        }
+        if (self.cursor.range_from) |from| {
+            if (row >= @min(from, self.cursor.row) and row <= @max(from, self.cursor.row)) {
+                return true;
+            }
+        }
+        if (self.cursor.marked.items.len == 0) {
+            return false;
+        }
+        const key = self.grid.rows.items[row].key orelse return false;
+        return self.markedAt(key) != null;
+    }
+
+    /// Tick the row under the cursor, or untick it, and step to the next one -
+    /// which is what makes ticking a run of them one key held down.
     pub fn toggleMark(self: *App) !void {
         if (self.cursor.row >= self.grid.rows.items.len) {
             return;
         }
-        if (std.mem.findScalar(usize, self.cursor.marked.items, self.cursor.row)) |at| {
-            _ = self.cursor.marked.orderedRemove(at);
+        const key = self.grid.rows.items[self.cursor.row].key orelse {
+            self.complain("these rows cannot be addressed, so there is nothing to mark one by", .{});
+            return;
+        };
+        self.cursor.range_from = null;
+        if (self.markedAt(key)) |at| {
+            freeFilters(self.allocator, self.cursor.marked.orderedRemove(at));
         } else {
-            try self.cursor.marked.append(self.allocator, self.cursor.row);
+            const copy = try ownFilters(self.allocator, key);
+            errdefer freeFilters(self.allocator, copy);
+            try self.cursor.marked.append(self.allocator, copy);
+        }
+        if (self.cursor.row + 1 < self.grid.rows.items.len) {
+            self.cursor.row += 1;
+        }
+        self.sayMarked();
+    }
+
+    /// `V`: the first time it says where a run starts, the second time it ticks
+    /// every row from there to the cursor.
+    pub fn markRange(self: *App) !void {
+        if (self.cursor.row >= self.grid.rows.items.len) {
+            return;
+        }
+        if (self.grid.rows.items[self.cursor.row].key == null) {
+            self.complain("these rows cannot be addressed, so there is nothing to mark one by", .{});
+            return;
+        }
+        const from = self.cursor.range_from orelse {
+            self.cursor.range_from = self.cursor.row;
+            self.say("marking from this row - move, and V again marks them all (esc gives up)", .{});
+            return;
+        };
+        self.cursor.range_from = null;
+        const first = @min(from, self.cursor.row);
+        const last = @min(@max(from, self.cursor.row), self.grid.rows.items.len - 1);
+        for (self.grid.rows.items[first .. last + 1]) |row| {
+            const key = row.key orelse continue;
+            if (self.markedAt(key) != null) {
+                continue;
+            }
+            const copy = try ownFilters(self.allocator, key);
+            errdefer freeFilters(self.allocator, copy);
+            try self.cursor.marked.append(self.allocator, copy);
+        }
+        self.sayMarked();
+    }
+
+    fn sayMarked(self: *App) void {
+        const count = self.cursor.marked.items.len;
+        if (count == 0) {
+            self.say("nothing marked", .{});
+        } else {
+            self.say("{d} marked - x deletes them, esc unmarks", .{count});
         }
     }
 
@@ -2363,25 +2862,37 @@ pub const App = struct {
             self.complain("these rows cannot be addressed, so they are read-only", .{});
             return;
         }
-        if (self.grid.rows.items.len == 0) {
+        const marked = self.cursor.marked.items.len;
+        if (self.grid.rows.items.len == 0 and marked == 0) {
             self.complain("there is no row here", .{});
             return;
         }
-        // Where nothing takes a delete back - a row that is a file, a row that is a
-        // Kubernetes object - it is asked about first. A database row goes as it
-        // always has, because a transaction is there to take it out of.
+        self.cursor.range_from = null;
+        // Nothing here takes a delete back, so none of them happens on one key.
+        // Several at once, and anything the engine has no way of undoing - a row
+        // that is a file, a row that is a Kubernetes object - are asked about in
+        // so many words. One row of a table is asked about the way vi asks
+        // about a line: by the same key again, which a slip of the hand does
+        // not press twice.
         const allowed = self.caps();
-        if (self.conn.files() != null or allowed.final_deletes) {
-            const count = if (self.cursor.marked.items.len != 0) self.cursor.marked.items.len else @as(usize, 1);
+        const final = self.conn.files() != null or allowed.final_deletes;
+        if (marked != 0 or final) {
+            const count = if (marked != 0) marked else @as(usize, 1);
             const noun = if (self.conn.files() != null) "file" else allowed.row_noun;
             if (self.typing.prompt) |*old| {
                 old.buffer.deinit(self.allocator);
             }
             self.typing.prompt = .{ .kind = .remove_rows, .label = " type y to delete: " };
-            self.say("delete {d} {s}{s}?", .{ count, noun, if (count == 1) "" else "s" });
+            self.say("delete {d} {s}{s}{s}?", .{
+                count,
+                if (marked != 0) "marked " else "",
+                noun,
+                plural(count),
+            });
             return;
         }
-        try self.deleteRowsNow();
+        self.typing.prefix = 'x';
+        self.say("x again deletes this {s} - any other key leaves it", .{allowed.row_noun});
     }
 
     pub fn deleteRowsNow(self: *App) !void {
@@ -2392,28 +2903,46 @@ pub const App = struct {
             self.complain("{s}", .{self.caps().no_delete});
             return;
         }
-        var targets: std.ArrayList(usize) = .empty;
-        defer targets.deinit(self.allocator);
-        if (self.cursor.marked.items.len != 0) {
-            try targets.appendSlice(self.allocator, self.cursor.marked.items);
-        } else if (self.cursor.row < self.grid.rows.items.len) {
-            try targets.append(self.allocator, self.cursor.row);
-        } else {
-            return;
-        }
         var deleted: usize = 0;
-        for (targets.items) |index| {
-            if (index >= self.grid.rows.items.len) {
-                continue;
+        if (self.cursor.marked.items.len != 0) {
+            // By what addresses each of them, not by where on the page it was:
+            // a ticked row may be on another page by now, and is the same row.
+            // One that could not be deleted keeps its tick, and the rest of them
+            // theirs, so what is still ticked is what is still there.
+            var failed = false;
+            while (self.cursor.marked.items.len != 0) {
+                const key = self.cursor.marked.items[0];
+                (try self.change(.{ .kind = .delete, .table = table, .where = key })) orelse {
+                    failed = true;
+                    break;
+                };
+                freeFilters(self.allocator, self.cursor.marked.orderedRemove(0));
+                deleted += 1;
             }
-            const key = self.grid.rows.items[index].key orelse continue;
+            var why: std.ArrayList(u8) = .empty;
+            defer why.deinit(self.allocator);
+            if (failed) {
+                try why.appendSlice(self.allocator, self.report.status.items);
+            }
+            try self.loadObjects();
+            try self.reload();
+            if (failed) {
+                self.complain("{d} row{s} deleted, then: {s}", .{ deleted, plural(deleted), why.items });
+                return;
+            }
+        } else {
+            if (self.cursor.row >= self.grid.rows.items.len) {
+                return;
+            }
+            const key = self.grid.rows.items[self.cursor.row].key orelse return;
             try self.change(.{ .kind = .delete, .table = table, .where = key }) orelse return;
-            deleted += 1;
+            deleted = 1;
+            try self.loadObjects();
+            try self.reload();
         }
-        self.cursor.marked.clearRetainingCapacity();
-        try self.loadObjects();
-        try self.reload();
-        self.say("{d} row(s) deleted", .{deleted});
+        if (!self.grid.failed) {
+            self.say("{d} row{s} deleted", .{ deleted, plural(deleted) });
+        }
     }
 
     /// Put a cursor's rows on the grid. With `hidden_key` the first column
@@ -2601,6 +3130,10 @@ pub const App = struct {
     /// generated script needs: its own COMMIT would otherwise make a half
     /// finished rebuild permanent.
     pub fn runBatchStopping(self: *App, sql: []const u8, stop_on_error: bool) !void {
+        // What is about to be on the grid is not what the editor left there.
+        self.dropDocked();
+        self.typing.failure.clearRetainingCapacity();
+        self.report.result = false;
         // A statement that wants the terminal is not a statement the grid can
         // hold, and it is never one of a batch: it owns the screen until it ends.
         if (self.conn.wantsTerminal(std.mem.trim(u8, sql, " \t\r\n;"))) {
@@ -2726,16 +3259,48 @@ pub const App = struct {
         try self.loadObjects();
 
         var affected: i64 = 0;
+        var took: f64 = 0;
+        var first: []const u8 = "";
         for (self.report.list.items) |report| {
             affected += report.changes;
+            took += report.ms;
+            if (first.len == 0) {
+                first = report.failure orelse "";
+            }
         }
+        const count = self.report.list.items.len;
+        const undone: []const u8 = if (rolled_back) ", rolled back" else "";
+        self.report.result = shown;
         if (failures > 0) {
-            self.complain("{d} of {d} statement(s) failed, press gm for details{s}", .{
-                failures, self.report.list.items.len, if (rolled_back) ", rolled back" else "",
-            });
+            // What the engine said, rather than that it said something: the
+            // line used to be "1 of 1 statement(s) failed, press gm for
+            // details", which is a key to press before finding out it was a
+            // letter missing from `select`.
+            self.typing.failure.appendSlice(self.allocator, first) catch {};
+            const end = std.mem.findScalar(u8, first, '\n') orelse first.len;
+            const more: []const u8 = if (end < first.len) " - gm has the rest of it" else "";
+            if (count == 1) {
+                self.complain("{s}{s}{s}", .{ first[0..end], more, undone });
+            } else {
+                self.complain("{d} of {d} statements failed{s}, gm has each - the first: {s}", .{
+                    failures, count, undone, first[0..end],
+                });
+            }
+        } else if (shown) {
+            // How many rows came back, which is what was asked. It said "0
+            // row(s) affected" over a result of two hundred.
+            const rows = self.grid.rows.items.len;
+            const cut: []const u8 = if (rows >= self.grid.limit) "the first " else "";
+            if (count == 1) {
+                self.say("{s}{d} row{s}   {d:.1} ms{s}", .{ cut, rows, plural(rows), took, undone });
+            } else {
+                self.say("{d} statements, {d} row{s} affected, and the last one's {s}{d} row{s}{s}", .{
+                    count, affected, plural(affected), cut, rows, plural(rows), undone,
+                });
+            }
         } else {
-            self.say("{d} statement(s), {d} row(s) affected{s}", .{
-                self.report.list.items.len, affected, if (rolled_back) ", rolled back" else "",
+            self.say("{d} statement{s}, {d} row{s} affected{s}", .{
+                count, plural(count), affected, plural(affected), undone,
             });
         }
     }
@@ -2809,6 +3374,9 @@ pub const App = struct {
         if (is(verb, &.{ "q", "quit", "q!", "quit!" })) {
             self.leave();
             return;
+        } else if (is(verb, &.{ "qa", "qall", "qa!", "qall!", "quitall" })) {
+            self.quit = true;
+            return;
         } else if (is(verb, &.{ "tabnew", "tabe", "tabedit" })) {
             try self.newTab(if (argument.len != 0) argument else null);
             return;
@@ -2849,7 +3417,7 @@ pub const App = struct {
 
         if (is(verb, &.{ "w", "write" })) {
             // In the editor, writing is running: that is what a statement is for.
-            if (self.typing.editor != null) {
+            if (self.typingInEditor()) {
                 try self.runEditor();
             } else if (argument.len != 0) {
                 try dump_mod.dump(self, argument);
@@ -2860,7 +3428,7 @@ pub const App = struct {
             // The same, and then what `:q` would do - which in the editor is
             // nothing more, because running a statement already puts the editor
             // away. Quitting the program there took the result with it.
-            if (self.typing.editor != null) {
+            if (self.typingInEditor()) {
                 try self.runEditor();
             } else {
                 if (argument.len != 0) {
@@ -2965,16 +3533,49 @@ pub const App = struct {
     /// `:q`, from the inside out: the editor if it is open, then this tab if
     /// there are others, then whatever screen is over the grid, and the program
     /// only when there is nothing left to leave.
-    fn leave(self: *App) void {
-        if (self.typing.editor != null) {
+    /// `q` and `:q`: out of whatever is in front, and out of the program only
+    /// when nothing is.
+    ///
+    /// `q` used to end the program from wherever it was pressed - from the key
+    /// map, where it is what closes every pager there is, and with five tabs
+    /// open behind it. What is in front goes first: the editor, a screen that
+    /// is not the grid, then the tab, and the program after the last of them.
+    pub fn leave(self: *App) void {
+        if (self.typingInEditor()) {
             self.closeEditor();
-        } else if (self.tabs.items.len > 1) {
-            self.closeTab(self.active_tab);
+        } else if (self.detail) {
+            self.detail = false;
+        } else if (self.view == .object) {
+            self.closeObject();
+        } else if (self.view == .files) {
+            self.closeFiles();
+        } else if (self.view == .help) {
+            self.view = if (self.files != null) .files else self.home();
         } else if (self.connected and self.view != .grid) {
             self.view = .grid;
+        } else if (self.typing.docked) {
+            self.dropDocked();
+        } else if (self.tabs.items.len > 1) {
+            self.closeTab(self.active_tab);
         } else {
             self.quit = true;
         }
+    }
+
+    /// `ctrl+c` where there is nothing for it to stop: the second one, close
+    /// behind the first, ends the program.
+    ///
+    /// The same key gives up on a statement that is running, and one pressed
+    /// just as the statement finishes arrives here instead. It used to end the
+    /// program at once - every tab, for having been a moment late.
+    pub fn interrupt(self: *App) void {
+        const now = monotonicMs();
+        if (now - self.interrupted < 2000) {
+            self.quit = true;
+            return;
+        }
+        self.interrupted = now;
+        self.say("ctrl+c again quits", .{});
     }
 
     fn goToRow(self: *App, row: usize) void {
@@ -3085,7 +3686,7 @@ pub const App = struct {
             self.complain("cannot write {s}: {s}", .{ path, @errorName(err) });
             return;
         };
-        self.say("{d} row(s) written to {s}", .{ self.grid.rows.items.len, path });
+        self.say("{d} row{s} written to {s}", .{ self.grid.rows.items.len, plural(self.grid.rows.items.len), path });
     }
 
     /// A whole table, not just the page on screen.
@@ -3123,7 +3724,7 @@ pub const App = struct {
             self.complain("cannot write {s}: {s}", .{ path, @errorName(err) });
             return;
         };
-        self.say("{d} row(s) of {s} written to {s}", .{ rows, table.name, path });
+        self.say("{d} row{s} of {s} written to {s}", .{ rows, plural(rows), table.name, path });
     }
 
     /// The full, unflattened value under the cursor, for the detail view.
@@ -3264,6 +3865,9 @@ pub const App = struct {
     /// Point the app at another database, a file or a server.
     fn reopen(self: *App, target: []const u8) !void {
         if (target.len == 0) {
+            return;
+        }
+        if (try self.askToMake(target, .reopen)) {
             return;
         }
         var report: std.ArrayList(u8) = .empty;
@@ -3434,12 +4038,12 @@ pub const App = struct {
             try self.loadObjects();
             try self.reload();
             if (failed != 0) {
-                self.complain("{d} row(s) imported into {s}, {d} refused{s}{s}", .{
-                    rows,                           table.name, failed,
+                self.complain("{d} row{s} imported into {s}, {d} refused{s}{s}", .{
+                    rows,                           plural(rows), table.name, failed,
                     if (why.len != 0) ": " else "", why,
                 });
             } else {
-                self.say("{d} row(s) imported into {s}", .{ rows, table.name });
+                self.say("{d} row{s} imported into {s}", .{ rows, plural(rows), table.name });
             }
             return;
         }
@@ -3448,7 +4052,7 @@ pub const App = struct {
         self.closeForm();
         try self.runBatch(owned);
         try self.reload();
-        self.say("{d} row(s) imported into {s}", .{ rows, table.name });
+        self.say("{d} row{s} imported into {s}", .{ rows, plural(rows), table.name });
     }
 };
 
@@ -3605,6 +4209,42 @@ pub fn connectionMatches(name: []const u8, target: []const u8, needle: []const u
     }
     return fuzzy.match(name, needle, null) != null or
         std.ascii.findIgnoreCase(target, needle) != null;
+}
+
+/// As much of the end of a path or a target as there is room for, or all of
+/// it: the end is where one differs from the next. Whoever writes it puts the
+/// mark in front that says something was left off.
+pub fn endFor(text: []const u8, room: usize) []const u8 {
+    if (room < 8 or term.width(text) <= room) {
+        return text;
+    }
+    var from = text.len -| (room - 1);
+    while (from < text.len and text[from] & 0xc0 == 0x80) {
+        from += 1;
+    }
+    return text[from..];
+}
+
+/// Whether opening this target would make a file: it is a path to a database,
+/// and nothing is at the end of it. A CSV file is not made by being opened, a
+/// name SQLite reads as something other than a path is SQLite's own business,
+/// and every other engine is a server.
+pub fn wouldMake(allocator: std.mem.Allocator, target: []const u8) bool {
+    if (target.len == 0 or database.Db.engine(target) != .sqlite or conns.isSheet(target)) {
+        return false;
+    }
+    if (target[0] == ':' or std.mem.startsWith(u8, target, "file:")) {
+        return false;
+    }
+    const path = allocator.dupeSentinel(u8, target, 0) catch return false;
+    defer allocator.free(path);
+    return std.c.access(path.ptr, std.c.F_OK) != 0;
+}
+
+/// The `s` a count of anything but one takes. "1 row(s)" is a program that
+/// has the number in its hand and will not look at it.
+pub fn plural(count: anytype) []const u8 {
+    return if (count == 1) "" else "s";
 }
 
 pub fn divCeil(a: usize, b: usize) usize {
@@ -3811,18 +4451,22 @@ test "a connection is chosen from the list, and the one opened moves to the fron
     try testing.expectEqual(View.connections, bench.app.view);
     try bench.sees("nowhere");
     try bench.sees("library");
-    try bench.says("2 saved connection(s)");
+    try bench.says("2 saved connections");
 
     try bench.keys("j{enter}");
     try testing.expect(bench.app.connected);
     try bench.sees("authors  1-3 of 3");
     try testing.expectEqualStrings("library", bench.app.saved.list.items.items[0].name);
 
-    // One that cannot be opened says why, and the list is still there.
+    // One whose file is not there is asked about, since opening it would make
+    // it; no makes nothing, and the list is still there.
     try bench.keys("Oj{enter}");
-    try testing.expect(bench.app.report.status_error);
-    try bench.says("cannot open");
+    try testing.expectEqual(PromptKind.make_file, bench.app.typing.prompt.?.kind);
+    try bench.says("is not there - make a new, empty database?");
+    try bench.keys("n{enter}");
+    try bench.says("nothing made");
     try testing.expectEqual(View.connections, bench.app.view);
+    try testing.expectEqual(@as(usize, 2), bench.app.saved.list.items.items.len);
 }
 
 test "a list that cannot be written says so when something asked of it is lost" {
@@ -3846,8 +4490,12 @@ test "a list that cannot be written says so when something asked of it is lost" 
     try testing.expect(!bench.app.saved.unwritten);
     try testing.expect(!bench.app.report.status_error);
 
-    // Removing one is somebody's own change, and it did not reach the file.
+    // Removing one is somebody's own change - asked about first - and it did
+    // not reach the file.
     try bench.keys("Ojd");
+    try testing.expectEqual(PromptKind.forget_saved, bench.app.typing.prompt.?.kind);
+    try testing.expect(!bench.app.saved.unwritten);
+    try bench.keys("y{enter}");
     try testing.expect(bench.app.saved.unwritten);
     try bench.says("could not be written");
     try bench.sees("not written to");

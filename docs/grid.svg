@@ -19,7 +19,9 @@
 <text x="14.0" y="45.3" fill="#9a9aa6" xml:space="preserve" textLength="210.0" lengthAdjust="spacing"> TABLES &amp; VIEWS          </text>
 <text x="224.0" y="45.3" fill="#7c7c88" xml:space="preserve" textLength="8.4" lengthAdjust="spacing">│</text>
 <text x="232.4" y="45.3" fill="#8aa7f0" font-weight="600" xml:space="preserve" textLength="50.4" lengthAdjust="spacing"> books</text>
-<text x="282.8" y="45.3" fill="#9a9aa6" xml:space="preserve" textLength="571.2" lengthAdjust="spacing">  1-5 of 5   page 1/1                                               </text>
+<text x="282.8" y="45.3" fill="#9a9aa6" xml:space="preserve" textLength="394.8" lengthAdjust="spacing">  1-5 of 5   page 1/1                          </text>
+<text x="694.4" y="45.3" fill="#9a9aa6" xml:space="preserve" textLength="134.4" lengthAdjust="spacing">columns 1-5 of 6</text>
+<text x="828.8" y="45.3" fill="#8aa7f0" font-weight="600" xml:space="preserve" textLength="25.2" lengthAdjust="spacing"> › </text>
 <text x="14.0" y="63.3" fill="#e0e0e6" xml:space="preserve" textLength="201.6" lengthAdjust="spacing"> ▪ authors              </text>
 <text x="215.6" y="63.3" fill="#7c7c88" xml:space="preserve" textLength="16.8" lengthAdjust="spacing">4│</text>
 <text x="232.4" y="63.3" fill="#9a9aa6" font-weight="600" xml:space="preserve" textLength="445.2" lengthAdjust="spacing"> id  author_id title                       year price</text>

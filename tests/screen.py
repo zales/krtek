@@ -299,8 +299,11 @@ def run(database, script):
 	if keep:
 		os.kill(pid, 9)
 	else:
-		# Escape first: inside a form or a prompt ctrl+c only cancels it.
+		# Escape first: inside a form or a prompt ctrl+c only cancels it. And
+		# ctrl+c twice, because once only says that the second one quits.
 		os.write(fd, b"\x1b")
+		drain(0.1)
+		os.write(fd, b"\x03")
 		drain(0.1)
 		os.write(fd, b"\x03")
 		drain(0.2)

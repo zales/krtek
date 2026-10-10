@@ -123,6 +123,9 @@ jobs:
             # A CSV file is a file: changed through the grid and compared, byte
             # for byte, with what it should then be.
             ./tests/csv.sh
+            # And what the keys do where one pressed wrongly costs rows: read
+            # back out of a SQLite file it makes for itself.
+            ./tests/keys.sh
             # The list of connections is a file too, and one that cannot be
             # written has to be said rather than looked away from.
             ./tests/saved.sh

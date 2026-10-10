@@ -15,6 +15,7 @@ const Files = @import("files.zig");
 const App = app_mod.App;
 const C = app_mod.C;
 const monotonicMs = app_mod.monotonicMs;
+const plural = app_mod.plural;
 
 /// Open the two panes: this machine on the left, and the connection on the
 /// right when it is somewhere files live. A database is not, and says so.
@@ -178,8 +179,9 @@ pub fn copyChosen(self: *App) !void {
         // A name that could have been written somewhere else is worth saying out
         // loud, not counting quietly: it means the other end sent something it had
         // no business sending.
-        self.complain("copied {d} file(s) - {s}, and left {d} with a name that would not stay put", .{
+        self.complain("copied {d} file{s} - {s}, and left {d} with a name that would not stay put", .{
             total.files,
+            plural(total.files),
             Files.size(&room, total.bytes),
             total.refused,
         });

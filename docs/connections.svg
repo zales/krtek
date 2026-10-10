@@ -7,8 +7,8 @@
 <rect x="392.0" y="68.0" width="92.9" height="18.0" fill="#4c4c56"/>
 <rect x="484.4" y="68.0" width="84.5" height="18.0" fill="#4c4c56"/>
 <rect x="568.4" y="68.0" width="202.1" height="18.0" fill="#4c4c56"/>
-<rect x="14.0" y="284.0" width="487.7" height="18.0" fill="#26262c"/>
-<rect x="501.2" y="284.0" width="353.3" height="18.0" fill="#26262c"/>
+<rect x="14.0" y="284.0" width="470.9" height="18.0" fill="#26262c"/>
+<rect x="484.4" y="284.0" width="370.1" height="18.0" fill="#26262c"/>
 <text x="14.0" y="27.3" fill="#e0e0e6" font-weight="600" xml:space="preserve" textLength="58.8" lengthAdjust="spacing"> krtek </text>
 <text x="72.8" y="27.3" fill="#9a9aa6" xml:space="preserve" textLength="781.2" lengthAdjust="spacing">                                                                               no connection </text>
 <text x="81.2" y="63.3" fill="#8aa7f0" xml:space="preserve" textLength="16.8" lengthAdjust="spacing">╭─</text>
@@ -67,6 +67,6 @@
 <text x="81.2" y="261.3" fill="#8aa7f0" xml:space="preserve" textLength="8.4" lengthAdjust="spacing">│</text>
 <text x="778.4" y="261.3" fill="#8aa7f0" xml:space="preserve" textLength="8.4" lengthAdjust="spacing">│</text>
 <text x="81.2" y="279.3" fill="#8aa7f0" xml:space="preserve" textLength="705.6" lengthAdjust="spacing">╰──────────────────────────────────────────────────────────────────────────────────╯</text>
-<text x="14.0" y="297.3" fill="#71c68f" xml:space="preserve" textLength="487.2" lengthAdjust="spacing"> 9 saved connection(s) - enter connects, a adds, d removes</text>
-<text x="14.0" y="315.3" fill="#7c7c88" xml:space="preserve" textLength="840.0" lengthAdjust="spacing"> enter connect   t in a new tab   / filter   a add   e edit   d remove   r read-only   q quit       </text>
+<text x="14.0" y="297.3" fill="#71c68f" xml:space="preserve" textLength="470.4" lengthAdjust="spacing"> 9 saved connections - enter connects, a adds, x removes</text>
+<text x="14.0" y="315.3" fill="#7c7c88" xml:space="preserve" textLength="840.0" lengthAdjust="spacing"> enter connect   t in a new tab   / filter   a add   e edit   x remove   r read-only   q quit       </text>
 </svg>

@@ -71,8 +71,8 @@ ADA='1;Ada;150,50;"prvni; se strednikem"\r\n'
 same "$HEADER$ADA$GRACE$EDSGER" "a changed cell is not in the file as it should be"
 
 # A row through the form: it goes on the end, quoted where this file needs it.
-python3 tests/screen.py "$FILE" '{tab}' i 11 '{tab}' '{tab}' Karel '{tab}' '{tab}' 5 \
-	'{tab}' '{tab}' 'a "b"; c' '{ctrl-s}' '{keep}' > "$SCREEN"
+python3 tests/screen.py "$FILE" '{tab}' i 11 '{tab}' Karel '{tab}' 5 \
+	'{tab}' 'a "b"; c' '{ctrl-s}' '{keep}' > "$SCREEN"
 grep -q "row inserted" "$SCREEN" || fail "the row was not inserted"
 KAREL='11;Karel;5,00;"a ""b""; c"\r\n'
 same "$HEADER$ADA$GRACE$EDSGER$KAREL" "an inserted row is not in the file as it should be"

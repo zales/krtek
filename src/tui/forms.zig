@@ -21,6 +21,7 @@ const OPERATORS = app_mod.OPERATORS;
 const isNumeric = app_mod.isNumeric;
 const looksNumeric = app_mod.looksNumeric;
 const operatorOf = app_mod.operatorOf;
+const plural = app_mod.plural;
 
 pub fn closeForm(self: *App) void {
     if (self.typing.form) |*open| {
@@ -120,7 +121,7 @@ pub fn openTableForm(self: *App, alter: bool) !void {
     const form = try self.newForm(
         if (alter) .alter_table else .create_table,
         if (alter) "alter table" else "create table",
-        "ctrl+n adds a column, ctrl+k removes one",
+        "ctrl+n adds a column, ctrl+x removes one",
     );
     form.row_size = 5;
     form.table = try form.arena.allocator().dupe(u8, table_label);
@@ -472,7 +473,7 @@ fn hideColumns(self: *App, form: *Form.Form) !void {
         }
     }
     self.closeForm();
-    self.say("{d} column(s) hidden", .{self.cursor.hidden.items.len});
+    self.say("{d} column{s} hidden", .{ self.cursor.hidden.items.len, plural(self.cursor.hidden.items.len) });
 }
 
 fn submitSearch(self: *App, form: *Form.Form) !void {
@@ -750,10 +751,11 @@ pub fn applyFilter(self: *App, form: *Form.Form) !void {
     if (!self.isFiltered()) {
         self.say("filter cleared", .{});
     } else if (self.grid.counted) {
-        self.say("{d} row(s) match", .{self.grid.total});
+        self.say("{d} row{s}", .{ self.grid.total, if (self.grid.total == 1) " matches" else "s match" });
     } else {
-        self.say("{d} row(s) on this page; {s} cannot count the rest without reading it", .{
+        self.say("{d} row{s} on this page; {s} cannot count the rest without reading it", .{
             self.grid.rows.items.len,
+            plural(self.grid.rows.items.len),
             self.caps().label,
         });
     }
@@ -829,7 +831,7 @@ pub fn searchEverything(self: *App, needle: []const u8) !void {
     self.setTitle("search: {s}", .{needle});
     self.view = .grid;
     self.focus = .main;
-    self.say("{d} hit(s) in {d} column(s)", .{ self.grid.rows.items.len, parts });
+    self.say("{d} hit{s} in {d} column{s}", .{ self.grid.rows.items.len, plural(self.grid.rows.items.len), parts, plural(parts) });
 }
 
 // ------------------------------------------------------------------- tests
@@ -945,7 +947,7 @@ test "the cursor in the list follows a table to where its new name sorts" {
     // The list is read again after a rename, sorted by name, and the cursor
     // kept the place it had: `books` renamed to sort above `authors` left it
     // on `authors`, beside a grid of the other table, and enter opened that.
-    for ([_][]const u8{ "a", "N" }) |key| {
+    for ([_][]const u8{ "a", "gN" }) |key| {
         var bench = try Bench.open(BOOKS);
         defer bench.close();
         try bench.keys("j{enter}");
@@ -969,18 +971,19 @@ test "the cursor in the list follows a table to where its new name sorts" {
         // A rename that is refused moved nothing, and neither does the cursor.
         try bench.keys(key);
         try bench.keys("{ctrl-u}authors{ctrl-s}");
-        try bench.says("failed");
+        try bench.says("already another table");
         try testing.expectEqualStrings("zzz", bench.app.current().?.name);
     }
 }
 
 test "the cursor follows a renamed table among what the filter leaves showing" {
-    for ([_][]const u8{ "a", "N" }) |key| {
+    for ([_][]const u8{ "a", "gN" }) |key| {
         var bench = try Bench.open(BOOKS ++ "CREATE TABLE boxes (id INTEGER PRIMARY KEY);");
         defer bench.close();
         // `authors` is out of the list and still in front of the other two, so
-        // a place in what is showing is not a place in the whole of it.
-        try bench.keys("/bo{enter}{enter}");
+        // a place in what is showing is not a place in the whole of it. Enter
+        // on what was typed after `/` opens the first of what is left.
+        try bench.keys("/bo{enter}");
         try bench.sees("books  1-4 of 4");
         try testing.expectEqual(@as(usize, 2), bench.app.visibleCount());
         try bench.keys(key);
@@ -1007,7 +1010,7 @@ test "the list scrolls to a renamed table that sorts off the screen" {
     for (0..40) |n| {
         try sql.print(testing.allocator, "CREATE TABLE t{d:0>2} (id INTEGER PRIMARY KEY);", .{n});
     }
-    for ([_][]const u8{ "a", "N" }) |key| {
+    for ([_][]const u8{ "a", "gN" }) |key| {
         var bench = try Bench.openWith(sql.items, .{ .size = .{ .rows = 16, .cols = 100 } });
         defer bench.close();
         try bench.lacks("t39");
@@ -1038,7 +1041,7 @@ test "the trigger form makes a trigger, and it fires" {
     try bench.keys("j{enter}Tnoted{tab}{tab}{tab}{tab}NEW.year > 1900{tab}");
     try bench.typed("INSERT INTO log VALUES (NEW.title); INSERT INTO log VALUES ('twice')");
     try bench.keys("{ctrl-s}");
-    try bench.says("1 statement(s)");
+    try bench.says("1 statement, 0 rows affected");
     try bench.app.conn.exec("INSERT INTO books (title, year) VALUES ('new', 2000), ('old', 1800)");
     try bench.expectAsked("SELECT what FROM log", "new twice");
 }
