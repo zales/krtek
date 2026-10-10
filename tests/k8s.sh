@@ -296,18 +296,36 @@ echo "ok: a broken pod says CrashLoopBackOff and a finished one says Completed"
 # The whole value of a cell is that cell's. `gv` asks the engine again for the
 # one column the cursor is on and shows the first cell of what comes back - and
 # what came back had every column in it, so the box said `status` along the top
-# and the pod's name inside. The third column of the first pod, then, against
-# what kubectl says of that pod; asked more than once for the reason the list
-# above is.
-pod=$(screen "$ROOT" '{keep}' | sed -n '4p' | sed 's/^.*[┃│]//' | awk '{print $1}')
+# and the pod's name inside. The status of the first pod, then, against what
+# kubectl says of that pod; asked more than once for the reason the list above
+# is.
+#
+# The column is found by its name and not by counting to it. It was the third,
+# and two presses of right were how to get there, until what a pod is using was
+# put in front of it: the box then said `cpu`, this looked for one that said
+# `status`, and found nothing. And nothing is not allowed to be the answer on
+# both sides - a pod kubectl says nothing about and a box that is not there
+# were equal, and that was a pass: which is what this was on a Mac, where the
+# sidebar was taken off the line by the sed `grid` is there to replace, and the
+# name of the pod came out as two bytes of a square.
+first=$(screen "$ROOT" '{keep}')
+pod=$(printf '%s\n' "$first" | sed -n '4p' | grid | awk '{print $1}')
 [ -n "$pod" ] || fail "there is no first pod to ask the whole value of"
+steps=$(printf '%s\n' "$first" | sed -n '3p' | grid |
+	awk '{for (i = 1; i <= NF; i++) if ($i == "status") print i - 1}')
+[ -n "$steps" ] || fail "the pod list has no column called status to ask the whole value of"
+right=''
+for _ in $(seq 1 "$steps"); do
+	right="$right{right}"
+done
 for _ in $(seq 1 6); do
-	whole=$(python3 tests/screen.py "$ROOT" '{tab}' '{right}{right}' 'g' 'v' '{sleep}' '{keep}' 2>&1 |
+	whole=$(python3 tests/screen.py "$ROOT" '{tab}' "$right" 'g' 'v' '{sleep}' '{keep}' 2>&1 |
 		grep -A1 'status ─ enter/esc closes' | tail -1 | sed 's/ *│ *$//; s/^.*│ //')
 	theirs=$(kubectl -n payments get pod "$pod" --no-headers | awk '{print $3}')
-	[ "$whole" = "$theirs" ] && break
+	[ -n "$theirs" ] && [ "$whole" = "$theirs" ] && break
 	sleep 3
 done
+[ -n "$theirs" ] || fail "kubectl says nothing about $pod, so there is nothing to compare its status with"
 [ "$whole" = "$theirs" ] || fail "gv on the status of $pod should show $theirs, and shows '$whole'"
 echo "ok: gv shows the value under the cursor, and not the name of its row"
 
