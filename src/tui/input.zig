@@ -23,6 +23,12 @@ pub fn handle(app: *App, key: Key, size: term.Size) !void {
         app.followTick();
         return;
     }
+    // A list to pick from is over whatever opened it - a form, or the grid -
+    // and has the keys until something is taken or it is put away.
+    if (app.picker != null) {
+        try onPicker(app, key);
+        return;
+    }
     if (app.typing.prompt != null) {
         try typing(app, key);
         return;
@@ -30,6 +36,7 @@ pub fn handle(app: *App, key: Key, size: term.Size) !void {
     if (app.typing.form != null) {
         switch (app.typing.form.?.handle(key)) {
             .none => try app.afterFormKey(),
+            .pick => try app.openFieldPicker(),
             .cancel => app.closeForm(),
             .submit => try app.submitForm(),
             .add_row => try app.addFormRow(),
@@ -412,7 +419,7 @@ pub const actions = [_]Action{
     .{ .keys = "gM", .does = .import, .label = "import", .also = "load sql csv file", .wants = .inserting },
     .{ .keys = "gb", .does = .info, .label = "database information", .also = "settings pragmas size version" },
     .{ .keys = "gL", .does = .relations, .label = "list every relation", .also = "objects tables views indexes" },
-    .{ .keys = "#", .does = .schema, .label = "switch schema", .also = "namespace search path", .wants = .schemas },
+    .{ .keys = "#", .does = .schema, .label = "switch schema", .also = "namespace database vhost search path list", .wants = .schemas },
     .{ .keys = "O", .does = .connections, .label = "connections", .also = "open connect database server saved" },
     .{ .keys = "ctrl+t", .does = .new_tab, .label = "new tab", .also = "create open workspace tabnew" },
     .{ .keys = "]", .does = .next_tab, .label = "next tab", .also = "switch forward gt tabnext" },
@@ -888,6 +895,37 @@ fn typeInPalette(app: *App, key: Key) !void {
     }
 }
 
+/// A key while a list to pick from is open: the arrows move in it, enter takes
+/// what the cursor is on, esc puts it away, and anything else is typed into
+/// what narrows it.
+fn onPicker(app: *App, key: Key) !void {
+    const picker = &app.picker.?;
+    switch (key) {
+        .escape => app.closePicker(),
+        .enter => try app.takePicked(),
+        .down => picker.down(1),
+        .up => picker.up(1),
+        .page_down => picker.down(10),
+        .page_up => picker.up(10),
+        .ctrl => |code| switch (code) {
+            'c' => app.closePicker(),
+            'n' => picker.down(1),
+            'p' => picker.up(1),
+            else => try typeInPicker(app, key),
+        },
+        else => try typeInPicker(app, key),
+    }
+}
+
+/// A key that is the query's own. What it says having changed, the list is
+/// narrowed again and the best match is the first.
+fn typeInPicker(app: *App, key: Key) !void {
+    const picker = &app.picker.?;
+    if (try line_mod.key(app.allocator, &picker.query, &picker.caret, key) == .changed) {
+        picker.narrow();
+    }
+}
+
 fn openPalette(app: *App) !void {
     closePalette(app);
     app.palette = .{};
@@ -1231,7 +1269,7 @@ fn perform(app: *App, does: Does) !void {
             app,
         ),
         .files => try app.openFiles(),
-        .schema => try app.openSchemaForm(),
+        .schema => try app.openSchemaPicker(),
         .drop => try drop(app),
         .truncate => try truncate(app),
         .yank => {

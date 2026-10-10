@@ -139,7 +139,7 @@ say. A target names a context and at most a namespace -
 .IR k8s://prod/payments ,
 or nothing at all for the kubeconfig's current context. Started with no argument
 at all, every context of the kubeconfig is offered in the list of connections,
-marked and never saved into it, because because everything else
+marked and never saved into it, because everything else
 is in the kubeconfig, which is read the way kubectl reads it: its certificate
 authority and client certificate, and
 .B exec
@@ -297,6 +297,16 @@ opens the first match. In the rows, find text:
 Down and up half a screen;
 .BR ctrl+f " and " ctrl+b " a whole one, and"
 .BR gn " and " gp " the page of rows the engine hands over."
+.TP
+.B #
+The schemas - on Kubernetes the namespaces, on MySQL the databases, on RabbitMQ
+the vhosts - as a list to pick from: a few letters of a name narrow it,
+.B enter
+moves to the one under the cursor and
+.B esc
+leaves things as they were. A choice in a form opens as the same list on
+.BR enter " or " space ;
+left and right still turn it to the one beside it.
 .TP
 .B W
 Filter the rows.
