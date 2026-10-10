@@ -213,6 +213,22 @@ screen "$SECURE/3?insecure=1" '{wait}' '{wait}' '{keep}'
 shows "the first screen is the keys, through TLS" 'pozdrav +string +-1 +ahoj'
 shows "and the server's version is in the header" "127.0.0.1:$TLS_PORT/3 .*Redis [0-9]"
 
+# The whole value of a cell is that cell's. `gv` asks the server again for the
+# one column the cursor is on and shows the first cell of what comes back - and
+# what came back was the whole row, so the box said `value` along the top and
+# had the key inside. `yc` copies what `gv` shows, and copied the key.
+whole() {
+	grep -A1 "$1 ─ enter/esc closes" "$SCREEN" | tail -1 | sed 's/\(.*\)│.*$/\1/; s/ *$//; s/^.*│ //'
+}
+screen "$SECURE/3?insecure=1" '{tab}' '{right}' '{right}' '{right}' g v '{wait}' '{keep}'
+test "$(whole value)" = "ahoj" || {
+	cat "$SCREEN" >&2
+	fail "gv on the value of pozdrav should show ahoj, and shows '$(whole value)'"
+}
+echo "ok: gv shows the value under the cursor, and not the key of its row"
+screen "$SECURE/3?insecure=1" '{tab}' '{right}' '{right}' '{right}' y c '{wait}' '{keep}'
+shows "and yc copies it" '^CLIPBOARD: ahoj$'
+
 # In through TLS, and read back by a client that is not this one and does not
 # use it. Four letters out, six in.
 screen "$SECURE/3?insecure=1" '{tab}' '{right}' '{right}' '{right}' e '{bs}' '{bs}' '{bs}' '{bs}' 'nazdar' '{enter}' '{keep}'

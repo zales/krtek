@@ -71,7 +71,6 @@ pub const Purpose = enum {
     search_all,
     filter,
     columns,
-    open_file,
     schema,
     connection,
     rename_table,
@@ -96,6 +95,10 @@ pub const Form = struct {
     /// address it. Null for a new row.
     key: ?[]const ask.Filter = null,
     extra: []const u8 = "",
+    /// The columns an alter form was opened on, by name. A row taken out of the
+    /// form leaves nothing behind in it, so this is how the removal is known
+    /// when the form is saved: a name here that no row still says it was.
+    shown: []const []const u8 = &.{},
 
     pub fn init(allocator: std.mem.Allocator, purpose: Purpose, title: []const u8) Form {
         return .{

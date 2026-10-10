@@ -1,6 +1,16 @@
 //! State and behaviour of the terminal app: the schema, the loaded page of
 //! rows, and everything that runs SQL. Drawing and input live next door and
 //! only read from here, which keeps the imports a straight line.
+//!
+//! Not all of the behaviour is in this file. It was, and the file was five
+//! thousand lines with a hundred and sixty-six methods on one struct. Four
+//! parts of it that have little to do with one another are files of their own:
+//! the forms (`forms.zig`), the one form that builds itself again as it is
+//! filled in (`connection_form.zig`), opening a connection where it can be
+//! watched and given up on (`dialing.zig`), and what the two file panes do
+//! (`file_actions.zig`). They are still methods of the `App` - a key calls
+//! `app.openRowForm()` as it always did - by the aliases at the top of the
+//! struct, which is also the list of what is where.
 
 const std = @import("std");
 const database = @import("db");
@@ -17,8 +27,15 @@ const keychain = @import("keychain.zig");
 const biometry = @import("biometry.zig");
 const Files = @import("files.zig");
 const draw = @import("draw.zig");
+const connection_form = @import("connection_form.zig");
+const dialing = @import("dialing.zig");
+const file_actions = @import("file_actions.zig");
+const forms = @import("forms.zig");
 
 pub const Term = term.Term;
+pub const Connecting = dialing.Connecting;
+pub const SPINNER = dialing.SPINNER;
+const Attendant = dialing.Attendant;
 
 /// 256-colour palette, close to the web UI's tokens.
 pub const C = struct {
@@ -98,10 +115,21 @@ pub const Cell = struct {
     /// grid's copy, with every newline already turned into a space.
     original: []const u8 = "",
     kind: Kind,
+    /// How the things this cell counts are doing, where the engine said: a pod's
+    /// `1/2` is two containers, and the grid draws a square for each instead of
+    /// the two numbers. Only the grid does. The text is still the value, and is
+    /// what gets filtered on, copied and written to a file.
+    marks: []const database.Mark = &.{},
 
     /// The value as it was, for anything that is not the grid.
     pub fn whole(self: Cell) []const u8 {
         return if (self.original.len != 0) self.original else self.text;
+    }
+
+    /// How many columns the grid needs to draw it: a square a mark, where it
+    /// has marks.
+    pub fn width(self: Cell) usize {
+        return if (self.marks.len != 0) self.marks.len else term.width(self.text);
     }
 
     pub fn colour(self: Cell) u8 {
@@ -139,12 +167,6 @@ pub const Focus = enum { sidebar, main };
 /// A place on screen, in cells - and whether the cursor there is on a character
 /// rather than between two, which is what the editor's normal mode is.
 pub const Spot = struct { row: usize, col: usize, block: bool = false };
-
-/// Where a connection can keep its password, in the order the form offers them.
-const PLACES = [_][]const u8{ "ask", "file", "keychain", "touchid" };
-/// What the Kafka form offers. The empty one is no SASL at all, which is what a
-/// broker on a private network wants.
-const MECHANISMS = [_][]const u8{ "", "PLAIN", "SCRAM-SHA-256", "SCRAM-SHA-512" };
 
 /// The command palette: what is typed, and which match is under the cursor.
 /// Its entries live in `input.zig`, next to the keys they stand for.
@@ -290,172 +312,6 @@ const Running = struct {
     copy_ticked: f64 = 0,
 };
 
-/// The spinner, one frame per tick.
-pub const SPINNER = [_][]const u8{ "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏" };
-
-/// A connection being opened, for as long as somebody is waiting for it: what
-/// the panel in the middle of the screen says.
-pub const Connecting = struct {
-    started: f64,
-    /// The target without its password.
-    what: []const u8,
-    /// What is being done about it right now. Said by the thread doing it and
-    /// read by the one drawing, which are never the same thread.
-    stage: database.Stage = .{},
-    frame: usize = 0,
-    /// Esc, or ctrl+c: nothing that is still to come is wanted any more. Kept
-    /// here rather than with the statement's own flag, because what follows a
-    /// connection is several statements and each of them starts that one clean.
-    given_up: std.atomic.Value(bool) = .init(false),
-};
-
-/// The thread that stays with the screen while a connection is being opened: it
-/// draws the panel, moves its spinner, and listens for esc.
-///
-/// The thread that usually does those things is the one doing the opening, and
-/// not all of that can be interrupted to draw. The call that connects has a
-/// thread of its own for that reason - see `Attempt` - but what comes after it,
-/// reading what the connection holds, works on the App itself and has to stay
-/// where the App is used; and the SQL drivers read their catalogs with calls
-/// that do not come back until the server has answered. So the screen is lent
-/// out instead: from `start` to `stop` nothing else draws or reads a key, and
-/// all that passes between the two threads is the sentence on the panel and
-/// whether esc was pressed.
-const Attendant = struct {
-    thread: ?std.Thread = null,
-    /// Written to when it is time to stop, so that stopping does not have to
-    /// wait out a tick.
-    wake: [2]std.c.fd_t = .{ -1, -1 },
-
-    /// A panel that cannot be had is not worth failing a connection over: with
-    /// no thread there is simply nothing drawn, as there never used to be.
-    fn start(app: *App) Attendant {
-        var self = Attendant{};
-        if (std.c.pipe(&self.wake) != 0) {
-            return .{};
-        }
-        self.thread = std.Thread.spawn(.{}, run, .{ app, self.wake[0] }) catch {
-            self.close();
-            return .{};
-        };
-        return self;
-    }
-
-    fn run(app: *App, wake: std.c.fd_t) void {
-        if (app.connecting == null) {
-            return;
-        }
-        // The one in the App, not a copy of it: the flag and the sentence are
-        // what the two threads share.
-        const state = &app.connecting.?;
-        while (true) {
-            var fds = [1]std.c.pollfd{.{ .fd = wake, .events = std.c.POLL.IN, .revents = 0 }};
-            const ready = std.c.poll(&fds, 1, 80);
-            if (ready < 0 and std.c._errno().* == @backingInt(std.c.E.INTR)) {
-                continue;
-            }
-            if (ready != 0) {
-                return;
-            }
-            if (!state.given_up.load(.acquire) and app.screen.dismissed()) {
-                state.given_up.store(true, .release);
-            }
-            app.showConnecting();
-        }
-    }
-
-    /// Give the screen back. Safe to call twice: every way out of a connect
-    /// stops it, and some of them have already done so.
-    fn stop(self: *Attendant) void {
-        const thread = self.thread orelse return;
-        _ = std.c.write(self.wake[1], "!", 1);
-        thread.join();
-        self.thread = null;
-        self.close();
-    }
-
-    fn close(self: *Attendant) void {
-        for (self.wake) |end| {
-            _ = std.c.close(end);
-        }
-    }
-};
-
-/// One attempt at opening a connection, made on a thread of its own.
-///
-/// `Db.open` cannot be asked whether to carry on. A name being looked up and an
-/// address that does not answer are each one call into the system, which comes
-/// back when it comes back - and for an address that goes nowhere that is more
-/// than a minute. Made on the thread that runs the program, it was a minute of
-/// a screen that said nothing and keys that did nothing. So it is made over
-/// here, where it can be walked away from when somebody presses esc.
-///
-/// To stop waiting, not to stop it: the call cannot be interrupted from outside
-/// either. An attempt nobody is waiting for runs to its end unwatched, closes
-/// what it opened if it opened anything, and frees itself. `state` says which
-/// side it belongs to, and only that side touches it.
-const Attempt = struct {
-    allocator: std.mem.Allocator,
-    target: []u8,
-    report: std.ArrayList(u8) = .empty,
-    stage: database.Stage = .{},
-    outcome: anyerror!database.Db = error.Driver,
-    /// A pipe the thread writes one byte into when it has finished, which is
-    /// what the wait wakes up on: a connection that takes four milliseconds
-    /// should not take until the next tick to be noticed.
-    done: [2]std.c.fd_t,
-    state: std.atomic.Value(State) = .init(.running),
-
-    const State = enum(u8) { running, finished, abandoned };
-
-    fn start(allocator: std.mem.Allocator, target: []const u8) !*Attempt {
-        const self = try allocator.create(Attempt);
-        errdefer allocator.destroy(self);
-        const copy = try allocator.dupe(u8, target);
-        errdefer allocator.free(copy);
-        var ends: [2]std.c.fd_t = undefined;
-        if (std.c.pipe(&ends) != 0) {
-            return error.NoPipe;
-        }
-        errdefer for (ends) |end| {
-            _ = std.c.close(end);
-        };
-        self.* = .{ .allocator = allocator, .target = copy, .done = ends };
-        const thread = try std.Thread.spawn(.{}, run, .{self});
-        thread.detach();
-        return self;
-    }
-
-    fn run(self: *Attempt) void {
-        database.listening = &self.stage;
-        self.outcome = database.Db.open(self.allocator, self.target, &self.report);
-        if (self.state.cmpxchgStrong(.running, .finished, .acq_rel, .acquire) == null) {
-            // Somebody is still waiting, and from this byte on it is theirs.
-            _ = std.c.write(self.done[1], "!", 1);
-            return;
-        }
-        if (self.outcome) |opened| {
-            opened.close();
-        } else |_| {}
-        self.destroy();
-    }
-
-    /// Stop waiting for it. False when it finished first, in which case it is
-    /// still the caller's and its answer is about to arrive.
-    fn abandon(self: *Attempt) bool {
-        return self.state.cmpxchgStrong(.running, .abandoned, .acq_rel, .acquire) == null;
-    }
-
-    fn destroy(self: *Attempt) void {
-        for (self.done) |end| {
-            _ = std.c.close(end);
-        }
-        self.report.deinit(self.allocator);
-        self.allocator.free(self.target);
-        self.allocator.destroy(self);
-    }
-};
-
 /// What the program has told whoever is watching, and what it would say if
 /// asked for more.
 ///
@@ -512,6 +368,12 @@ const Saved = struct {
     /// walked away from - and the next name with a letter wrong in it must be
     /// asked about too.
     making_now: bool = false,
+    /// Something somebody asked for is in the list and not in its file, because
+    /// the file could not be written when it was put there. Kept rather than said
+    /// once: most of what changes the list goes on to open a connection, and what
+    /// that has to say is written over the line a moment later. So it stays until
+    /// the file has been written, and is said again wherever there is room to.
+    unwritten: bool = false,
 
     /// A page, and never zero: a page key that moves by nothing looks broken.
     pub fn page(self: Saved) usize {
@@ -961,19 +823,76 @@ pub const App = struct {
     watch_armed: bool = false,
     env: *std.process.Environ.Map,
 
+    // -------------------------------------------- what lives in other files
+    //
+    // Functions that take the App first, under the names they are called by.
+    // Only the ones something outside their own file calls: what a file keeps
+    // to itself is not here.
+
+    // The two panes: file_actions.zig.
+    pub const openFiles = file_actions.openFiles;
+    pub const closeFiles = file_actions.closeFiles;
+    pub const mayWriteTo = file_actions.mayWriteTo;
+    pub const copyFiles = file_actions.copyFiles;
+    pub const copyChosen = file_actions.copyChosen;
+    pub const deleteFiles = file_actions.deleteFiles;
+    pub const makeFileDir = file_actions.makeFileDir;
+    pub const goToPath = file_actions.goToPath;
+    pub const renameFile = file_actions.renameFile;
+
+    // A connection being opened, watched and given up on: dialing.zig.
+    pub const attend = dialing.attend;
+    pub const dial = dialing.dial;
+    pub const nowConnecting = dialing.nowConnecting;
+    pub const gaveUp = dialing.gaveUp;
+
+    // The form a connection is added or edited in: connection_form.zig.
+    pub const openConnectionForm = connection_form.openConnectionForm;
+    pub const afterFormKey = connection_form.afterFormKey;
+    pub const saveConnection = connection_form.saveConnection;
+
+    // Every other form, and what is done with one: forms.zig.
+    pub const closeForm = forms.closeForm;
+    pub const newForm = forms.newForm;
+    pub const openRowForm = forms.openRowForm;
+    pub const openTableForm = forms.openTableForm;
+    pub const addFormRow = forms.addFormRow;
+    pub const removeFormRow = forms.removeFormRow;
+    pub const openIndexForm = forms.openIndexForm;
+    pub const openForeignKeyForm = forms.openForeignKeyForm;
+    pub const openViewForm = forms.openViewForm;
+    pub const openTriggerForm = forms.openTriggerForm;
+    pub const openRenameForm = forms.openRenameForm;
+    pub const openCopyForm = forms.openCopyForm;
+    pub const openSearchForm = forms.openSearchForm;
+    pub const openFilterForm = forms.openFilterForm;
+    pub const openColumnForm = forms.openColumnForm;
+    pub const openSchemaForm = forms.openSchemaForm;
+    pub const submitForm = forms.submitForm;
+
     // ----------------------------------------------------------- lifecycle
 
     /// Start with a connection, or with the list of saved ones when the target is
     /// empty. Nothing is opened before the screen exists, so a failure to connect
     /// lands on the list instead of quitting.
     pub fn init(allocator: std.mem.Allocator, target: []const u8, io: std.Io, env: *std.process.Environ.Map) !App {
+        const screen = try Term.init(allocator, io, env);
+        // A terminal taken over and then not given back is worse than whatever
+        // went wrong after it.
+        errdefer screen.deinit();
+        return initOn(allocator, screen, target, env);
+    }
+
+    /// The same, on a screen that is already there - which is how a test gets
+    /// one with no terminal behind it. The screen is the App's from here on.
+    pub fn initOn(allocator: std.mem.Allocator, screen: *Term, target: []const u8, env: *std.process.Environ.Map) !App {
         var self = App{
             .allocator = allocator,
             .arena = std.heap.ArenaAllocator.init(allocator),
             .report = .{ .arena = std.heap.ArenaAllocator.init(allocator) },
             .object = .{ .arena = std.heap.ArenaAllocator.init(allocator) },
             .typing = .{ .arena = std.heap.ArenaAllocator.init(allocator) },
-            .screen = try Term.init(allocator, io, env),
+            .screen = screen,
             .conn = undefined,
             .connected = false,
             .path = "",
@@ -1132,17 +1051,6 @@ pub const App = struct {
         }
     }
 
-    /// Put the panel up for a connection that is about to be opened, and hand
-    /// the screen to the thread that keeps it moving. The caller stops it.
-    fn attend(self: *App, target: []const u8, what: []const u8) Attendant {
-        // A file on this machine is open before a panel could say so.
-        if (database.Db.engine(target) == .sqlite) {
-            return .{};
-        }
-        self.connecting = .{ .started = monotonicMs(), .what = what };
-        return Attendant.start(self);
-    }
-
     /// What `connect` does with a connection once it has one.
     fn enter(self: *App, opened: database.Db, target: []const u8, keep: bool) !void {
         try self.take(opened, target);
@@ -1156,6 +1064,10 @@ pub const App = struct {
         const version = self.conn.version();
         const end = endFor(what, self.screen.size().cols -| term.width(version) -| 6);
         self.say("{s}{s} - {s}", .{ if (end.len < what.len) "…" else "", end, version });
+        // Every way of changing the list that goes on to connect ends here, so
+        // this is where a list that did not reach its file is said - after the
+        // line above, which would otherwise be written over it.
+        self.admitUnwritten();
         // A place that holds files opens on the files. The grid can show a
         // directory as a table and that is worth having, but it is not what
         // anybody connecting to a NAS came for, and nothing on that screen said
@@ -1214,96 +1126,6 @@ pub const App = struct {
             self.nowConnecting("connected, opening {s}", .{object.name});
             try self.openTable(object.name);
         }
-    }
-
-    /// Open a target in a way that can be given up on: the attempt is made on
-    /// a thread of its own, and this one waits for it or for esc, whichever
-    /// comes first. See `Attempt`.
-    fn dial(self: *App, target: []const u8, report: *std.ArrayList(u8)) !database.Db {
-        // A file is opened here. There is nothing in it to wait for, and it is
-        // the one driver that has to stay on this thread: SQLite is built without
-        // its mutexes, because until now nothing here ran beside anything else.
-        if (self.connecting == null) {
-            return database.Db.open(self.allocator, target, report);
-        }
-        const state = &self.connecting.?;
-        const attempt = Attempt.start(self.allocator, target) catch {
-            // No thread to be had. Made here then, the way it always was, with
-            // nothing to watch.
-            return database.Db.open(self.allocator, target, report);
-        };
-        while (true) {
-            var fds = [1]std.c.pollfd{.{ .fd = attempt.done[0], .events = std.c.POLL.IN, .revents = 0 }};
-            const ready = std.c.poll(&fds, 1, 80);
-            if (ready > 0) {
-                break;
-            }
-            if (ready < 0 and std.c._errno().* != @backingInt(std.c.E.INTR)) {
-                // A pipe that cannot be waited on: wait for the byte itself,
-                // below, which is the old way of waiting with a thread in it.
-                break;
-            }
-            if (state.given_up.load(.acquire) and attempt.abandon()) {
-                return error.GivenUp;
-            }
-            // What the attempt says it is doing, passed on to the panel. Not
-            // read by the panel where it is said: an attempt that was given up
-            // on outlives the panel, and goes on talking.
-            var text: [database.Stage.SIZE]u8 = undefined;
-            state.stage.set("{s}", .{attempt.stage.read(&text)});
-        }
-        // The byte is taken before anything is freed. It is the last thing the
-        // thread does with the attempt, so having it is knowing the thread has
-        // let go - `finished` alone is set a moment before that.
-        var byte: [1]u8 = undefined;
-        while (std.c.read(attempt.done[0], &byte, 1) < 0 and std.c._errno().* == @backingInt(std.c.E.INTR)) {}
-        defer attempt.destroy();
-        report.appendSlice(self.allocator, attempt.report.items) catch {};
-        return attempt.outcome;
-    }
-
-    /// Say what a connection being opened is busy with now, for the panel.
-    fn nowConnecting(self: *App, comptime fmt: []const u8, args: anytype) void {
-        if (self.connecting) |*state| {
-            state.stage.set(fmt, args);
-        }
-    }
-
-    /// The panel, drawn again: the next frame of its spinner and whatever the
-    /// sentence has become. The attendant's, and nobody else's while it runs.
-    fn showConnecting(self: *App) void {
-        if (self.connecting == null) {
-            return;
-        }
-        const state = &self.connecting.?;
-        // Anything under a third of a second should not flash a panel at all.
-        if (monotonicMs() - state.started < 300) {
-            return;
-        }
-        state.frame = (state.frame + 1) % SPINNER.len;
-        draw.connecting(self);
-    }
-
-    /// Whether somebody stopped waiting after the connection was made and
-    /// before there was anything of it to show - and if so, the tab is put back
-    /// to having nothing in it. A connection whose first screen was given up on
-    /// is not one to be left standing in: its list is half read or not read at
-    /// all, and esc on a panel that says "gives up" means back to where the
-    /// connection was chosen.
-    fn gaveUp(self: *App) bool {
-        if (self.connecting == null) {
-            return false;
-        }
-        const state = &self.connecting.?;
-        if (!state.given_up.load(.acquire)) {
-            return false;
-        }
-        self.saveActiveTab();
-        self.tabs.items[self.active_tab].deinit(self.allocator);
-        self.tabs.items[self.active_tab] = Tab.init(self.allocator);
-        self.loadActiveTab();
-        self.say("gave up on {s}", .{state.what});
-        return true;
     }
 
     // --- the SQL editor ---
@@ -1687,10 +1509,49 @@ pub const App = struct {
         const clean = try conns.withoutPassword(scratch.allocator(), target);
         if (self.saved.list.find(clean)) |at| {
             self.saved.list.touch(at);
+            _ = self.writeList(.order);
         } else {
             try self.saved.list.add(try conns.suggestName(scratch.allocator(), clean), clean, null, "");
+            _ = self.writeList(.asked);
         }
-        conns.save(&self.saved.list, self.saved.path.items) catch {};
+        self.admitUnwritten();
+    }
+
+    /// Write the list to its file, and know whether it got there.
+    ///
+    /// Five places wrote it and looked away: a connection saved from the form,
+    /// one removed, a password said to be "now in" a file that had not been
+    /// written - each was on the screen as done and gone the next time the
+    /// program started, with nothing between the two to say why.
+    ///
+    /// What was changed says how much a failure matters. Opening a connection
+    /// moves it to the front, which nobody asked for and nobody misses: a list
+    /// somebody keeps read-only on purpose is still a list, and is not complained
+    /// about every time it is used. Anything else is somebody's own change, and
+    /// stays owed until a write goes through - which writes all of it, so one
+    /// that does clears whatever the ones before it left.
+    pub fn writeList(self: *App, changed: enum { asked, order }) bool {
+        conns.save(&self.saved.list, self.saved.path.items) catch {
+            if (changed == .asked) {
+                self.saved.unwritten = true;
+            }
+            return false;
+        };
+        self.saved.unwritten = false;
+        return true;
+    }
+
+    /// Say that the list is not in its file, where it is not - over whatever the
+    /// line says now, which is why this comes last wherever it is called.
+    fn admitUnwritten(self: *App) void {
+        if (!self.saved.unwritten) {
+            return;
+        }
+        if (self.saved.path.items.len == 0) {
+            self.complain("the connection list has nowhere to be kept: neither XDG_CONFIG_HOME nor HOME is set", .{});
+            return;
+        }
+        self.complain("the connection list could not be written, so it is as it was the next time this starts: {s}", .{self.saved.path.items});
     }
 
     /// Connect to the entry the cursor is on.
@@ -1750,7 +1611,7 @@ pub const App = struct {
         if (!entry.found) {
             self.saved.list.touch(chosen);
             self.saved.at = 0;
-            conns.save(&self.saved.list, self.saved.path.items) catch {};
+            _ = self.writeList(.order);
         }
         try self.connect(target, false);
     }
@@ -1781,8 +1642,9 @@ pub const App = struct {
             .ask => {},
             .file => {
                 try self.saved.list.keep(0, .file, password);
-                conns.save(&self.saved.list, self.saved.path.items) catch {};
-                self.say("connected, and the password is now in {s}", .{self.saved.path.items});
+                if (self.writeList(.asked)) {
+                    self.say("connected, and the password is now in {s}", .{self.saved.path.items});
+                }
             },
             .keychain, .touchid => {
                 const target_now = self.saved.list.items.items[0].target;
@@ -1793,6 +1655,7 @@ pub const App = struct {
                 }
             },
         }
+        self.admitUnwritten();
     }
 
     /// `x` on a saved connection: asked about before it goes, because what goes
@@ -1834,8 +1697,9 @@ pub const App = struct {
         if (self.saved.at >= self.savedCount() and self.saved.at > 0) {
             self.saved.at -= 1;
         }
-        conns.save(&self.saved.list, self.saved.path.items) catch {};
+        _ = self.writeList(.asked);
         self.say("{s} removed from the list", .{label});
+        self.admitUnwritten();
     }
 
     /// The form for adding or editing a connection.
@@ -1864,10 +1728,10 @@ pub const App = struct {
         } else {
             self.saved.list.mark(chosen, now);
         }
-        conns.save(&self.saved.list, self.saved.path.items) catch {
-            self.complain("the connection list could not be written", .{});
+        if (!self.writeList(.asked)) {
+            self.admitUnwritten();
             return;
-        };
+        }
         // What is in force for a connection already open was read when it opened,
         // so say what this did and did not change rather than leaving somebody to
         // find out by trying to write.
@@ -1883,61 +1747,6 @@ pub const App = struct {
                 if (same) " from the next time it is opened" else "",
             });
         }
-    }
-
-    pub fn openConnectionForm(self: *App, edit: bool) !void {
-        // Editing one would have to write it somewhere, and the only place it
-        // could go is this program's own file - which would leave two answers to
-        // what that cluster is called. `a` is how to make one of your own.
-        const chosen = self.chosenSaved();
-        if (edit) {
-            if (chosen) |at| {
-                if (self.saved.list.items.items[at].found) {
-                    self.complain("{s} comes from the kubeconfig - a adds one of your own, with its own name", .{
-                        self.saved.list.items.items[at].name,
-                    });
-                    return;
-                }
-            }
-        }
-        self.saved.editing = null;
-        _ = self.typing.arena.reset(.retain_capacity);
-        var name: []const u8 = "";
-        var target: []const u8 = "";
-        var secret: []const u8 = "";
-        var keeps: conns.Keeps = .ask;
-        var read_only = false;
-        if (edit) {
-            const at = chosen orelse {
-                self.complain("there is nothing to edit yet - press a to add one", .{});
-                return;
-            };
-            const entry = self.saved.list.items.items[at];
-            name = entry.name;
-            target = entry.target;
-            keeps = entry.keeps;
-            secret = entry.secret;
-            read_only = entry.read_only;
-            self.saved.editing = at;
-        }
-        // A target that cannot be taken apart and put back together identically is
-        // left as the one field it always was.
-        const shape = conns.decompose(self.formArena(), target) orelse conns.Shape{
-            .engine = if (target.len == 0) .sqlite else .other,
-            .path = target,
-        };
-        try self.showConnectionForm(shape, name, keeps, secret, read_only);
-    }
-
-    /// Whether this pane may be written into. A read-only connection is about the
-    /// place it opened, not about the machine krtek runs on: copying a file *down*
-    /// from a read-only bucket is a read, and there is no reason to refuse it.
-    pub fn mayWriteTo(self: *App, place: database.store.Store) bool {
-        if (!self.read_only or place == .local) {
-            return true;
-        }
-        self.complain("this connection is read-only: {s} is not written to", .{place.label()});
-        return false;
     }
 
     /// Say no to a batch with anything in it that is not a read, and name the
@@ -1999,246 +1808,6 @@ pub const App = struct {
             out.no_ddl = why;
         }
         return out;
-    }
-
-    /// An arena that outlives the form: the connection form is built again every
-    /// time the engine changes, and what was typed has to survive that.
-    fn formArena(self: *App) std.mem.Allocator {
-        return self.typing.arena.allocator();
-    }
-
-    fn showConnectionForm(self: *App, shape: conns.Shape, name: []const u8, keeps: conns.Keeps, secret: []const u8, read_only: bool) !void {
-        const form = try self.newForm(
-            .connection,
-            if (self.saved.editing != null) "edit connection" else "add connection",
-            "pick the engine, fill in what it needs",
-        );
-        self.typing.built_for = shape.engine;
-        try form.text("name", name, 24);
-        try form.choice("engine", &conns.ENGINES, Form.indexOf(&conns.ENGINES, shape.engine.label()));
-
-        switch (shape.engine) {
-            .sqlite => {
-                try form.text("file", shape.path, 52);
-                try form.note("a path to a database file; it is made if it is not there");
-            },
-            .csv => {
-                try form.text("file", shape.path, 52);
-                try form.note("a path to a .csv or .tsv file whose first line names the columns;");
-                try form.note("it is opened as one table, and written when a row or a column changes");
-            },
-            .other => {
-                try form.text("target", shape.path, 52);
-                try form.note("anything the engines take, as it stands - a libpq keyword string,");
-                try form.note("a scheme with a spelling of its own, a query this form does not know");
-            },
-            .postgres, .mysql, .mssql => {
-                try form.text("host", shape.host, 24);
-                try form.text("port", shape.port, 6);
-                form.sameLine();
-                try form.text("database", shape.name, 24);
-                try form.text("user", shape.user, 24);
-                // PostgreSQL and MySQL fall back to the name you are logged in as.
-                // SQL Server has no such idea - an empty user is a login it
-                // refuses, with `Login failed for user ''`, which reads like a bug
-                // rather than a field somebody left blank.
-                try form.note(if (shape.engine == .mssql)
-                    "leave the port empty for the usual one; the user is not optional here"
-                else
-                    "leave the port empty for the usual one, and the user for your own name");
-            },
-            .redis => {
-                try form.text("host", shape.host, 24);
-                try form.text("port", shape.port, 6);
-                form.sameLine();
-                try form.text("database", shape.name, 6);
-                try form.toggle("TLS", shape.tls);
-                form.sameLine();
-                try form.note("the database is Redis's numbered one: 0 unless you know otherwise");
-            },
-            .kafka => {
-                try form.text("host", shape.host, 24);
-                try form.text("port", shape.port, 6);
-                form.sameLine();
-                try form.text("user", shape.user, 24);
-                try form.choice("mechanism", &MECHANISMS, Form.indexOf(&MECHANISMS, shape.mechanism));
-                form.sameLine();
-                try form.toggle("TLS", shape.tls);
-                try form.note("a user with no mechanism named is PLAIN, which is what brokers are set up for");
-            },
-            .s3 => {
-                try form.text("bucket", shape.name, 24);
-                try form.text("region", shape.region, 16);
-                form.sameLine();
-                try form.text("endpoint", shape.host, 24);
-                try form.text("port", shape.port, 6);
-                form.sameLine();
-                try form.text("access key", shape.user, 24);
-                try form.toggle("TLS", shape.tls);
-                form.sameLine();
-                try form.note("no endpoint means Amazon; one means MinIO, Ceph, R2 - and the bucket");
-                try form.note("goes in the path there. The secret key is the password below, and an");
-                try form.note("empty access key means ~/.aws and AWS_ACCESS_KEY_ID are looked at.");
-            },
-            .azure => {
-                try form.text("account", shape.user, 24);
-                try form.text("container", shape.name, 24);
-                try form.text("endpoint", shape.host, 24);
-                try form.text("port", shape.port, 6);
-                form.sameLine();
-                try form.toggle("TLS", shape.tls);
-                form.sameLine();
-                try form.note("no endpoint means Azure itself; one means Azurite or a proxy, and");
-                try form.note("the account goes in the path there. The account key is the password");
-                try form.note("below - the long base64 one from the portal, not the connection string.");
-            },
-            .sftp => {
-                try form.text("host", shape.host, 24);
-                try form.text("port", shape.port, 6);
-                form.sameLine();
-                try form.text("user", shape.user, 24);
-                try form.text("directory", shape.name, 32);
-                try form.text("key file", shape.key, 32);
-                try form.toggle("check the host key", !shape.insecure);
-                try form.note("the key file is a private key; empty tries the agent and ~/.ssh/id_*,");
-                try form.note("and the password below is used when neither works. The host key is");
-                try form.note("checked against ~/.ssh/known_hosts unless that is turned off here.");
-            },
-            .rabbit => {
-                try form.text("host", shape.host, 24);
-                try form.text("port", shape.port, 6);
-                form.sameLine();
-                try form.text("vhost", shape.name, 24);
-                try form.text("user", shape.user, 24);
-                try form.toggle("TLS", shape.tls);
-                form.sameLine();
-                try form.note("the port is the management one, 15672, and not the broker's 5672;");
-                try form.note("the default vhost is written %2F");
-            },
-            .mqtt => {
-                try form.text("host", shape.host, 24);
-                try form.text("port", shape.port, 6);
-                form.sameLine();
-                try form.text("user", shape.user, 24);
-                try form.text("filter", shape.name, 32);
-                try form.toggle("TLS", shape.tls);
-                form.sameLine();
-                try form.note("the filter is what to listen to: empty is everything, dum/# all of");
-                try form.note("one branch, dum/+/teplota one level of any name. A broker with a");
-                try form.note("great deal going through it is better looked at a branch at a time.");
-            },
-            .k8s => {
-                try form.text("context", shape.host, 32);
-                try form.text("namespace", shape.name, 24);
-                try form.text("kubeconfig", shape.key, 32);
-                try form.toggle("check the certificate", !shape.insecure);
-                try form.note("everything else is in the kubeconfig: empty means its current context,");
-                try form.note("and an empty file means $KUBECONFIG and then ~/.kube/config. There is");
-                try form.note("no password here - a cluster is reached the way kubectl reaches it.");
-            },
-        }
-
-        // Above the password and before the engines that have none, because this is
-        // the one thing on this form that is true of every engine - and truest of
-        // the one that has no password at all, since a kubeconfig usually holds
-        // every cluster somebody has, production among them.
-        try form.toggle("read-only", read_only);
-        try form.note("nothing is written through a read-only connection: no insert, no update,");
-        try form.note("no delete and no schema statement. The account may still be allowed to;");
-        try form.note("this is about what this program will do with it.");
-
-        // A cluster has no password to keep anywhere: it is reached with what the
-        // kubeconfig carries, and offering a place to put one would be offering to
-        // keep something nothing will ever ask for. Nor has a file of rows.
-        if (shape.engine == .k8s or shape.engine == .csv) {
-            return;
-        }
-        // Only offer what this machine has: the keychain is macOS's.
-        // Only what this machine has: the keychain is macOS's, and the reader is
-        // not on every Mac.
-        const places = if (!keychain.available)
-            PLACES[0..2]
-        else if (biometry.available) &PLACES else PLACES[0..3];
-        try form.choice("keep the password", places, Form.indexOf(places, @tagName(keeps)));
-        try form.secret("password", secret, 24);
-        form.sameLine();
-        try form.note("file: plain text in ~/.config/krtek/connections, which only you can read");
-        if (keychain.available) {
-            try form.note("keychain: in the macOS keychain, which asks you before handing it over");
-            if (biometry.available) {
-                try form.note("touchid: the same place, and a fingerprint each time instead of typing -");
-                try form.note("  the keychain hands this one over without asking, so the finger is the guard");
-            }
-        }
-        try form.note("ask: nothing is kept - as with ~/.pgpass, ~/.my.cnf or PGPASSWORD");
-    }
-
-    /// The connection form is the one whose fields depend on an answer inside it,
-    /// so changing the engine builds the rest of it again - keeping whatever was
-    /// typed that the new engine also asks for.
-    pub fn afterFormKey(self: *App) !void {
-        const form = &(self.typing.form orelse return);
-        if (form.purpose != .connection) {
-            return;
-        }
-        const picked = conns.Engine.of(form.valueNamed("engine"));
-        if (picked == self.typing.built_for) {
-            return;
-        }
-        var shape = self.shapeOf(form);
-        shape.engine = picked;
-        // Encryption is the new engine's default, not whatever the last one had:
-        // off on a broker inside a network, on for a bucket on the internet.
-        shape.tls = picked == .s3;
-        const name = try self.formArena().dupe(u8, form.valueNamed("name"));
-        const secret = try self.formArena().dupe(u8, form.valueNamed("password"));
-        const keeps = std.meta.stringToEnum(conns.Keeps, form.valueNamed("keep the password")) orelse .ask;
-        const read_only = form.isOnNamed("read-only");
-        try self.showConnectionForm(shape, name, keeps, secret, read_only);
-        // Back on the engine, so it can be cycled again without walking up to it.
-        self.typing.form.?.cursor = 1;
-    }
-
-    /// What the fields of the connection form say, whichever engine they are for.
-    fn shapeOf(self: *App, form: *Form.Form) conns.Shape {
-        const arena = self.formArena();
-        var shape = conns.Shape{ .engine = conns.Engine.of(form.valueNamed("engine")) };
-        const Pairs = struct { label: []const u8, into: *[]const u8 };
-        for ([_]Pairs{
-            .{ .label = "file", .into = &shape.path },
-            .{ .label = "target", .into = &shape.path },
-            .{ .label = "host", .into = &shape.host },
-            .{ .label = "endpoint", .into = &shape.host },
-            .{ .label = "port", .into = &shape.port },
-            .{ .label = "database", .into = &shape.name },
-            .{ .label = "bucket", .into = &shape.name },
-            .{ .label = "vhost", .into = &shape.name },
-            .{ .label = "filter", .into = &shape.name },
-            .{ .label = "user", .into = &shape.user },
-            .{ .label = "access key", .into = &shape.user },
-            .{ .label = "region", .into = &shape.region },
-            .{ .label = "mechanism", .into = &shape.mechanism },
-            .{ .label = "key file", .into = &shape.key },
-            .{ .label = "directory", .into = &shape.name },
-            .{ .label = "context", .into = &shape.host },
-            .{ .label = "namespace", .into = &shape.name },
-            .{ .label = "kubeconfig", .into = &shape.key },
-        }) |pair| {
-            const value = form.valueNamed(pair.label);
-            if (value.len != 0) {
-                pair.into.* = arena.dupe(u8, value) catch value;
-            }
-        }
-        shape.tls = if (form.fieldNamed("TLS")) |field| field.on else shape.engine == .s3;
-        // The one toggle that reads the other way round: it says to check, and the
-        // target says not to.
-        shape.insecure = if (form.fieldNamed("check the host key")) |field|
-            !field.on
-        else if (form.fieldNamed("check the certificate")) |field|
-            !field.on
-        else
-            false;
-        return shape;
     }
 
     pub fn deinit(self: *App) void {
@@ -2506,7 +2075,7 @@ pub const App = struct {
         return self.grid.name != null;
     }
 
-    fn setTable(self: *App, name: ?[]const u8) !void {
+    pub fn setTable(self: *App, name: ?[]const u8) !void {
         if (self.grid.name) |old| {
             self.allocator.free(old);
         }
@@ -2531,7 +2100,7 @@ pub const App = struct {
         self.report.status_error = true;
     }
 
-    fn setTitle(self: *App, comptime fmt: []const u8, args: anytype) void {
+    pub fn setTitle(self: *App, comptime fmt: []const u8, args: anytype) void {
         self.grid.title.clearRetainingCapacity();
         self.grid.title.print(self.allocator, fmt, args) catch {};
     }
@@ -2560,6 +2129,15 @@ pub const App = struct {
             if (object.rows == null or object.rows.? < 0) {
                 object.rows = self.conn.rowCount(.{ .schema = self.grid.schema.items, .name = object.name });
             }
+        }
+        // The cursor stays on the list. Where the last object in it has just
+        // gone - dropped, with the cursor on it - the cursor was past the end
+        // and on nothing: no table was opened in its place, and the grid kept
+        // the count of the one that was gone over an invitation to insert a
+        // row into it.
+        const count = self.visibleCount();
+        if (self.sidebar.selected >= count) {
+            self.sidebar.selected = count -| 1;
         }
     }
 
@@ -2656,6 +2234,23 @@ pub const App = struct {
 
     pub fn current(self: *App) ?Object {
         return self.visibleAt(self.sidebar.selected);
+    }
+
+    /// Put the cursor on the object of this name. It counts what the filter
+    /// leaves showing, as `visibleAt` does, so one the filter hides is not a
+    /// place it can be and it stays where it was. The drawing scrolls to it.
+    pub fn selectObject(self: *App, name: []const u8) void {
+        var seen: usize = 0;
+        for (self.sidebar.objects.items, 0..) |object, i| {
+            if (!self.matches(i)) {
+                continue;
+            }
+            if (std.mem.eql(u8, object.name, name)) {
+                self.sidebar.selected = seen;
+                return;
+            }
+            seen += 1;
+        }
     }
 
     /// The first value of the first row as text; null when there is none.
@@ -3022,7 +2617,7 @@ pub const App = struct {
         return self.grid.conditions.items.len != 0 or self.grid.where_text.items.len != 0;
     }
 
-    fn clearConditions(self: *App) void {
+    pub fn clearConditions(self: *App) void {
         self.grid.clearConditions(self.allocator);
     }
 
@@ -3236,7 +2831,7 @@ pub const App = struct {
     /// An empty result and a result without a key are two different things, and
     /// saying "read-only" for both sent someone looking for a bug that was not
     /// there.
-    fn noRowHere(self: *App) bool {
+    pub fn noRowHere(self: *App) bool {
         if (self.grid.rows.items.len == 0) {
             self.complain("there is no row here", .{});
             return true;
@@ -3425,9 +3020,11 @@ pub const App = struct {
                 const cells = try arena.alloc(Cell, count);
                 for (0..count) |i| {
                     cells[i] = try formatCell(arena, cursor.value(i), cursor.isNumeric(i));
+                    // A copy, like the text: the engine's are gone with its reply.
+                    cells[i].marks = try arena.dupe(database.Mark, cursor.marks(i));
                 }
                 for (cells[skip..], 0..) |cell, i| {
-                    self.grid.widths.items[i] = @max(self.grid.widths.items[i], term.width(cell.text));
+                    self.grid.widths.items[i] = @max(self.grid.widths.items[i], cell.width());
                 }
                 try raw.append(arena, cells);
             }
@@ -3727,300 +3324,7 @@ pub const App = struct {
         self.say("{s}: {s}", .{ verb, statement });
     }
 
-    // ------------------------------------------------------- the file manager
-
-    /// Open the two panes: this machine on the left, and the connection on the
-    /// right when it is somewhere files live. A database is not, and says so.
-    pub fn openFiles(self: *App) !void {
-        if (self.files != null) {
-            self.view = .files;
-            return;
-        }
-        const far = if (self.connected) self.conn.files() else null;
-        if (far == null) {
-            self.complain("{s} holds rows, not files - this is for SFTP, S3 and Azure", .{self.caps().label});
-            return;
-        }
-        self.files = try Files.Manager.init(self.allocator, far);
-        try self.files.?.open();
-        self.view = .files;
-        self.say("tab switches panes, c copies, ? shows the rest", .{});
-    }
-
-    pub fn closeFiles(self: *App) void {
-        if (self.files) |open| {
-            open.deinit();
-        }
-        self.files = null;
-        self.view = .grid;
-    }
-
-    /// Copy what is chosen in this pane to where the other one is looking.
-    /// Copy what is chosen to the other pane, asking first where that would write
-    /// over something.
-    ///
-    /// A copy is the one thing here that destroys without saying so: the name is
-    /// the same on both sides, so the file that was there is simply gone and there
-    /// is nothing to undo it with. Removing already asks; this is the same
-    /// question about the same loss.
-    pub fn copyFiles(self: *App) !void {
-        const manager = self.files orelse return;
-        const from = manager.here();
-        const to = manager.there();
-
-        var scratch = std.heap.ArenaAllocator.init(self.allocator);
-        defer scratch.deinit();
-        const arena = scratch.allocator();
-
-        const chosen = try from.chosen(arena);
-        if (chosen.len == 0) {
-            self.complain("nothing to copy", .{});
-            return;
-        }
-
-        // What is already there, by name. Asked of the far side, which for a bucket
-        // or a server is a request each - so only for what is actually being
-        // copied, and only once.
-        //
-        // A file written over a file, and nothing else. An object store answers
-        // "directory" for any name it has not got, because a prefix is not a thing
-        // it keeps; and a directory copied onto a directory is a merge, where what
-        // would be lost is a file inside it and not the name being asked about.
-        var over: usize = 0;
-        var first: []const u8 = "";
-        for (chosen) |entry| {
-            if (entry.kind != .file) {
-                continue;
-            }
-            const target = try database.store.join(arena, to.where(), entry.name);
-            const there = to.place.stat(arena, target) catch continue;
-            if (there.kind != .file) {
-                continue;
-            }
-            if (over == 0) {
-                first = entry.name;
-            }
-            over += 1;
-        }
-        if (over != 0) {
-            try self.askOverwrite(over, first);
-            return;
-        }
-        try self.copyChosen();
-    }
-
-    fn askOverwrite(self: *App, over: usize, first: []const u8) !void {
-        if (self.typing.prompt) |*old| {
-            old.buffer.deinit(self.allocator);
-        }
-        self.typing.prompt = .{ .kind = .overwrite, .label = " type y to overwrite: " };
-        if (over == 1) {
-            self.complain("{s} is already there - write over it?", .{first});
-        } else {
-            self.complain("{d} of them are already there - write over them?", .{over});
-        }
-    }
-
-    /// The copy itself, once there is nothing left to ask.
-    pub fn copyChosen(self: *App) !void {
-        const manager = self.files orelse return;
-        const from = manager.here();
-        const to = manager.there();
-        if (!self.mayWriteTo(to.place)) {
-            return;
-        }
-
-        var scratch = std.heap.ArenaAllocator.init(self.allocator);
-        defer scratch.deinit();
-        const arena = scratch.allocator();
-
-        const chosen = try from.chosen(arena);
-        if (chosen.len == 0) {
-            self.complain("nothing to copy", .{});
-            return;
-        }
-
-        self.running.copy_started = monotonicMs();
-        self.running.copy_ticked = self.running.copy_started - 1000;
-        self.running.cancelled = false;
-        var total = database.store.Tally{};
-        for (chosen) |entry| {
-            const source = try database.store.join(arena, from.where(), entry.name);
-            const target = try database.store.join(arena, to.where(), entry.name);
-            // Into itself is the one mistake here that eats a disk, and it can only
-            // happen when both panes are the same place.
-            if (std.meta.activeTag(from.place) == std.meta.activeTag(to.place) and
-                entry.kind == .dir and database.store.within(source, target))
-            {
-                self.complain("{s} is inside itself - that would not end", .{entry.name});
-                return;
-            }
-            const tally = database.store.copy(arena, from.place, source, to.place, target, .{
-                .context = self,
-                .step = copyStep,
-            }) catch {
-                const why = to.place.message();
-                const from_why = from.place.message();
-                self.complain("{s}: {s}", .{
-                    entry.name,
-                    if (self.running.cancelled) "stopped" else if (why.len != 0) why else from_why,
-                });
-                to.reload(self.allocator);
-                return;
-            };
-            total.files += tally.files;
-            total.dirs += tally.dirs;
-            total.bytes += tally.bytes;
-            total.refused += tally.refused;
-        }
-        to.reload(self.allocator);
-        from.marked.clearRetainingCapacity();
-        var room: [16]u8 = undefined;
-        if (total.refused != 0) {
-            // A name that could have been written somewhere else is worth saying out
-            // loud, not counting quietly: it means the other end sent something it had
-            // no business sending.
-            self.complain("copied {d} file{s} - {s}, and left {d} with a name that would not stay put", .{
-                total.files,
-                plural(total.files),
-                Files.size(&room, total.bytes),
-                total.refused,
-            });
-            return;
-        }
-        self.say("copied {d} file{s} - {s}", .{
-            total.files,
-            if (total.files == 1) "" else "s",
-            Files.size(&room, total.bytes),
-        });
-    }
-
-    /// Asked as the bytes move: draws a line and looks for ctrl+c, exactly as a
-    /// long query does.
-    fn copyStep(context: *anyopaque, name: []const u8, done: u64, whole: u64) bool {
-        const self: *App = @ptrCast(@alignCast(context));
-        const now = monotonicMs();
-        if (now - self.running.copy_ticked < 90) {
-            return !self.running.cancelled;
-        }
-        self.running.copy_ticked = now;
-        if (self.screen.interrupted()) {
-            self.running.cancelled = true;
-        }
-        self.drawCopying(name, done, whole);
-        return !self.running.cancelled;
-    }
-
-    fn drawCopying(self: *App, name: []const u8, done: u64, whole: u64) void {
-        const size = self.screen.size();
-        var moved: [16]u8 = undefined;
-        var all: [16]u8 = undefined;
-        var line: [256]u8 = undefined;
-        const text = std.mem.print(&line, " copying {s} - {s} of {s}   ctrl+c stops it", .{
-            Files.trim(database.store.basename(name), 40),
-            Files.size(&moved, done),
-            Files.size(&all, whole),
-        }) catch return;
-        self.screen.moveTo(size.rows - 2, 0);
-        self.screen.style(.{ .bg = C.bar, .fg = if (self.running.cancelled) C.warn else C.accent, .bold = true });
-        self.screen.put(text);
-        self.screen.clearToEol();
-        self.screen.reset();
-        self.screen.flush() catch {};
-    }
-
-    /// Remove what is chosen, once it has been asked about. A directory takes
-    /// everything under it, which is why it is asked about at all.
-    pub fn deleteFiles(self: *App) !void {
-        const manager = self.files orelse return;
-        const pane = manager.here();
-        if (!self.mayWriteTo(pane.place)) {
-            return;
-        }
-        var scratch = std.heap.ArenaAllocator.init(self.allocator);
-        defer scratch.deinit();
-        const arena = scratch.allocator();
-        const chosen = try pane.chosen(arena);
-        if (chosen.len == 0) {
-            self.complain("nothing to remove", .{});
-            return;
-        }
-        var gone: usize = 0;
-        for (chosen) |entry| {
-            const path = try database.store.join(arena, pane.where(), entry.name);
-            database.store.removeAll(arena, pane.place, path, 0) catch {
-                self.complain("{s}: {s}", .{ entry.name, pane.place.message() });
-                pane.reload(self.allocator);
-                return;
-            };
-            gone += 1;
-        }
-        pane.reload(self.allocator);
-        self.say("removed {d}", .{gone});
-    }
-
-    pub fn makeFileDir(self: *App, name: []const u8) !void {
-        const manager = self.files orelse return;
-        const pane = manager.here();
-        if (!self.mayWriteTo(pane.place)) {
-            return;
-        }
-        var scratch = std.heap.ArenaAllocator.init(self.allocator);
-        defer scratch.deinit();
-        const arena = scratch.allocator();
-        const path = try database.store.join(arena, pane.where(), name);
-        pane.place.makeDir(arena, path) catch {
-            self.complain("{s}", .{pane.place.message()});
-            return;
-        };
-        pane.reload(self.allocator);
-        self.say("created {s}", .{name});
-    }
-
-    /// Walking to a path is fine until it is twelve directories deep, so it can
-    /// be typed as well. `~` is expanded, because a person types one.
-    pub fn goToPath(self: *App, path: []const u8) !void {
-        const manager = self.files orelse return;
-        const pane = manager.here();
-        var scratch = std.heap.ArenaAllocator.init(self.allocator);
-        defer scratch.deinit();
-        const arena = scratch.allocator();
-        const wanted = try database.store.expand(arena, std.mem.trim(u8, path, " \t"));
-        const full = if (wanted.len != 0 and wanted[0] == '/')
-            wanted
-        else
-            try database.store.join(arena, pane.where(), wanted);
-        const what = pane.place.stat(arena, full) catch {
-            self.complain("{s}", .{pane.place.message()});
-            return;
-        };
-        if (what.kind != .dir) {
-            self.complain("{s} is a file", .{full});
-            return;
-        }
-        try pane.goTo(self.allocator, full);
-        pane.reload(self.allocator);
-    }
-
-    pub fn renameFile(self: *App, name: []const u8) !void {
-        const manager = self.files orelse return;
-        const pane = manager.here();
-        if (!self.mayWriteTo(pane.place)) {
-            return;
-        }
-        const one = pane.current() orelse return;
-        var scratch = std.heap.ArenaAllocator.init(self.allocator);
-        defer scratch.deinit();
-        const arena = scratch.allocator();
-        const from = try database.store.join(arena, pane.where(), one.name);
-        const to = try database.store.join(arena, pane.where(), name);
-        pane.place.rename(arena, from, to) catch {
-            self.complain("{s}", .{pane.place.message()});
-            return;
-        };
-        pane.reload(self.allocator);
-        self.say("renamed to {s}", .{name});
-    }
+    // ------------------------------------------- the : line, and one cell
 
     pub fn clearPending(self: *App) void {
         self.typing.pending.clearRetainingCapacity();
@@ -4516,7 +3820,7 @@ pub const App = struct {
 
     /// A copy of an identity that outlives the grid it came from: a form holds one
     /// while the rows underneath are reloaded.
-    fn copyFilters(a: std.mem.Allocator, filters: []const database.ask.Filter) ![]const database.ask.Filter {
+    pub fn copyFilters(a: std.mem.Allocator, filters: []const database.ask.Filter) ![]const database.ask.Filter {
         const out = try a.alloc(database.ask.Filter, filters.len);
         for (filters, out) |filter, *copy| {
             copy.* = .{
@@ -4532,7 +3836,7 @@ pub const App = struct {
     /// Make one change and remember what it took, so ctrl+p in the editor brings
     /// it back - as SQL where there is SQL, and as the engine's own command
     /// otherwise. Null when the engine refused, with the reason already on screen.
-    fn change(self: *App, request: database.ask.Change) !?void {
+    pub fn change(self: *App, request: database.ask.Change) !?void {
         self.conn.apply(request) catch {
             self.complain("{s}", .{self.conn.message()});
             return null;
@@ -4621,817 +3925,7 @@ pub const App = struct {
         self.say("schema {s}", .{name});
     }
 
-    // ------------------------------------------------------- schema readers
-
-    /// Column definitions as the DDL generator wants them, including the
-    /// single-column UNIQUE constraints, which only exist as indexes.
-    fn tableNames(self: *App, arena: std.mem.Allocator, last: []const u8) ![]const []const u8 {
-        var list: std.ArrayList([]const u8) = .empty;
-        for (self.sidebar.objects.items) |object| {
-            if (std.mem.eql(u8, object.kind, "table") and !std.mem.eql(u8, object.name, last)) {
-                try list.append(arena, try arena.dupe(u8, object.name));
-            }
-        }
-        if (last.len != 0) {
-            try list.append(arena, try arena.dupe(u8, last));
-        }
-        if (list.items.len == 0) {
-            try list.append(arena, "");
-        }
-        return list.items;
-    }
-
-    // --------------------------------------------------------------- forms
-
-    pub fn closeForm(self: *App) void {
-        if (self.typing.form) |*open| {
-            open.deinit();
-        }
-        self.typing.form = null;
-    }
-
-    pub fn newForm(self: *App, purpose: Form.Purpose, title: []const u8, hint: []const u8) !*Form.Form {
-        self.closeForm();
-        self.typing.form = Form.Form.init(self.allocator, purpose, title);
-        self.typing.form.?.hint = hint;
-        return &self.typing.form.?;
-    }
-
-    /// Insert, edit or clone a row of the current table.
-    pub fn openRowForm(self: *App, mode: enum { insert, edit, clone }) !void {
-        const table = self.currentTable() orelse {
-            self.complain("open a table first", .{});
-            return;
-        };
-        // An engine that will not take this is asked before the form is drawn, not
-        // after it has been filled in. Which of the two it is matters: a Kafka
-        // record can be written and not changed, and a Kubernetes object neither.
-        const allowed = self.caps();
-        const refused = if (mode == .edit) allowed.no_update else allowed.no_insert;
-        if (refused.len != 0) {
-            self.complain("{s}", .{refused});
-            return;
-        }
-        if (mode != .insert and self.noRowHere()) {
-            return;
-        }
-        const form = try self.newForm(.row, switch (mode) {
-            .insert => "new row",
-            .edit => "edit row",
-            .clone => "clone row",
-        }, "an empty value with a DEFAULT is left to the engine");
-        form.table = try form.arena.allocator().dupe(u8, table.name);
-        if (mode == .edit) {
-            form.key = if (self.grid.rows.items[self.cursor.row].key) |key|
-                try copyFilters(form.arena.allocator(), key)
-            else
-                null;
-        }
-        const columns = try self.columnDefs(form.arena.allocator(), table.name);
-        for (columns) |column| {
-            var initial: []const u8 = "";
-            var is_null = mode == .insert and column.dflt == null and !column.notnull;
-            if (mode != .insert) {
-                for (self.grid.cols.items, 0..) |name, i| {
-                    if (!std.mem.eql(u8, name, column.name)) {
-                        continue;
-                    }
-                    const cell = self.grid.rows.items[self.cursor.row].cells[i];
-                    is_null = cell.kind == .nul;
-                    initial = if (is_null) "" else cell.text;
-                }
-            }
-            // The label is what the column is *called*; what it is - the type, the
-            // NOT NULL, the default - goes after the field, where it reads as a note
-            // about the value rather than as part of the name.
-            var about: std.ArrayList(u8) = .empty;
-            try about.appendSlice(form.arena.allocator(), column.type);
-            if (column.notnull) {
-                try about.appendSlice(form.arena.allocator(), " NOT NULL");
-            }
-            if (column.dflt) |value| {
-                try about.print(form.arena.allocator(), " = {s}", .{value});
-            }
-            try form.text(column.name, initial, 34);
-            try form.wasNamed(column.name);
-            try form.toggle("null", is_null);
-            form.sameLine();
-            try form.wasNamed(column.name);
-            try form.describe(about.items);
-        }
-        if (mode == .clone) {
-            // A cloned row cannot keep the key of the row it came from.
-            for (columns, 0..) |column, i| {
-                if (column.pk) {
-                    if (form.field(i * 2)) |f| {
-                        f.text.clearRetainingCapacity();
-                    }
-                }
-            }
-        }
-    }
-
-    /// Create or alter a table: one repeatable row per column.
-    pub fn openTableForm(self: *App, alter: bool) !void {
-        if (alter and !self.hasTable()) {
-            self.complain("open a table first", .{});
-            return;
-        }
-        const table_label = if (alter) (self.grid.name orelse "") else "";
-        const form = try self.newForm(
-            if (alter) .alter_table else .create_table,
-            if (alter) "alter table" else "create table",
-            "ctrl+n adds a column, ctrl+x removes one",
-        );
-        form.row_size = 5;
-        form.table = try form.arena.allocator().dupe(u8, table_label);
-        try form.text("table name", table_label, 30);
-        // Only an engine that has to rebuild loses anything by altering; MySQL and
-        // PostgreSQL change the table in place.
-        if (alter and self.caps().rebuild_to_alter) {
-            try form.note("altering rebuilds the table; CHECK constraints and generated columns are lost");
-        }
-        const columns = if (alter) try self.columnDefs(form.arena.allocator(), table_label) else &[_]database.Column{};
-        if (columns.len == 0) {
-            // The engine's first type, which is the integer-ish one in every list.
-            const first = self.conn.ddl().types();
-            try self.addColumnRow(form, 1, .{
-                .name = "id",
-                .type = if (first.len != 0) first[0] else "INTEGER",
-                .pk = true,
-            });
-            try self.addColumnRow(form, 2, .{ .name = "", .type = "TEXT" });
-        } else {
-            for (columns, 0..) |column, i| {
-                try self.addColumnRow(form, i + 1, column);
-            }
-        }
-    }
-
-    fn addColumnRow(self: *App, form: *Form.Form, group: usize, column: database.Column) !void {
-        try form.text("column", column.name, 16);
-        form.inGroup(group);
-        try form.wasNamed(column.original);
-        // The engine's own types, not a list that happens to suit SQLite: MySQL
-        // offers `varchar(255)`, PostgreSQL `timestamptz`.
-        const types = try withOwnType(form.arena.allocator(), self.conn.ddl().types(), column.type);
-        try form.choice("type", types, Form.indexOf(types, column.type));
-        form.sameLine();
-        form.inGroup(group);
-        try form.toggle("not null", column.notnull);
-        form.sameLine();
-        form.inGroup(group);
-        try form.text("default", column.dflt orelse "", 10);
-        form.sameLine();
-        form.inGroup(group);
-        try form.toggle("pk", column.pk);
-        form.sameLine();
-        form.inGroup(group);
-    }
-
-    /// The types a column's row offers: the engine's list, and the column's own
-    /// type on the end of it where the list does not have that. A list is a
-    /// handful of the usual ones and a table is whatever somebody declared -
-    /// `DECIMAL(15,2)`, `varchar(40)` - and a type the form could not show was
-    /// shown as the first one in the list, and then saved as it: opening the
-    /// alter form and adding a column changed the type of every column like that.
-    fn withOwnType(arena: std.mem.Allocator, types: []const []const u8, own: []const u8) ![]const []const u8 {
-        for (types) |known| {
-            if (std.ascii.eqlIgnoreCase(known, own)) {
-                return types;
-            }
-        }
-        const offered = try arena.alloc([]const u8, types.len + 1);
-        @memcpy(offered[0..types.len], types);
-        offered[types.len] = try arena.dupe(u8, own);
-        return offered;
-    }
-
-    /// Append another column row to an open create/alter form.
-    pub fn addFormRow(self: *App) !void {
-        const form = &(self.typing.form orelse return);
-        if (form.purpose != .create_table and form.purpose != .alter_table) {
-            return;
-        }
-        var highest: usize = 0;
-        for (form.fields.items) |field| {
-            highest = @max(highest, field.group);
-        }
-        try self.addColumnRow(form, highest + 1, .{ .name = "", .type = "TEXT" });
-        form.cursor = form.fields.items.len - 5;
-    }
-
-    /// Drop the column row the cursor is in.
-    pub fn removeFormRow(self: *App) !void {
-        const form = &(self.typing.form orelse return);
-        const row = form.currentRow() orelse return;
-        var remaining: usize = 0;
-        for (form.fields.items) |field| {
-            if (field.group != 0) {
-                remaining += 1;
-            }
-        }
-        if (remaining <= form.row_size) {
-            self.complain("a table needs at least one column", .{});
-            return;
-        }
-        var count: usize = 0;
-        while (count < form.row_size and row.start < form.fields.items.len) : (count += 1) {
-            _ = form.fields.orderedRemove(row.start);
-        }
-        form.cursor = @min(form.cursor, form.fields.items.len - 1);
-    }
-
-    pub fn openIndexForm(self: *App) !void {
-        const table = self.currentTable() orelse {
-            self.complain("open a table first", .{});
-            return;
-        };
-        const form = try self.newForm(.index, "create index", "columns are comma separated");
-        form.table = try form.arena.allocator().dupe(u8, table.name);
-        var suggested: std.ArrayList(u8) = .empty;
-        try suggested.print(form.arena.allocator(), "{s}_idx", .{table.name});
-        try form.text("index name", suggested.items, 30);
-        try form.text("columns", if (self.grid.cols.items.len > 0) self.grid.cols.items[self.cursor.col] else "", 40);
-        try form.toggle("unique", false);
-        try form.text("partial WHERE", "", 40);
-    }
-
-    pub fn openForeignKeyForm(self: *App) !void {
-        const table = self.currentTable() orelse {
-            self.complain("open a table first", .{});
-            return;
-        };
-        const form = try self.newForm(.foreign_key, "add foreign key", "the table is rebuilt");
-        form.table = try form.arena.allocator().dupe(u8, table.name);
-        const targets = try self.tableNames(form.arena.allocator(), table.name);
-        try form.text("column", if (self.grid.cols.items.len > 0) self.grid.cols.items[self.cursor.col] else "", 24);
-        try form.choice("references", targets, 0);
-        try form.text("target column", "", 24);
-        try form.choice("on update", &Form.ACTIONS, 0);
-        try form.choice("on delete", &Form.ACTIONS, 0);
-    }
-
-    pub fn openViewForm(self: *App) !void {
-        const form = try self.newForm(.view, "create view", "");
-        try form.text("view name", "", 30);
-        try form.text("select", "SELECT ", 60);
-    }
-
-    pub fn openTriggerForm(self: *App) !void {
-        const table_label = self.grid.name orelse "";
-        const form = try self.newForm(.trigger, "create trigger", "");
-        form.table = try form.arena.allocator().dupe(u8, table_label);
-        try form.text("trigger name", "", 30);
-        try form.choice("when", &[_][]const u8{ "BEFORE", "AFTER", "INSTEAD OF" }, 1);
-        try form.choice("event", &[_][]const u8{ "INSERT", "UPDATE", "DELETE" }, 0);
-        try form.text("on table", table_label, 30);
-        try form.text("when condition", "", 40);
-        try form.text("body", "", 60);
-    }
-
-    pub fn openRenameForm(self: *App) !void {
-        const table = self.currentTable() orelse {
-            self.complain("open a table first", .{});
-            return;
-        };
-        const form = try self.newForm(.rename_table, "rename table", "");
-        form.table = try form.arena.allocator().dupe(u8, table.name);
-        try form.text("new name", table.name, 30);
-    }
-
-    pub fn openCopyForm(self: *App) !void {
-        const table = self.currentTable() orelse {
-            self.complain("open a table first", .{});
-            return;
-        };
-        const form = try self.newForm(.copy_table, "copy table", "");
-        form.table = try form.arena.allocator().dupe(u8, table.name);
-        var suggested: std.ArrayList(u8) = .empty;
-        try suggested.print(form.arena.allocator(), "{s}_copy", .{table.name});
-        try form.text("new name", suggested.items, 30);
-        try form.toggle("with the rows", true);
-    }
-
-    pub fn openSearchForm(self: *App) !void {
-        const form = try self.newForm(.search_all, "search every table", "every text column of every table");
-        try form.text("contains", "", 40);
-    }
-
-    pub fn openFilterForm(self: *App) !void {
-        const table = self.currentTable() orelse {
-            self.complain("open a table first", .{});
-            return;
-        };
-        const form = try self.newForm(.filter, "filter rows", "empty values are ignored");
-        form.table = try form.arena.allocator().dupe(u8, table.name);
-        const columns = try self.columnDefs(form.arena.allocator(), table.name);
-        var names: std.ArrayList([]const u8) = .empty;
-        for (columns) |column| {
-            try names.append(form.arena.allocator(), column.name);
-        }
-        if (names.items.len == 0) {
-            try names.append(form.arena.allocator(), "");
-        }
-        var i: usize = 0;
-        while (i < 3) : (i += 1) {
-            try form.choice("column", names.items, 0);
-            try form.choice("op", &OPERATORS, 0);
-            form.sameLine();
-            try form.text("value", "", 22);
-            form.sameLine();
-        }
-        try form.text("raw WHERE", self.grid.where_text.items, 50);
-    }
-
-    pub fn openColumnForm(self: *App) !void {
-        if (self.grid.cols.items.len == 0) {
-            return;
-        }
-        const form = try self.newForm(.columns, "visible columns", "space toggles one, ctrl+s applies them");
-        for (self.grid.cols.items, 0..) |name, i| {
-            try form.toggle(name, !self.isHidden(i));
-        }
-    }
-
-    /// Pick a schema on an engine that has them.
-    pub fn openSchemaForm(self: *App) !void {
-        if (!self.caps().schemas) {
-            self.complain("{s} has no schemas", .{self.caps().label});
-            return;
-        }
-        const form = try self.newForm(.schema, "schema", "");
-        const list = try self.conn.schemas(form.arena.allocator());
-        if (list.len == 0) {
-            self.complain("no schema to switch to", .{});
-            return;
-        }
-        var at: usize = 0;
-        for (list, 0..) |name, i| {
-            if (std.mem.eql(u8, name, self.grid.schema.items)) {
-                at = i;
-            }
-        }
-        try form.choice("use", list, at);
-    }
-
-    pub fn openOpenForm(self: *App) !void {
-        const form = try self.newForm(.open_file, "open a database", "");
-        try form.text("path", self.path, 60);
-    }
-
-    // ------------------------------------------------------- form submission
-
-    /// Turn the open form into SQL and run it. Everything goes through
-    /// `runBatch`, so a failure is reported the same way a typed query is.
-    pub fn submitForm(self: *App) !void {
-        const form = &(self.typing.form orelse return);
-        var arena = std.heap.ArenaAllocator.init(self.allocator);
-        defer arena.deinit();
-        const a = arena.allocator();
-        var sql: std.ArrayList(u8) = .empty;
-
-        if (form.purpose == .row) {
-            const request = try self.rowChange(a, form);
-            const inserted = request.kind == .insert;
-            self.closeForm();
-            try self.change(request) orelse return;
-            try self.loadObjects();
-            try self.reload();
-            if (inserted) {
-                self.say("row inserted", .{});
-            } else {
-                self.say("row updated", .{});
-            }
-            return;
-        }
-
-        switch (form.purpose) {
-            // Handled above, before the form was closed.
-            .row => unreachable,
-            .create_table, .alter_table => try self.buildTable(&sql, a, form),
-            .index => {
-                var columns: std.ArrayList([]const u8) = .empty;
-                var parts = std.mem.tokenizeAny(u8, form.valueOf(1), ",");
-                while (parts.next()) |part| {
-                    try columns.append(a, std.mem.trim(u8, part, " \t"));
-                }
-                if (columns.items.len == 0) {
-                    self.complain("name at least one column", .{});
-                    return;
-                }
-                try self.conn.ddl().createIndex(&sql, a, .{ .schema = self.grid.schema.items, .name = form.table }, form.valueOf(0), columns.items, form.isOn(2), form.valueOf(3));
-            },
-            .foreign_key => {
-                const columns = try self.columnDefs(a, form.table);
-                var known = false;
-                for (columns) |column| {
-                    known = known or std.mem.eql(u8, column.name, form.valueOf(0));
-                }
-                if (!known) {
-                    self.complain("{s} has no column {s}", .{ form.table, form.valueOf(0) });
-                    return;
-                }
-                var keys = std.ArrayList(database.ForeignKey).empty;
-                for (try self.foreignKeyDefs(a, form.table)) |existing| {
-                    try keys.append(a, existing);
-                }
-                try keys.append(a, .{
-                    .column = form.valueOf(0),
-                    .target_table = form.valueOf(1),
-                    .target_column = form.valueOf(2),
-                    .on_update = form.valueOf(3),
-                    .on_delete = form.valueOf(4),
-                });
-                const target = database.Table{ .schema = self.grid.schema.items, .name = form.table };
-                const context = try self.conn.alterContext(a, target, columns);
-                try self.conn.ddl().addForeignKey(&sql, a, target, .{
-                    .column = form.valueOf(0),
-                    .target_table = form.valueOf(1),
-                    .target_column = form.valueOf(2),
-                    .on_update = form.valueOf(3),
-                    .on_delete = form.valueOf(4),
-                }, context);
-            },
-            .view => try self.conn.ddl().createView(&sql, a, .{ .schema = self.grid.schema.items, .name = form.valueOf(0) }, form.valueOf(1)),
-            .trigger => {
-                try sql.appendSlice(a, "CREATE TRIGGER ");
-                try database.quoteName(&sql, a, form.valueOf(0));
-                try sql.print(a, " {s} {s} ON ", .{ form.valueOf(1), form.valueOf(2) });
-                try database.quoteName(&sql, a, form.valueOf(3));
-                if (form.valueOf(4).len != 0) {
-                    try sql.print(a, " WHEN {s}", .{form.valueOf(4)});
-                }
-                try sql.print(a, " BEGIN {s}; END", .{form.valueOf(5)});
-            },
-            .rename_table => try self.conn.ddl().renameTable(&sql, a, .{ .schema = self.grid.schema.items, .name = form.table }, form.valueOf(0)),
-            .copy_table => try self.conn.ddl().copyTable(&sql, a, .{ .schema = self.grid.schema.items, .name = form.table }, form.valueOf(0), form.isOn(1)),
-            .filter => {
-                try self.applyFilter(form);
-                self.closeForm();
-                return;
-            },
-            .columns => {
-                self.cursor.hidden.clearRetainingCapacity();
-                for (form.fields.items, 0..) |field, i| {
-                    if (!field.on) {
-                        try self.cursor.hidden.append(self.allocator, i);
-                    }
-                }
-                self.closeForm();
-                self.say("{d} column{s} hidden", .{ self.cursor.hidden.items.len, plural(self.cursor.hidden.items.len) });
-                return;
-            },
-            .search_all => {
-                const needle = form.valueOf(0);
-                if (needle.len == 0) {
-                    self.complain("nothing to search for", .{});
-                    return;
-                }
-                try self.searchEverything(needle);
-                self.closeForm();
-                return;
-            },
-            .export_data => {
-                try dump_mod.runExport(self, form);
-                self.closeForm();
-                return;
-            },
-            .import_data => {
-                try dump_mod.runImport(self, form);
-                self.closeForm();
-                return;
-            },
-            .open_file => {
-                const target = try self.allocator.dupe(u8, form.valueOf(0));
-                defer self.allocator.free(target);
-                self.closeForm();
-                try self.reopen(target);
-                return;
-            },
-            .connection => try self.saveConnection(form),
-            .schema => {
-                const name = try self.allocator.dupe(u8, form.valueOf(0));
-                defer self.allocator.free(name);
-                self.closeForm();
-                try self.useSchema(name);
-                return;
-            },
-        }
-
-        if (sql.items.len == 0) {
-            self.closeForm();
-            return;
-        }
-        const script = try self.allocator.dupe(u8, sql.items);
-        defer self.allocator.free(script);
-        const purpose = form.purpose;
-        const table = try self.allocator.dupe(u8, form.table);
-        defer self.allocator.free(table);
-        const renamed = if (purpose == .rename_table) try self.allocator.dupe(u8, form.valueOf(0)) else null;
-        defer if (renamed) |value| self.allocator.free(value);
-        self.closeForm();
-
-        try self.runBatchStopping(script, true);
-        try self.loadObjects();
-        if (self.report.list.items.len != 0 and self.report.list.items[self.report.list.items.len - 1].failure != null) {
-            // The rollback in runBatch has already undone the half done work.
-            self.reload() catch {};
-            return;
-        }
-        switch (purpose) {
-            .rename_table => if (renamed) |value| try self.openTable(value),
-            .create_table, .copy_table, .view => self.say("created", .{}),
-            .alter_table, .foreign_key, .index => try self.reload(),
-            else => {},
-        }
-    }
-
-    /// What the connection form came to: a target built out of its fields, an
-    /// entry in the list, the password put wherever it said, and then a
-    /// connection made with it.
-    ///
-    /// Its own function because it was a third of `submitForm` on its own, and
-    /// the only arm of that switch doing anything but writing a statement.
-    fn saveConnection(self: *App, form: *Form.Form) !void {
-        const name = try self.allocator.dupe(u8, form.valueNamed("name"));
-        defer self.allocator.free(name);
-        // The fields are that engine's; the target is what they come to.
-        const shape = self.shapeOf(form);
-        const target = conns.compose(self.formArena(), shape) catch "";
-        const keeps = std.meta.stringToEnum(conns.Keeps, form.valueNamed("keep the password")) orelse .ask;
-        const read_only = form.isOnNamed("read-only");
-        const typed = try self.allocator.dupe(u8, form.valueNamed("password"));
-        defer self.allocator.free(typed);
-        const editing = self.saved.editing;
-        self.saved.editing = null;
-        self.closeForm();
-        if (target.len == 0) {
-            self.complain("a connection needs something to point at", .{});
-            return;
-        }
-        // Which of the two kinds of file a path is, is read off its name - so a
-        // CSV saved under another one would be opened as a database, and fail
-        // as one, with nothing to say why.
-        if (shape.engine == .csv and !conns.isSheet(target)) {
-            self.complain("a CSV file is known by its name: {s} has to end in .csv or .tsv", .{target});
-            return;
-        }
-        if (editing) |at| {
-            if (at < self.saved.list.items.items.len) {
-                // A connection that stops using the keychain, or moves to
-                // another target, leaves nothing behind in it.
-                const was = self.saved.list.items.items[at];
-                if (was.keeps.inKeychain() and (!keeps.inKeychain() or !std.mem.eql(u8, was.target, target))) {
-                    keychain.remove(was.target);
-                }
-                _ = self.saved.list.items.orderedRemove(at);
-            }
-        }
-        var scratch = std.heap.ArenaAllocator.init(self.allocator);
-        defer scratch.deinit();
-        const clean = try conns.withoutPassword(scratch.allocator(), target);
-        try self.saved.list.addWith(
-            if (name.len != 0) name else try conns.suggestName(scratch.allocator(), clean),
-            clean,
-            keeps,
-            // The file keeps the password itself; the keychain keeps its own,
-            // and an empty one here means "keep the one I am about to be
-            // asked for".
-            if (keeps == .file) typed else "",
-            read_only,
-        );
-        if (keeps.inKeychain() and typed.len != 0) {
-            keychain.store(clean, typed, if (keeps == .touchid) .anyone else .keychain) catch {
-                self.complain("the keychain would not take the password", .{});
-            };
-        }
-        conns.save(&self.saved.list, self.saved.path.items) catch {};
-        self.saved.at = 0;
-        // Connect with whatever was typed here, whether or not it is kept.
-        const attempt = if (typed.len != 0)
-            try conns.withPassword(scratch.allocator(), clean, typed)
-        else
-            target;
-        try self.connect(attempt, false);
-        return;
-    }
-
-    /// The row form as a change: which columns it sets, to what, and which row it
-    /// is about. A number goes in as it stands so the engine sees a number, and a
-    /// value left empty where the column has a default is left out altogether -
-    /// which is how a new row gets its own id.
-    ///
-    /// Everything is copied into `a`, because the form is closed before the change
-    /// is made and its own memory goes with it.
-    fn rowChange(self: *App, a: std.mem.Allocator, form: *Form.Form) !database.ask.Change {
-        const columns = try self.columnDefs(a, form.table);
-        var cells: std.ArrayList(database.ask.Cell) = .empty;
-        for (columns, 0..) |column, i| {
-            const value_field = form.field(i * 2) orelse continue;
-            const null_field = form.field(i * 2 + 1) orelse continue;
-            const text = value_field.text.items;
-            if (null_field.on) {
-                try cells.append(a, .{ .column = column.name, .value = null });
-                continue;
-            }
-            if (text.len == 0 and form.key == null and
-                (column.dflt != null or (column.pk and std.ascii.findIgnoreCase(column.type, "INT") != null)))
-            {
-                continue; // leave it to the engine: a default, or the next id
-            }
-            // A number is written as it stands rather than quoted, so a column with
-            // a numeric type is given a number - unless what was typed is not one,
-            // and then it is quoted and the engine may complain about it.
-            const numeric = isNumeric(column.type) and text.len != 0 and looksNumeric(text);
-            try cells.append(a, .{
-                .column = try a.dupe(u8, column.name),
-                .value = try a.dupe(u8, text),
-                .raw = numeric,
-            });
-        }
-        return .{
-            .kind = if (form.key == null) .insert else .update,
-            .table = .{
-                .schema = try a.dupe(u8, self.grid.schema.items),
-                .name = try a.dupe(u8, form.table),
-            },
-            .cells = cells.items,
-            .where = if (form.key) |key| try copyFilters(a, key) else &.{},
-        };
-    }
-
-    /// CREATE TABLE, or a rebuild when altering.
-    fn buildTable(self: *App, sql: *std.ArrayList(u8), a: std.mem.Allocator, form: *Form.Form) !void {
-        const name = form.valueOf(0);
-        if (name.len == 0) {
-            self.complain("the table needs a name", .{});
-            return;
-        }
-        var columns: std.ArrayList(database.Column) = .empty;
-        var i: usize = 0;
-        while (i < form.fields.items.len) : (i += 1) {
-            const field = form.fields.items[i];
-            if (field.group == 0 or !std.mem.eql(u8, field.label, "column")) {
-                continue;
-            }
-            if (field.text.items.len == 0) {
-                continue; // an empty row is simply not a column
-            }
-            try columns.append(a, .{
-                .name = try a.dupe(u8, field.text.items),
-                .type = form.valueOf(i + 1),
-                .notnull = form.isOn(i + 2),
-                .dflt = form.valueOf(i + 3),
-                .pk = form.isOn(i + 4),
-                .original = field.original,
-            });
-        }
-        if (columns.items.len == 0) {
-            self.complain("a table needs at least one column", .{});
-            return;
-        }
-        if (form.purpose == .create_table) {
-            try self.conn.ddl().createTable(sql, a, .{ .schema = self.grid.schema.items, .name = name }, columns.items, &.{});
-            return;
-        }
-        // The name is a field of this form, so altering is also a way to rename
-        // - which the connection that is one table refuses under `N`, and has to
-        // refuse here for the same reason.
-        if (self.caps().no_tables.len != 0 and !std.mem.eql(u8, name, form.table)) {
-            self.complain("{s}", .{self.caps().no_tables});
-            return;
-        }
-        // Whatever this engine has to preserve across an alter - on SQLite the
-        // foreign keys and the indexes, with the renames applied.
-        const target = database.Table{ .schema = self.grid.schema.items, .name = form.table };
-        const context = try self.conn.alterContext(a, target, columns.items);
-        try self.conn.ddl().alterTable(sql, a, target, name, columns.items, context);
-    }
-
-    fn applyFilter(self: *App, form: *Form.Form) !void {
-        self.clearConditions();
-        self.grid.where_text.clearRetainingCapacity();
-        var i: usize = 0;
-        while (i < 9) : (i += 3) {
-            const column = form.valueOf(i);
-            const operator = form.valueOf(i + 1);
-            const value = form.valueOf(i + 2);
-            const op = operatorOf(operator);
-            if (column.len == 0 or (value.len == 0 and op.takesValue())) {
-                continue;
-            }
-            // `contains` is LIKE with the wildcards put in for the user.
-            const wrapped = std.mem.eql(u8, operator, "contains");
-            const text = if (wrapped)
-                try self.allocator.print("%{s}%", .{value})
-            else
-                try self.allocator.dupe(u8, value);
-            errdefer self.allocator.free(text);
-            try self.grid.conditions.append(self.allocator, .{
-                .column = try self.allocator.dupe(u8, column),
-                .op = op,
-                .value = text,
-            });
-        }
-        const raw = form.valueOf(9);
-        if (raw.len != 0) {
-            try self.grid.where_text.appendSlice(self.allocator, raw);
-        }
-        self.grid.page = 0;
-        self.cursor.row = 0;
-        self.reload() catch |err| {
-            self.complain("{s}", .{@errorName(err)});
-            return;
-        };
-        if (self.grid.failed) {
-            return; // the reason is already on screen
-        }
-        if (!self.isFiltered()) {
-            self.say("filter cleared", .{});
-        } else if (self.grid.counted) {
-            self.say("{d} row{s}", .{ self.grid.total, if (self.grid.total == 1) " matches" else "s match" });
-        } else {
-            self.say("{d} row{s} on this page; {s} cannot count the rest without reading it", .{
-                self.grid.rows.items.len,
-                plural(self.grid.rows.items.len),
-                self.caps().label,
-            });
-        }
-    }
-
-    /// Look for a string in every text-ish column of every table.
-    fn searchEverything(self: *App, needle: []const u8) !void {
-        // One SELECT per column of every table, unioned - which is SQL, and there is
-        // no honest way to put it to an engine that has none. Filtering one table
-        // works there, and says so.
-        if (!self.caps().speaks_sql) {
-            self.complain("searching every table needs SQL - filter one table with W instead", .{});
-            return;
-        }
-        var arena = std.heap.ArenaAllocator.init(self.allocator);
-        defer arena.deinit();
-        const a = arena.allocator();
-        var sql: std.ArrayList(u8) = .empty;
-        var pattern: std.ArrayList(u8) = .empty;
-        try pattern.append(a, '%');
-        try pattern.appendSlice(a, needle);
-        try pattern.append(a, '%');
-
-        var parts: usize = 0;
-        for (self.sidebar.objects.items) |object| {
-            if (!std.mem.eql(u8, object.kind, "table")) {
-                continue;
-            }
-            const columns = try self.columnDefs(a, object.name);
-            for (columns) |column| {
-                if (std.ascii.findIgnoreCase(column.type, "BLOB") != null) {
-                    continue;
-                }
-                if (parts != 0) {
-                    try sql.appendSlice(a, "\nUNION ALL ");
-                }
-                parts += 1;
-                try sql.appendSlice(a, "SELECT ");
-                try database.quote(&sql, a, object.name);
-                try sql.appendSlice(a, " AS \"table\", ");
-                try database.quote(&sql, a, column.name);
-                try sql.appendSlice(a, " AS \"column\", CAST(");
-                try database.quoteName(&sql, a, column.name);
-                try sql.appendSlice(a, " AS ");
-                try sql.appendSlice(a, self.caps().text_cast);
-                try sql.appendSlice(a, ") AS \"value\" FROM ");
-                try database.quoteName(&sql, a, object.name);
-                try sql.appendSlice(a, " WHERE CAST(");
-                try database.quoteName(&sql, a, column.name);
-                try sql.appendSlice(a, " AS ");
-                try sql.appendSlice(a, self.caps().text_cast);
-                try sql.appendSlice(a, ") LIKE ");
-                try database.quote(&sql, a, pattern.items);
-            }
-        }
-        if (parts == 0) {
-            self.complain("nothing to search in", .{});
-            return;
-        }
-        try sql.print(a, "\nLIMIT {d}", .{self.grid.limit});
-        try self.setTable(null);
-        self.clearConditions();
-        self.grid.where_text.clearRetainingCapacity();
-        self.cursor.hidden.clearRetainingCapacity();
-        self.grid.page = 0;
-        self.cursor.row = 0;
-        self.cursor.col = 0;
-        self.load(sql.items, null, false) catch {
-            self.complain("{s}", .{self.conn.message()});
-            return;
-        };
-        self.grid.total = @intCast(self.grid.rows.items.len);
-        self.setTitle("search: {s}", .{needle});
-        self.view = .grid;
-        self.focus = .main;
-        self.say("{d} hit{s} in {d} column{s}", .{ self.grid.rows.items.len, plural(self.grid.rows.items.len), parts, plural(parts) });
-    }
+    // -------------------------------------------------------------- import
 
     pub fn importCsv(
         self: *App,
@@ -5765,23 +4259,6 @@ pub fn divCeil(a: usize, b: usize) usize {
 
 const testing = std.testing;
 
-test "an attempt is made on a thread of its own and says what became of it" {
-    // Nothing listens on port 1, and being refused is an answer that needs no
-    // server to give it.
-    const attempt = try Attempt.start(testing.allocator, "redis://127.0.0.1:1/0");
-    var byte: [1]u8 = undefined;
-    try testing.expectEqual(@as(isize, 1), std.c.read(attempt.done[0], &byte, 1));
-    defer attempt.destroy();
-    try testing.expectEqual(Attempt.State.finished, attempt.state.load(.acquire));
-    try testing.expectError(error.Driver, attempt.outcome);
-    try testing.expectEqualStrings("cannot reach redis at 127.0.0.1:1", attempt.report.items);
-    // What it was doing when it stopped is still there to be read.
-    var text: [database.Stage.SIZE]u8 = undefined;
-    try testing.expectEqualStrings("connecting to 127.0.0.1:1", attempt.stage.read(&text));
-    // It is over, so there is nothing left to walk away from.
-    try testing.expect(!attempt.abandon());
-}
-
 test "the filter form's operators mean what they say, and an unknown one is equality" {
     try testing.expectEqual(database.ask.Op.eq, operatorOf("="));
     try testing.expectEqual(database.ask.Op.ne, operatorOf("!="));
@@ -5897,4 +4374,141 @@ test "the connection filter is fuzzy about the name and literal about the target
     try testing.expect(connectionMatches("cokoliv", target, "localni.example"));
     // Case is not the point of a search either.
     try testing.expect(connectionMatches("cokoliv", target, "LOCALNI"));
+}
+
+// ------------------------------------------------------------ on the bench
+//
+// The program with no terminal under it - see bench.zig: a key at a time, the
+// screen read back, and the database asked what became of it. The forms have
+// theirs in forms.zig, the keys in input.zig and the frame in draw.zig; what
+// is here is what belongs to none of those.
+
+const Bench = @import("bench.zig").Bench;
+const BOOKS = @import("bench.zig").BOOKS;
+
+test "a connection marked read-only writes nothing, by key or by statement" {
+    var bench = try Bench.openWith(BOOKS, .{ .connections = "library\t{dir}/bench.db\tread-only\n" });
+    defer bench.close();
+    try testing.expect(bench.app.read_only);
+    try bench.keys("j{enter}x");
+    try testing.expect(bench.app.report.status_error);
+    try bench.says("read-only");
+    try bench.keys("e");
+    try testing.expect(bench.app.typing.prompt == null);
+    try bench.keys("i");
+    try testing.expect(bench.app.typing.form == null);
+
+    // What is typed is read before it is run: a write is refused, a read runs.
+    try bench.keys("s");
+    try bench.typed("delete from books");
+    try bench.keys("{ctrl-s}");
+    try bench.says("read-only");
+    try bench.keys("{esc}{esc}s{ctrl-u}");
+    try bench.typed("select count(*) from books");
+    try bench.keys("{ctrl-s}");
+    try testing.expectEqualStrings("4", bench.app.grid.rows.items[0].cells[0].text);
+}
+
+test "the whole value opens over the grid, and anything else closes it" {
+    var bench = try Bench.open("CREATE TABLE notes (body TEXT); INSERT INTO notes VALUES ('first line' || char(10) || 'second line');");
+    defer bench.close();
+    try bench.keys("{enter}");
+    // One line in the grid, whatever was in it.
+    try bench.sees("first line second line");
+    try bench.keys("gv");
+    try testing.expect(bench.app.detail);
+    // And the value as it is in the box.
+    try bench.sees("│ first line");
+    try bench.sees("│ second line");
+    try bench.keys("{esc}");
+    try testing.expect(!bench.app.detail);
+}
+
+test "following reads the table again on the clock, and stays on its end" {
+    var bench = try Bench.open(BOOKS);
+    defer bench.close();
+    try bench.keys("j{enter}R");
+    try testing.expect(bench.app.follow.ms != 0);
+    try bench.app.conn.exec("INSERT INTO books (title, year) VALUES ('Hordubal', 1933)");
+    try bench.lacks("Hordubal");
+    try bench.keys("{tick}");
+    try bench.sees("Hordubal");
+    // Off again with the same key, and a tick that is still on its way does
+    // nothing.
+    try bench.keys("R");
+    try testing.expectEqual(@as(u64, 0), bench.app.follow.ms);
+    try bench.app.conn.exec("DELETE FROM books WHERE title = 'Hordubal'");
+    try bench.keys("{tick}");
+    try bench.sees("Hordubal");
+}
+
+test "a connection is chosen from the list, and the one opened moves to the front" {
+    var bench = try Bench.openWith(BOOKS, .{
+        .on_list = true,
+        .connections = "nowhere\t{dir}/nothing/there.db\nlibrary\t{dir}/bench.db\n",
+    });
+    defer bench.close();
+    try testing.expectEqual(View.connections, bench.app.view);
+    try bench.sees("nowhere");
+    try bench.sees("library");
+    try bench.says("2 saved connections");
+
+    try bench.keys("j{enter}");
+    try testing.expect(bench.app.connected);
+    try bench.sees("authors  1-3 of 3");
+    try testing.expectEqualStrings("library", bench.app.saved.list.items.items[0].name);
+
+    // One whose file is not there is asked about, since opening it would make
+    // it; no makes nothing, and the list is still there.
+    try bench.keys("Oj{enter}");
+    try testing.expectEqual(PromptKind.make_file, bench.app.typing.prompt.?.kind);
+    try bench.says("is not there - make a new, empty database?");
+    try bench.keys("n{enter}");
+    try bench.says("nothing made");
+    try testing.expectEqual(View.connections, bench.app.view);
+    try testing.expectEqual(@as(usize, 2), bench.app.saved.list.items.items.len);
+}
+
+test "a list that cannot be written says so when something asked of it is lost" {
+    if (std.c.geteuid() == 0) {
+        return error.SkipZigTest; // nothing refuses root a file
+    }
+    var bench = try Bench.openWith(BOOKS, .{
+        .on_list = true,
+        .connections = "library\t{dir}/bench.db\nother\t{dir}/other.db\n",
+    });
+    defer bench.close();
+    const list = try testing.allocator.dupeSentinel(u8, bench.app.saved.path.items, 0);
+    defer testing.allocator.free(list);
+    try testing.expectEqual(@as(c_int, 0), std.c.chmod(list, 0o444));
+    defer _ = std.c.chmod(list, 0o644);
+
+    // Opening one only moves it to the front: nobody asked for that, and a
+    // list kept read-only on purpose is not complained about for it.
+    try bench.keys("{enter}");
+    try testing.expect(bench.app.connected);
+    try testing.expect(!bench.app.saved.unwritten);
+    try testing.expect(!bench.app.report.status_error);
+
+    // Removing one is somebody's own change - asked about first - and it did
+    // not reach the file.
+    try bench.keys("Ojd");
+    try testing.expectEqual(PromptKind.forget_saved, bench.app.typing.prompt.?.kind);
+    try testing.expect(!bench.app.saved.unwritten);
+    try bench.keys("y{enter}");
+    try testing.expect(bench.app.saved.unwritten);
+    try bench.says("could not be written");
+    try bench.sees("not written to");
+
+    // It goes on being said, after the line has been written over by a
+    // connection that opened...
+    try bench.keys("{enter}");
+    try bench.says("could not be written");
+    // ...and stops when a write has gone through, which writes all of it.
+    try testing.expectEqual(@as(c_int, 0), std.c.chmod(list, 0o644));
+    try bench.keys("Or");
+    try testing.expect(!bench.app.saved.unwritten);
+    try bench.keys("O");
+    try bench.sees("saved in");
+    try bench.lacks("not written to");
 }

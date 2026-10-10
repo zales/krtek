@@ -116,10 +116,9 @@ fn escapedTarget(arena: std.mem.Allocator, name: []const u8) ![]const u8 {
 /// this in it is one nobody browses; the message says what happened rather than
 /// the grid quietly ending early.
 const LIST_LIMIT: usize = 32 << 20;
-/// How many lines of a pod's log `LOGS` asks for when nobody said.
 /// Where metrics-server answers, when a cluster has one.
 const METRICS = "/apis/metrics.k8s.io/v1beta1";
-
+/// How many lines of a pod's log `LOGS` asks for when nobody said.
 const LOG_LINES: usize = 200;
 
 /// Why an object is not made or changed from a grid. Said by `caps` before
@@ -131,6 +130,14 @@ pub const Value = union(enum) {
     nil,
     number: i64,
     text: []const u8,
+    /// Text that counts things, with how each of them is doing beside it: a
+    /// pod's `1/2`, and its two containers.
+    marked: Marked,
+
+    pub const Marked = struct {
+        text: []const u8,
+        marks: []const db.Mark,
+    };
 
     /// What this means to the grid. The one thing a driver's own value type
     /// has to say for itself; the walking and holding is db.Built's.
@@ -139,6 +146,15 @@ pub const Value = union(enum) {
             .nil => .{ .null = {} },
             .number => |number| .{ .int = number },
             .text => |text| .{ .text = text },
+            .marked => |held| .{ .text = held.text },
+        };
+    }
+
+    /// And what it may be drawn as instead, which only the one kind has.
+    pub fn asMarks(self: @This()) []const db.Mark {
+        return switch (self) {
+            .marked => |held| held.marks,
+            else => &.{},
         };
     }
 };
@@ -722,13 +738,42 @@ pub const Db = struct {
 
         var out: std.ArrayList(db.Setting) = .empty;
         const now = nowSeconds();
+        const namespace = textAt(object, "metadata.namespace");
+        var measured: ?Json = null;
+        var asked_metrics = false;
         for (resource.columns) |column| {
-            const said = api.cell(arena, object, column, now) catch "";
-            if (said.len != 0) {
-                try out.append(arena, .{ .label = column.name, .value = said });
+            const what = switch (column.from) {
+                .used => |what| what,
+                else => {
+                    const said = api.cell(arena, object, column, now) catch "";
+                    if (said.len != 0) {
+                        try out.append(arena, .{ .label = column.name, .value = said });
+                    }
+                    continue;
+                },
+            };
+            if (!asked_metrics) {
+                asked_metrics = true;
+                measured = self.usageOf(arena, namespace, name);
+            }
+            const using = api.usedText(arena, measured, what) catch "";
+            if (using.len != 0) {
+                try out.append(arena, .{ .label = column.name, .value = using });
+            }
+            // What it asked for and what it may have, under what it is using:
+            // the grid has room for one of the three and this has room for all
+            // of them, and each is only a number until it is beside the others.
+            for ([_][2][]const u8{ .{ "requests", "asked" }, .{ "limits", "limit" } }) |set| {
+                const from: api.From = .{ .asked = .{ .which = set[0], .what = what } };
+                const said = api.cell(arena, object, .{ .name = "", .from = from }, now) catch "";
+                if (said.len != 0) {
+                    try out.append(arena, .{
+                        .label = try arena.print("{s} {s}", .{ column.name, set[1] }),
+                        .value = said,
+                    });
+                }
             }
         }
-        const namespace = textAt(object, "metadata.namespace");
         if (namespace.len != 0) {
             try out.append(arena, .{ .label = "namespace", .value = namespace });
         }
@@ -1126,6 +1171,12 @@ pub const Db = struct {
         }
         const arena = self.replies.allocator();
         const items = try self.fetch(arena, try self.listPath(arena, resource, request.table.schema), request.table.name);
+        // What each of them is using is another list from another place, read
+        // once for all of them - and only where a column is going to show it.
+        var usage: Usage = .empty;
+        if (measures(resource, request)) {
+            usage = try self.usageIn(arena, request.table.schema);
+        }
 
         // Every cell of every object, then the filtering and the paging over what
         // came out. The cluster will not filter for us on anything but a field
@@ -1135,9 +1186,21 @@ pub const Db = struct {
         var kept: std.ArrayList([]const Value) = .empty;
         for (items) |item| {
             const cells = try arena.alloc(Value, resource.columns.len);
+            const measured: ?Json = if (usage.count() == 0) null else usage.get(
+                try usageKey(arena, textAt(item, "metadata.namespace"), textAt(item, "metadata.name")),
+            );
             for (resource.columns, 0..) |column, i| {
-                const written = api.cell(arena, item, column, now) catch "";
-                cells[i] = if (written.len == 0) .nil else .{ .text = written };
+                const written = switch (column.from) {
+                    .used => |what| api.usedText(arena, measured, what) catch "",
+                    else => api.cell(arena, item, column, now) catch "",
+                };
+                const drawn = api.marks(arena, item, column) catch &.{};
+                cells[i] = if (written.len == 0)
+                    .nil
+                else if (drawn.len != 0)
+                    .{ .marked = .{ .text = written, .marks = drawn } }
+                else
+                    .{ .text = written };
             }
             if (!keeps(resource, cells, request)) {
                 continue;
@@ -1171,6 +1234,89 @@ pub const Db = struct {
         var asked = request;
         asked.count = true;
         return self.select(asked);
+    }
+
+    /// What metrics-server said about each pod, by `namespace/name`.
+    const Usage = std.StringHashMapUnmanaged(Json);
+
+    fn usageKey(arena: std.mem.Allocator, namespace: []const u8, name: []const u8) ![]const u8 {
+        return arena.print("{s}/{s}", .{ namespace, name });
+    }
+
+    /// Whether answering this needs to know what is being used. A kind with no
+    /// such column does not, and neither does a count that no filter on one of
+    /// them could change - which is every count the grid asks for by itself.
+    fn measures(resource: api.Resource, request: db.ask.Select) bool {
+        for (resource.columns) |column| {
+            if (column.from != .used) {
+                continue;
+            }
+            if (!request.count) {
+                return true;
+            }
+            for (request.where) |filter| {
+                if (std.mem.eql(u8, filter.column, column.name)) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    fn usagePath(self: *Db, arena: std.mem.Allocator, schema: []const u8) ![]const u8 {
+        const namespace = if (schema.len != 0) schema else self.namespace;
+        if (namespace.len == 0 or eq(namespace, "*")) {
+            return arena.print("{s}/pods", .{METRICS});
+        }
+        return arena.print("{s}/namespaces/{s}/pods", .{ METRICS, namespace });
+    }
+
+    /// What the pods of a namespace are using, as metrics-server last measured it.
+    ///
+    /// Quietly empty where it cannot be had. metrics-server is an add-on: a
+    /// cluster may not have one, an account may not be allowed to ask it, and it
+    /// answers nothing for half a minute after it starts. None of that is a
+    /// reason for a list of pods not to open - the pods are there and are what
+    /// was asked for - so their two columns are left empty, which is the truth:
+    /// nobody measured. `TOP pods` is the same question asked on purpose, and
+    /// says why it cannot answer.
+    fn usageIn(self: *Db, arena: std.mem.Allocator, schema: []const u8) error{OutOfMemory}!Usage {
+        var out: Usage = .empty;
+        const response = self.call(arena, "GET", try self.usagePath(arena, schema), "") catch {
+            // Not this statement's failure, so not this statement's message.
+            self.last_error.clearRetainingCapacity();
+            return out;
+        };
+        if (!response.ok()) {
+            return out;
+        }
+        const parsed = std.json.parseFromSliceLeaky(Json, arena, response.body, .{}) catch return out;
+        const items = api.at(parsed, "items") orelse return out;
+        if (items != .array) {
+            return out;
+        }
+        for (items.array.items) |item| {
+            const key = try usageKey(arena, textAt(item, "metadata.namespace"), textAt(item, "metadata.name"));
+            try out.put(arena, key, item);
+        }
+        return out;
+    }
+
+    /// The same about one pod, for the screen that is about one pod.
+    fn usageOf(self: *Db, arena: std.mem.Allocator, namespace: []const u8, name: []const u8) ?Json {
+        const path = arena.print("{s}/namespaces/{s}/pods/{s}", .{
+            METRICS,
+            if (namespace.len != 0) namespace else self.namespace,
+            name,
+        }) catch return null;
+        const response = self.call(arena, "GET", path, "") catch {
+            self.last_error.clearRetainingCapacity();
+            return null;
+        };
+        if (!response.ok()) {
+            return null;
+        }
+        return std.json.parseFromSliceLeaky(Json, arena, response.body, .{}) catch null;
     }
 
     fn oneNumber(self: *Db, label: []const u8, value: i64) db.Error!Rows {
@@ -1692,10 +1838,7 @@ pub const Db = struct {
             return error.Driver;
         }
         const path = if (pods)
-            if (self.namespace.len == 0 or eq(self.namespace, "*"))
-                try arena.print("{s}/pods", .{METRICS})
-            else
-                try arena.print("{s}/namespaces/{s}/pods", .{ METRICS, self.namespace })
+            try self.usagePath(arena, "")
         else
             try arena.print("{s}/nodes", .{METRICS});
 
@@ -1743,13 +1886,8 @@ pub const Db = struct {
             if (pods) {
                 // A pod's usage is per container here too, and what somebody wants
                 // is the pod.
-                const containers = api.at(item, "containers") orelse Json{ .null = {} };
-                if (containers == .array) {
-                    for (containers.array.items) |one| {
-                        cpu += quantityAt(one, "usage.cpu");
-                        memory += quantityAt(one, "usage.memory");
-                    }
-                }
+                cpu = api.usedBy(item, "cpu") orelse 0;
+                memory = api.usedBy(item, "memory") orelse 0;
             } else {
                 cpu = quantityAt(item, "usage.cpu");
                 memory = quantityAt(item, "usage.memory");
@@ -2155,6 +2293,7 @@ fn numerics(arena: std.mem.Allocator, resource: api.Resource) ![]const bool {
 fn textOf(cell: Value) []const u8 {
     return switch (cell) {
         .text => |value| value,
+        .marked => |held| held.text,
         else => "",
     };
 }
@@ -2205,10 +2344,19 @@ fn sortRows(resource: api.Resource, rows: [][]const Value, order: []const u8, de
     const at = index orelse return;
     const By = struct {
         at: usize,
+        amount: bool,
         descending: bool,
         fn less(self: @This(), a: []const Value, b: []const Value) bool {
             const left = if (self.at < a.len) textOf(a[self.at]) else "";
             const right = if (self.at < b.len) textOf(b[self.at]) else "";
+            if (self.amount) {
+                // By how much, so 5m comes before 10m and 900Ki before 1.2Mi -
+                // which is the order somebody looking for the pod that is eating
+                // a node wants. One that was not measured counts as less than
+                // any that was, so it is last when the largest come first.
+                const order_of = std.math.order(api.amountOf(left) orelse -1, api.amountOf(right) orelse -1);
+                return if (self.descending) order_of == .gt else order_of == .lt;
+            }
             // Numbers where both sides are numbers, so 9 comes before 10.
             const first = std.fmt.parseInt(i64, left, 10) catch null;
             const other = std.fmt.parseInt(i64, right, 10) catch null;
@@ -2219,7 +2367,11 @@ fn sortRows(resource: api.Resource, rows: [][]const Value, order: []const u8, de
             return if (self.descending) order_of == .gt else order_of == .lt;
         }
     };
-    std.mem.sort([]const Value, rows, By{ .at = at, .descending = descending }, By.less);
+    std.mem.sort([]const Value, rows, By{
+        .at = at,
+        .amount = api.isAmount(resource.columns[at]),
+        .descending = descending,
+    }, By.less);
 }
 
 fn nowSeconds() i64 {
@@ -2546,6 +2698,86 @@ test "only the console verbs that look are worth repeating" {
             return error.TestUnexpectedResult;
         }
     }
+}
+
+test "what is being used is asked for only where a column is going to show it" {
+    const pods = api.find("pods").?;
+    const table: db.Table = .{ .name = "pods" };
+    // A page of pods shows it, so it is asked for.
+    try testing.expect(Db.measures(pods, .{ .table = table }));
+    // A count does not, and a second request to count the same pods would be a
+    // request for nothing - unless what is counted is the pods a filter on one of
+    // those columns leaves, and then the count is wrong without it.
+    try testing.expect(!Db.measures(pods, .{ .table = table, .count = true }));
+    try testing.expect(!Db.measures(pods, .{
+        .table = table,
+        .count = true,
+        .where = &.{.{ .column = "status", .value = "Running" }},
+    }));
+    try testing.expect(Db.measures(pods, .{
+        .table = table,
+        .count = true,
+        .where = &.{.{ .column = "memory", .op = .not_null }},
+    }));
+    // And a kind nobody measures is never asked about: a node's two columns are
+    // what it has room for, which is in the node.
+    for (api.RESOURCES) |resource| {
+        if (!std.mem.eql(u8, resource.name, "pods")) {
+            try testing.expect(!Db.measures(resource, .{ .table = .{ .name = resource.name } }));
+        }
+    }
+}
+
+test "pods are put in order by how much they use, and the unmeasured are the least" {
+    const pods = comptime api.find("pods").?;
+    var memory: usize = 0;
+    for (pods.columns, 0..) |column, i| {
+        if (std.mem.eql(u8, column.name, "memory")) {
+            memory = i;
+        }
+    }
+    // As text these are in order already, which is what makes it the wrong order:
+    // 1.2Gi is the largest of them and 900.0Ki nearly the smallest.
+    const written = [_][]const u8{ "", "1.2Gi", "238.1Mi", "512B", "900.0Ki" };
+    var cells: [written.len][pods.columns.len]Value = undefined;
+    var rows: [written.len][]const Value = undefined;
+    for (written, 0..) |text, i| {
+        @memset(&cells[i], .nil);
+        cells[i][memory] = if (text.len == 0) .nil else .{ .text = text };
+        rows[i] = &cells[i];
+    }
+    sortRows(pods, &rows, "memory", true);
+    for ([_][]const u8{ "1.2Gi", "238.1Mi", "900.0Ki", "512B", "" }, 0..) |wanted, i| {
+        try testing.expectEqualStrings(wanted, textOf(rows[i][memory]));
+    }
+    sortRows(pods, &rows, "memory", false);
+    for ([_][]const u8{ "", "512B", "900.0Ki", "238.1Mi", "1.2Gi" }, 0..) |wanted, i| {
+        try testing.expectEqualStrings(wanted, textOf(rows[i][memory]));
+    }
+}
+
+test "a cell that counts things is its text, with a mark for each of them beside it" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var built = Rows{ .owner = undefined, .names = &.{ "name", "ready", "cpu" } };
+    try built.rows.append(arena.allocator(), &.{
+        .{ .text = "api-7c9" },
+        .{ .marked = .{ .text = "1/2", .marks = &.{ .ok, .failed } } },
+        .nil,
+    });
+    var rows: db.Rows = .{ .k8s = built };
+    try testing.expect(try rows.next());
+    // The value is the text, which is what is filtered on, put in order and
+    // written to a file - none of which draws anything.
+    try testing.expectEqualStrings("1/2", rows.value(1).text);
+    try testing.expectEqualStrings("1/2", textOf(built.rows.items[0][1]));
+    try testing.expectEqualSlices(db.Mark, &.{ .ok, .failed }, rows.marks(1));
+    // Every other cell is only its text, and one that is not there is nothing.
+    try testing.expectEqual(@as(usize, 0), rows.marks(0).len);
+    try testing.expectEqual(@as(usize, 0), rows.marks(2).len);
+    try testing.expectEqual(@as(usize, 0), rows.marks(9).len);
+    try testing.expect(!try rows.next());
+    try testing.expectEqual(@as(usize, 0), rows.marks(1).len);
 }
 
 test "a manifest comes apart at its document separators" {

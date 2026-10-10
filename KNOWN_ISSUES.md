@@ -3,8 +3,8 @@
 Bugs that are known and not fixed yet. Each says how to see it, where it comes
 from and what the fix would be. Delete an entry in the commit that fixes it.
 
-The one below was found on 2026-10-04 by a review of the fix for text that is not
-UTF-8 ("A value that is not UTF-8 is drawn a U+FFFD a byte, and stays in its
+The one below was found on 2026-10-04 by a review of the fix for text that is
+not UTF-8 ("A value that is not UTF-8 is drawn a U+FFFD a byte, and stays in its
 column"), by reading the code. It was not reproduced in a pty: `tests/screen.py`
 puts every character in one cell, so it cannot show it.
 

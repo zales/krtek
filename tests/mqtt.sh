@@ -154,6 +154,21 @@ screen "$ROOT" '{wait}' '{wait}' '{keep}'
 shows "the first screen is the topics, with what was last said on each" 'dum/kuchyn/teplota +21\.5 +yes'
 shows "and the broker's version is in the header" "mosquitto version 2"
 
+# The whole value of a cell is that cell's. `gv` asks again for the one column
+# the cursor is on and shows the first cell of what comes back - and what came
+# back was the whole row, so the box said `payload` along the top and had the
+# topic inside. The list is in the order of the names, so the first row is the
+# kitchen's.
+whole() {
+	grep -A1 "$1 ─ enter/esc closes" "$SCREEN" | tail -1 | sed 's/\(.*\)│.*$/\1/; s/ *$//; s/^.*│ //'
+}
+screen "$ROOT" '{tab}' '{right}' g v '{wait}' '{keep}'
+test "$(whole payload)" = "21.5" || {
+	cat "$SCREEN" >&2
+	fail "gv on the payload of dum/kuchyn/teplota should show 21.5, and shows '$(whole payload)'"
+}
+echo "ok: gv shows the value under the cursor, and not the topic of its row"
+
 # Out through the console, and read back by a client that is not this one.
 # (No braces in what is typed here: they are how the harness names a key.)
 screen "$ROOT" s 'RETAIN dum/rezim noc' '{enter}' 'PUBLISH -r -q 2 dum/kvalita dve "slova" a; strednik' '{ctrl-s}' '{keep}'

@@ -827,8 +827,10 @@ fn write(file_path: []const u8, bytes: []const u8) !void {
     @memcpy(zero[0..file_path.len], file_path);
     zero[file_path.len] = 0;
     const file = std.c.fopen(@ptrCast(&zero), "wb") orelse return error.CannotCreate;
-    defer _ = std.c.fclose(file);
-    if (bytes.len != 0 and std.c.fwrite(bytes.ptr, 1, bytes.len, file) != bytes.len) {
+    const taken = bytes.len == 0 or std.c.fwrite(bytes.ptr, 1, bytes.len, file) == bytes.len;
+    // Closing is part of writing: what `fwrite` took is in a buffer until then,
+    // and a disk with no room left is found out here and nowhere else.
+    if (std.c.fclose(file) != 0 or !taken) {
         return error.WriteFailed;
     }
 }
@@ -1351,6 +1353,38 @@ test "saving writes the saved ones and leaves the found ones where they came fro
     const text = try read(arena.allocator(), file);
     try std.testing.expect(std.mem.find(u8, text, "books") != null);
     try std.testing.expect(std.mem.find(u8, text, "k8s://work") == null);
+}
+
+test "a list with nowhere to be written says so" {
+    var list = List.init(std.testing.allocator);
+    defer list.deinit();
+    try list.add("books", "/tmp/books.db", null, "");
+
+    // A file where a directory has to be: nothing can be made inside it, by
+    // root either - which a file that is only read-only would not stop.
+    var buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const blocker = try std.mem.print(&buffer, "/tmp/krtek-blocked-test-{d}", .{std.c.getpid()});
+    try write(blocker, "not a directory");
+    var inside: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const file = try std.mem.print(&inside, "{s}/krtek/connections", .{blocker});
+    try std.testing.expectError(error.CannotCreate, save(&list, file));
+    // And what was in the way is as it was.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    try std.testing.expectEqualStrings("not a directory", try read(arena.allocator(), blocker));
+}
+
+test "a list that did not fit on the disk was not written" {
+    // The bytes are taken into a buffer and the disk is asked for room only
+    // when the file is closed, which nothing looked at: a full disk was a list
+    // cut short and called saved. Linux has a file that is always full.
+    if (@import("builtin").os.tag != .linux) {
+        return error.SkipZigTest;
+    }
+    var list = List.init(std.testing.allocator);
+    defer list.deinit();
+    try list.add("books", "/tmp/books.db", null, "");
+    try std.testing.expectError(error.WriteFailed, save(&list, "/dev/full"));
 }
 
 test "a connection says whether anything may be written through it" {

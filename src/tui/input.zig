@@ -1979,3 +1979,366 @@ test "a match says which letters it landed on" {
     try std.testing.expect(hit.len == 4);
     try std.testing.expect(hit.has(0) and hit.has(1) and hit.has(2) and hit.has(3));
 }
+
+// --------------------------------------------------------------- the keys
+//
+// On the bench: the program with no terminal under it, a key at a time, with
+// the screen read back and the database asked what became of it. See
+// bench.zig for why these are here and not in a script that types into a pty.
+
+const Bench = @import("bench.zig").Bench;
+const BOOKS = @import("bench.zig").BOOKS;
+const testing = std.testing;
+
+test "the list opens a table, and tab goes between the list and the rows" {
+    var bench = try Bench.open(BOOKS);
+    defer bench.close();
+    // The first table is open already, with the cursor still in the list.
+    try testing.expectEqual(app_mod.Focus.sidebar, bench.app.focus);
+    try bench.sees("authors  1-3 of 3");
+
+    try bench.keys("j{enter}");
+    try testing.expectEqual(app_mod.Focus.main, bench.app.focus);
+    try bench.sees("books  1-4 of 4");
+    try bench.sees("Saturnin");
+
+    try bench.keys("{tab}");
+    try testing.expectEqual(app_mod.Focus.sidebar, bench.app.focus);
+    try bench.keys("k");
+    try testing.expectEqual(@as(usize, 0), bench.app.sidebar.selected);
+    // Moving in the list does not open what it passes.
+    try bench.sees("books  1-4 of 4");
+}
+
+test "the cursor moves by vi's letters and stops at the edges" {
+    var bench = try Bench.open(BOOKS);
+    defer bench.close();
+    try bench.keys("j{enter}");
+    const cursor = &bench.app.cursor;
+    try testing.expectEqual(@as(usize, 0), cursor.row);
+
+    try bench.keys("jj");
+    try testing.expectEqual(@as(usize, 2), cursor.row);
+    try bench.keys("k");
+    try testing.expectEqual(@as(usize, 1), cursor.row);
+    try bench.keys("G");
+    try testing.expectEqual(@as(usize, 3), cursor.row);
+    // Past the last row is the last row.
+    try bench.keys("jjj");
+    try testing.expectEqual(@as(usize, 3), cursor.row);
+    try bench.keys("gg");
+    try testing.expectEqual(@as(usize, 0), cursor.row);
+    try bench.keys("k");
+    try testing.expectEqual(@as(usize, 0), cursor.row);
+
+    try bench.keys("l");
+    try testing.expectEqual(@as(usize, 1), cursor.col);
+    try bench.keys("$");
+    try testing.expectEqual(@as(usize, 3), cursor.col);
+    try bench.keys("l");
+    try testing.expectEqual(@as(usize, 3), cursor.col);
+    try bench.keys("b");
+    try testing.expectEqual(@as(usize, 2), cursor.col);
+    try bench.keys("0");
+    try testing.expectEqual(@as(usize, 0), cursor.col);
+    // Left of the first column is the list, and right of the list is the rows.
+    try bench.keys("h");
+    try testing.expectEqual(app_mod.Focus.sidebar, bench.app.focus);
+    try bench.keys("l");
+    try testing.expectEqual(app_mod.Focus.main, bench.app.focus);
+    try testing.expectEqual(@as(usize, 0), cursor.col);
+
+    // The arrows are the same four.
+    try bench.keys("{down}{right}");
+    try testing.expectEqual(@as(usize, 1), cursor.row);
+    try testing.expectEqual(@as(usize, 1), cursor.col);
+    try bench.keys("{up}{left}");
+    try testing.expectEqual(@as(usize, 0), cursor.row);
+    try testing.expectEqual(@as(usize, 0), cursor.col);
+}
+
+test "x and x again deletes the row the cursor is on, and marked rows are asked about by their count" {
+    var bench = try Bench.open(BOOKS);
+    defer bench.close();
+    // One x is a question, and any other key is no.
+    try bench.keys("j{enter}jx");
+    try bench.says("x again deletes this row");
+    try bench.expectAsked("SELECT count(*) FROM books", "4");
+    try bench.keys("j");
+    try bench.expectAsked("SELECT count(*) FROM books", "4");
+    // And that key was the answer and nothing else: the cursor is where it was.
+    try testing.expectEqual(@as(usize, 1), bench.app.cursor.row);
+
+    try bench.keys("xx");
+    try bench.says("1 row deleted");
+    try bench.expectAsked("SELECT title FROM books ORDER BY id", "RUR Žert Saturnin");
+    try bench.sees("books  1-3 of 3");
+    try bench.lacks("Krakatit");
+
+    // Space ticks a row and steps to the next, so two of them is two rows
+    // ticked and the cursor on a third: the ticked ones go and that one stays.
+    try bench.keys("gg{space}{space}");
+    try testing.expectEqual(@as(usize, 2), bench.app.cursor.marked.items.len);
+    try testing.expectEqual(@as(usize, 2), bench.app.cursor.row);
+    try bench.sees("2 marked");
+    try bench.keys("x");
+    try testing.expectEqual(PromptKind.remove_rows, bench.app.typing.prompt.?.kind);
+    try bench.says("delete 2 marked rows?");
+    try bench.keys("y{enter}");
+    try bench.says("2 rows deleted");
+    try bench.expectAsked("SELECT title FROM books ORDER BY id", "Saturnin");
+    try testing.expectEqual(@as(usize, 0), bench.app.cursor.marked.items.len);
+}
+
+test "e changes one value, as it was typed" {
+    var bench = try Bench.open(BOOKS);
+    defer bench.close();
+    try bench.keys("j{enter}jle");
+    // The prompt holds what the cell holds.
+    try testing.expectEqualStrings("Krakatit", bench.app.typing.prompt.?.buffer.items);
+    try bench.keys("{ctrl-u}Válka s mloky{enter}");
+    try bench.says("updated");
+    try bench.expectAsked("SELECT title FROM books WHERE id = 2", "Válka s mloky");
+    try bench.sees("Válka s mloky");
+    // Only that row.
+    try bench.expectAsked("SELECT count(*) FROM books WHERE title = 'Válka s mloky'", "1");
+
+    // Escape leaves the value as it is.
+    try bench.keys("e{ctrl-u}nothing{esc}");
+    try bench.expectAsked("SELECT title FROM books WHERE id = 2", "Válka s mloky");
+    try testing.expect(bench.app.typing.prompt == null);
+}
+
+test "i opens a form for a new row, and ctrl+s puts it in the table" {
+    var bench = try Bench.open(BOOKS);
+    defer bench.close();
+    try bench.keys("j{enter}i");
+    try bench.sees("new row");
+    // Each column a field and a box that says it is NULL, in the order of the
+    // table, and tab goes from one value to the next past the boxes; the key
+    // is left as it is and SQLite numbers the row itself.
+    try bench.keys("{tab}Bylo nás pět{tab}1946{tab}1{ctrl-s}");
+    try bench.says("row inserted");
+    try bench.expectAsked("SELECT id || ':' || title || ':' || year || ':' || author FROM books WHERE year = 1946", "5:Bylo nás pět:1946:1");
+    try bench.sees("books  1-5 of 5");
+
+    // Escape closes a form and inserts nothing.
+    try bench.keys("i{tab}never{esc}");
+    try testing.expect(bench.app.typing.form == null);
+    try bench.expectAsked("SELECT count(*) FROM books", "5");
+}
+
+test "o sorts by the column under the cursor, then the other way" {
+    var bench = try Bench.open(BOOKS);
+    defer bench.close();
+    try bench.keys("j{enter}llo");
+    try bench.sees("order year");
+    // The first row on the screen is the oldest book.
+    try testing.expectEqualStrings("RUR", bench.app.grid.rows.items[0].cells[1].text);
+    try testing.expectEqualStrings("Žert", bench.app.grid.rows.items[3].cells[1].text);
+    try bench.keys("o");
+    try bench.sees("order year desc");
+    try testing.expectEqualStrings("Žert", bench.app.grid.rows.items[0].cells[1].text);
+}
+
+test "the editor runs what was written in it, leaves a statement that reads over its rows, and keeps what was not run" {
+    var bench = try Bench.open(BOOKS);
+    defer bench.close();
+    try bench.keys("s");
+    try testing.expect(bench.app.typing.editor != null);
+    try bench.typed("select title from books where year < 1930 order by year");
+    try bench.keys("{ctrl-s}");
+    try bench.sees("query result");
+    try testing.expectEqual(@as(usize, 2), bench.app.grid.rows.items.len);
+    try testing.expectEqualStrings("RUR", bench.app.grid.rows.items[0].cells[0].text);
+    try bench.says("2 rows");
+    // One that only reads stays as a strip above what it brought back, with
+    // the keys handed to the grid, and `s` puts the typing back after it.
+    try bench.sees("s edits it again");
+    try bench.keys("j");
+    try testing.expectEqual(@as(usize, 1), bench.app.cursor.row);
+    try bench.keys("s");
+    try bench.sees("[INSERT]");
+    try bench.sees("order by year");
+
+    // Two statements: both run, and the one with rows is what is shown.
+    try bench.keys("{ctrl-u}");
+    try bench.typed("update books set year = year + 1 where id = 1; select year from books where id = 1");
+    try bench.keys("{ctrl-s}");
+    try testing.expectEqualStrings("1921", bench.app.grid.rows.items[0].cells[0].text);
+    try bench.expectAsked("SELECT year FROM books WHERE id = 1", "1921");
+
+    // Put away with escape, what was being written is there the next time.
+    try bench.keys("{esc}{esc}s{ctrl-u}");
+    try bench.typed("select 1 -- not yet");
+    try bench.keys("{esc}{esc}");
+    try testing.expect(bench.app.typing.editor == null);
+    try bench.keys("s");
+    try bench.sees("select 1 -- not yet");
+}
+
+test "a statement the engine refuses is said, and the rest of the batch still runs" {
+    var bench = try Bench.open(BOOKS);
+    defer bench.close();
+    try bench.keys("s");
+    try bench.typed("select * from nowhere; delete from books where id = 4");
+    try bench.keys("{ctrl-s}");
+    try bench.says("1 of 2 statements failed");
+    try bench.expectAsked("SELECT count(*) FROM books", "3");
+    // The editor stays open over a run that did not go through, with what the
+    // engine said under the statement.
+    try testing.expect(bench.app.typing.editor != null);
+    try bench.sees("no such table: nowhere");
+}
+
+test "y and a second key copy the value, the row or the page" {
+    var bench = try Bench.open(BOOKS);
+    defer bench.close();
+    try bench.keys("j{enter}jl");
+    const copied = &bench.app.screen.copied;
+
+    try bench.keys("yc");
+    try testing.expectEqualStrings("Krakatit", copied.items);
+    try bench.keys("yy");
+    try testing.expectEqualStrings("2\tKrakatit\t1924\t1", copied.items);
+    try bench.keys("yp");
+    try testing.expect(std.mem.startsWith(u8, copied.items, "id,title,year,author\n1,RUR,1920,1\n"));
+    try testing.expect(std.mem.endsWith(u8, copied.items, "4,Saturnin,1942,3\n"));
+
+    // Any other key after y is nothing, and says so.
+    copied.clearRetainingCapacity();
+    try bench.keys("y{esc}");
+    try testing.expectEqualStrings("", copied.items);
+    try bench.says("nothing copied");
+}
+
+test "the palette finds an action by a few letters and does it where it belongs" {
+    var bench = try Bench.open(BOOKS);
+    defer bench.close();
+    // From the list, where there is no row to insert into: the palette goes to
+    // the rows first, which is what `needs` is for.
+    try bench.keys("j{enter}{tab}");
+    try testing.expectEqual(app_mod.Focus.sidebar, bench.app.focus);
+    try bench.keys("{ctrl-k}");
+    try testing.expect(bench.app.palette != null);
+    try bench.keys("insert");
+    try bench.sees("insert a row");
+    try bench.keys("{enter}");
+    try testing.expect(bench.app.palette == null);
+    try testing.expect(bench.app.typing.form != null);
+    try testing.expectEqual(app_mod.Focus.main, bench.app.focus);
+
+    // Escape closes it and does nothing.
+    try bench.keys("{esc}{ctrl-k}drop{esc}");
+    try testing.expect(bench.app.palette == null);
+    try testing.expect(bench.app.typing.prompt == null);
+    try bench.expectAsked("SELECT count(*) FROM sqlite_master WHERE name = 'books'", "1");
+}
+
+test "dropping a table asks first, and anything but y is no" {
+    var bench = try Bench.open(BOOKS);
+    defer bench.close();
+    try bench.keys("j{enter}D");
+    try testing.expectEqual(PromptKind.confirm, bench.app.typing.prompt.?.kind);
+    try bench.keys("n{enter}");
+    try bench.expectAsked("SELECT count(*) FROM sqlite_master WHERE name = 'books'", "1");
+
+    try bench.keys("Dy{enter}");
+    try bench.expectAsked("SELECT count(*) FROM sqlite_master WHERE name = 'books'", "0");
+    try bench.lacks("books");
+    // It was the last in the list. The cursor is on what is the last now, and
+    // that is what is open - not the count of a table that is gone, over an
+    // invitation to insert a row into it.
+    try testing.expectEqual(@as(usize, 0), bench.app.sidebar.selected);
+    try bench.sees("authors  1-3 of 3");
+    try bench.lacks("no rows yet");
+}
+
+test "a command on the : line changes how much is on a page, and n and p turn it" {
+    var bench = try Bench.open(BOOKS);
+    defer bench.close();
+    try bench.keys("j{enter}:limit 3{enter}");
+    try bench.sees("books  1-3 of 4   page 1/2");
+    try bench.lacks("Saturnin");
+    try bench.keys("gn");
+    try bench.sees("books  4-4 of 4   page 2/2");
+    try bench.sees("Saturnin");
+    // There is no third page to turn to.
+    try bench.keys("gn");
+    try bench.sees("page 2/2");
+    try bench.keys("gp");
+    try bench.sees("page 1/2");
+    // `n` alone is the next of what is being looked for, and says where the
+    // page keys went when nothing is.
+    try bench.keys("n");
+    try bench.sees("page 1/2");
+    try bench.says("gn and gp turn the page");
+
+    // What is not a command says so and changes nothing.
+    try bench.keys(":nonsense{enter}");
+    try testing.expect(bench.app.report.status_error);
+    try bench.sees("page 1/2");
+}
+
+test "the filter on the list narrows it, and escape brings it all back" {
+    var bench = try Bench.open(BOOKS);
+    defer bench.close();
+    // Enter opens the first of what is left, and leaves the list narrowed.
+    try bench.keys("/boo{enter}");
+    try testing.expectEqual(@as(usize, 1), bench.app.visibleCount());
+    try bench.sees("books  1-4 of 4");
+    try testing.expectEqual(app_mod.Focus.main, bench.app.focus);
+    // Escape in the list is what widens it again.
+    try bench.keys("{tab}{esc}");
+    try testing.expectEqual(@as(usize, 2), bench.app.visibleCount());
+}
+
+test "the structure of a table is its columns, its indexes and its keys" {
+    var bench = try Bench.open(BOOKS);
+    defer bench.close();
+    try bench.keys("j{enter}S");
+    try testing.expectEqual(app_mod.View.structure, bench.app.view);
+    try bench.sees("title");
+    try bench.sees("NOT NULL");
+    try bench.sees("authors");
+    try bench.sees("CASCADE");
+}
+
+test "help is the whole key map, and the same key puts it away" {
+    var bench = try Bench.open(BOOKS);
+    defer bench.close();
+    try bench.keys("?");
+    try testing.expectEqual(app_mod.View.help, bench.app.view);
+    try bench.sees("command palette");
+    try bench.sees("first, last row");
+    try bench.keys("?");
+    try testing.expectEqual(app_mod.View.grid, bench.app.view);
+}
+
+test "a tab is a connection of its own, and the brackets go between them" {
+    var bench = try Bench.open(BOOKS);
+    defer bench.close();
+    try bench.keys("j{enter}");
+    try bench.keys("{ctrl-t}");
+    try testing.expectEqual(@as(usize, 2), bench.app.tabs.items.len);
+    try testing.expectEqual(@as(usize, 1), bench.app.active_tab);
+    // A new tab has nothing open: it is where a connection is chosen.
+    try testing.expectEqual(app_mod.View.connections, bench.app.view);
+    try bench.keys("[");
+    try testing.expectEqual(@as(usize, 0), bench.app.active_tab);
+    // And the first is as it was left: the table, and the cursor in its rows.
+    try bench.sees("books  1-4 of 4");
+    try testing.expectEqual(app_mod.Focus.main, bench.app.focus);
+    try bench.keys("]");
+    try testing.expectEqual(@as(usize, 1), bench.app.active_tab);
+}
+
+test "q quits, and not from inside something that is being typed" {
+    var bench = try Bench.open(BOOKS);
+    defer bench.close();
+    try bench.keys("s");
+    try bench.keys("iq{esc}{esc}");
+    try testing.expect(!bench.app.quit);
+    try bench.keys("q");
+    try testing.expect(bench.app.quit);
+}

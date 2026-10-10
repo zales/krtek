@@ -179,4 +179,32 @@ pub fn main(init: std.process.Init) !void {
     }
     const definition = try conn.definition(arena.allocator(), books);
     std.debug.print("definition:\n{s}\n", .{definition orelse "(none)"});
+
+    // A connection that holds files is asked what is where it opens, and then
+    // about a few of the files by name. Those are two requests answering one
+    // question - a listing draws the file manager, the other is what a copy
+    // asks first - and the two have to say the same of a file.
+    if (conn.files()) |place| {
+        const where = place.start(arena.allocator()) catch "/";
+        const entries = place.list(arena.allocator(), where) catch {
+            std.debug.print("files in {s}: {s}\n", .{ where, place.message() });
+            return;
+        };
+        std.debug.print("files in {s}:\n", .{where});
+        var asked: usize = 0;
+        for (entries) |entry| {
+            if (entry.kind != .file or asked == 3) {
+                continue;
+            }
+            asked += 1;
+            const full = try db.store.join(arena.allocator(), where, entry.name);
+            const alone = place.stat(arena.allocator(), full) catch {
+                std.debug.print("  file {s}: {s}\n", .{ entry.name, place.message() });
+                continue;
+            };
+            std.debug.print("  file {s} listed: size={d} modified={d} asked: size={d} modified={d}\n", .{
+                entry.name, entry.size, entry.modified, alone.size, alone.modified,
+            });
+        }
+    }
 }

@@ -52,10 +52,29 @@ pub fn build(b: *std.Build) void {
     // working tree says so, because "0.5.0" from an unknown commit is worse than
     // nothing when somebody reports a bug against it.
     const version = b.option([]const u8, "version", "the version this build calls itself") orelse "from source";
+    // A server for the drivers' unit tests that want one, as the variable the
+    // test reads and what to put in it: `-Dagainst=KRTEK_POSTGRES=postgres://…`.
+    //
+    // An option rather than the variable set in the shell, which is how it was
+    // done and which did nothing on a second run: a test run is kept and handed
+    // back for as long as the binary is the same, and what is in the
+    // environment is not part of what it is kept under. So a suite that ran
+    // `KRTEK_MSSQL=… zig build test` after anybody had run the tests once got
+    // the answer from before - every test that wants a server skipped - and
+    // called it a pass. Checked against a server that was not there at all.
+    const against = b.option([]const u8, "against", "NAME=value for the unit tests that want a server");
     const stamp = b.addOptions();
     stamp.addOption([]const u8, "version", version);
 
-    const linking = Linking{ .static = static };
+    const libraries = Libraries{
+        .b = b,
+        .target = target,
+        .libpq = libpq,
+        .mariadb = mariadb,
+        .openssl = openssl,
+        .libssh2 = libssh2,
+        .linking = .{ .static = static },
+    };
 
     // The bindings are shared with the WASM build, so they are their own module
     // rather than a relative import reaching outside the root.
@@ -87,16 +106,8 @@ pub fn build(b: *std.Build) void {
     module.addImport("db", database);
     module.addImport("build", stamp.createModule());
     module.addImport("vaxis", vaxis.module("vaxis"));
-    module.addIncludePath(b.path("vendor"));
-    module.addCSourceFile(.{ .file = b.path("vendor/sqlite3.c"), .flags = &sqlite_flags });
-    linkPostgres(b, module, target, libpq, linking);
-    linkMysql(b, module, target, mariadb, linking);
-    linkTls(b, module, target, openssl, linking);
-    linkSsh(b, module, target, libssh2, linking);
+    libraries.link(module);
     linkKeychain(module, target);
-    if (static) {
-        linkClientLibraries(b, module);
-    }
 
     const exe = b.addExecutable(.{
         .name = "krtek",
@@ -122,16 +133,8 @@ pub fn build(b: *std.Build) void {
     test_module.addImport("sqlite", bindings);
     test_module.addImport("db", database);
     test_module.addImport("vaxis", vaxis.module("vaxis"));
-    test_module.addIncludePath(b.path("vendor"));
-    test_module.addCSourceFile(.{ .file = b.path("vendor/sqlite3.c"), .flags = &sqlite_flags });
-    linkPostgres(b, test_module, target, libpq, linking);
-    linkMysql(b, test_module, target, mariadb, linking);
-    linkTls(b, test_module, target, openssl, linking);
-    linkSsh(b, test_module, target, libssh2, linking);
+    libraries.link(test_module);
     linkKeychain(test_module, target);
-    if (static) {
-        linkClientLibraries(b, test_module);
-    }
     const tests = b.addTest(.{ .root_module = test_module });
 
     // The drivers are a module of their own, and `zig test` only collects the
@@ -145,15 +148,7 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     db_test_module.addImport("sqlite", bindings);
-    db_test_module.addIncludePath(b.path("vendor"));
-    db_test_module.addCSourceFile(.{ .file = b.path("vendor/sqlite3.c"), .flags = &sqlite_flags });
-    linkPostgres(b, db_test_module, target, libpq, linking);
-    linkMysql(b, db_test_module, target, mariadb, linking);
-    linkTls(b, db_test_module, target, openssl, linking);
-    linkSsh(b, db_test_module, target, libssh2, linking);
-    if (static) {
-        linkClientLibraries(b, db_test_module);
-    }
+    libraries.link(db_test_module);
     const db_tests = b.addTest(.{ .root_module = db_test_module });
 
     // A scratch program that talks to a real PostgreSQL, for development.
@@ -164,12 +159,7 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     check_module.addImport("db", database);
-    check_module.addIncludePath(b.path("vendor"));
-    check_module.addCSourceFile(.{ .file = b.path("vendor/sqlite3.c"), .flags = &sqlite_flags });
-    linkPostgres(b, check_module, target, libpq, linking);
-    linkMysql(b, check_module, target, mariadb, linking);
-    linkTls(b, check_module, target, openssl, linking);
-    linkSsh(b, check_module, target, libssh2, linking);
+    libraries.link(check_module);
     const check = b.addExecutable(.{ .name = "dbcheck", .root_module = check_module });
     const run_check = b.addRunArtifact(check);
     run_check.addPassthruArgs();
@@ -187,15 +177,7 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     fuzz_module.addImport("db", database);
-    fuzz_module.addIncludePath(b.path("vendor"));
-    fuzz_module.addCSourceFile(.{ .file = b.path("vendor/sqlite3.c"), .flags = &sqlite_flags });
-    linkPostgres(b, fuzz_module, target, libpq, linking);
-    linkMysql(b, fuzz_module, target, mariadb, linking);
-    linkTls(b, fuzz_module, target, openssl, linking);
-    linkSsh(b, fuzz_module, target, libssh2, linking);
-    if (static) {
-        linkClientLibraries(b, fuzz_module);
-    }
+    libraries.link(fuzz_module);
     const fuzz = b.addExecutable(.{ .name = "fuzz", .root_module = fuzz_module });
     const run_fuzz = b.addRunArtifact(fuzz);
     run_fuzz.addPassthruArgs();
@@ -219,7 +201,15 @@ pub fn build(b: *std.Build) void {
 
     const test_step = b.step("test", "Unit tests of the terminal app and the drivers");
     test_step.dependOn(&b.addRunArtifact(tests).step);
-    test_step.dependOn(&b.addRunArtifact(db_tests).step);
+    const run_db_tests = b.addRunArtifact(db_tests);
+    if (against) |named| {
+        const equals = std.mem.findScalar(u8, named, '=') orelse
+            std.debug.panic("-Dagainst wants NAME=value, and got {s}", .{named});
+        run_db_tests.setEnvironmentVariable(named[0..equals], named[equals + 1 ..]);
+        // What a server answers is not something a kept result can know.
+        run_db_tests.has_side_effects = true;
+    }
+    test_step.dependOn(&run_db_tests.step);
 }
 
 fn linkPostgres(b: *std.Build, module: *std.Build.Module, target: std.Build.ResolvedTarget, prefix: ?[]const u8, options: Linking) void {
@@ -241,6 +231,38 @@ fn linkPostgres(b: *std.Build, module: *std.Build.Module, target: std.Build.Reso
 
 const Linking = struct {
     static: bool,
+};
+
+/// What every program built here is linked against, and where each of it was
+/// said to be: SQLite compiled in from the amalgamation, and the four client
+/// libraries the drivers call.
+///
+/// Five programs want exactly this - the app, its tests, the drivers' tests,
+/// dbcheck and the fuzzer - and each had the same eight lines written out. They
+/// had already stopped being the same eight: dbcheck's copy was missing the
+/// last of them, so a static build of it linked no client library at all. The
+/// keychain is not in here, because only what opens the interface wants it.
+const Libraries = struct {
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    libpq: ?[]const u8,
+    mariadb: ?[]const u8,
+    openssl: ?[]const u8,
+    libssh2: ?[]const u8,
+    linking: Linking,
+
+    fn link(self: Libraries, module: *std.Build.Module) void {
+        const b = self.b;
+        module.addIncludePath(b.path("vendor"));
+        module.addCSourceFile(.{ .file = b.path("vendor/sqlite3.c"), .flags = &sqlite_flags });
+        linkPostgres(b, module, self.target, self.libpq, self.linking);
+        linkMysql(b, module, self.target, self.mariadb, self.linking);
+        linkTls(b, module, self.target, self.openssl, self.linking);
+        linkSsh(b, module, self.target, self.libssh2, self.linking);
+        if (self.linking.static) {
+            linkClientLibraries(b, module);
+        }
+    }
 };
 
 /// Link what `pkg-config --static` says the client libraries need, preferring an

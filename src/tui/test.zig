@@ -8,11 +8,15 @@ const db = @import("db");
 // the DDL generator brings its own tests
 comptime {
     _ = @import("app.zig");
+    _ = @import("bench.zig");
+    _ = @import("connection_form.zig");
+    _ = @import("dialing.zig");
     _ = @import("draw.zig");
     _ = @import("ddl.zig");
     _ = @import("connections.zig");
     _ = @import("editor.zig");
     _ = @import("files.zig");
+    _ = @import("forms.zig");
     _ = @import("fuzzy.zig");
     _ = @import("input.zig");
     _ = @import("line.zig");
@@ -43,6 +47,21 @@ test "cells are flattened to one line" {
     defer arena.deinit();
     const flat = try app.flatten(arena.allocator(), "a\nb\tc\rd");
     try std.testing.expectEqualStrings("a b c d", flat);
+}
+
+test "a cell with marks is as wide as its marks, and still says its text" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var cell = try app.formatCell(arena.allocator(), .{ .text = "10/12" }, false);
+    try std.testing.expectEqual(@as(usize, 5), cell.width());
+    // Twelve containers are twelve squares, whatever the two numbers take.
+    const ten: [10]db.Mark = @splat(.ok);
+    const two: [2]db.Mark = @splat(.waiting);
+    cell.marks = &(ten ++ two);
+    try std.testing.expectEqual(@as(usize, 12), cell.width());
+    // What is copied and written to a file is the value, not the drawing.
+    try std.testing.expectEqualStrings("10/12", cell.whole());
+    try std.testing.expectEqualStrings("10/12", cell.text);
 }
 
 test "delimited output quotes only when it has to" {

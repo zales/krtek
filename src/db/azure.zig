@@ -1066,6 +1066,8 @@ pub const Db = struct {
                         .name = name,
                         .kind = .file,
                         .size = @intCast(@max(entry.size, 0)),
+                        // An HTTP date here, where S3 lists a time as ISO 8601.
+                        .modified = http.secondsOf(entry.modified),
                     }) catch return error.OutOfMemory;
                 }
                 marker = page.next orelse break;
@@ -1088,6 +1090,7 @@ pub const Db = struct {
                     .name = db.store.basename(path),
                     .kind = .file,
                     .size = std.fmt.parseInt(u64, response.get("content-length") orelse "0", 10) catch 0,
+                    .modified = http.secondsOf(response.get("last-modified") orelse ""),
                 };
             }
             const prefix = try asFolder(arena, where.blob);
@@ -1587,6 +1590,9 @@ test "a listing is read the way Azure sends one" {
     try testing.expectEqualStrings("2015/august trip.txt", listing.entries[0].name);
     try testing.expectEqual(@as(i64, 9), listing.entries[0].size);
     try testing.expectEqualStrings("Wed, 12 Aug 2026 17:16:36 GMT", listing.entries[0].modified);
+    // A time is listed as a header would say it, and that is what the file
+    // manager's number is read from.
+    try testing.expectEqual(@as(i64, 1786554996), http.secondsOf(listing.entries[0].modified));
     try testing.expectEqualStrings("0x24C87BB722B4660", listing.entries[0].etag);
     try testing.expectEqualStrings("BlockBlob", listing.entries[0].kind);
     try testing.expectEqualStrings("Hot", listing.entries[0].tier);

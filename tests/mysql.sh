@@ -165,4 +165,37 @@ printf "SELECT count(*) FROM demo.zakaznici WHERE jmeno = 'Ludmila Čermáková-
 	| grep -qx 1 || fail "the accented value did not reach the table intact"
 echo "ok: and the server has it, character for character"
 
+# A trigger through the form, which is the engine's own statement: `FOR EACH
+# ROW` and no BEGIN. The form used to write SQLite's dialect whatever it was
+# talking to, and this server said so.
+printf 'CREATE TABLE demo.zaznam (co varchar(80));\n' | $MYSQL 2>/dev/null
+screen "a trigger made in the form is one the server takes" "1 statement(s), 0 row(s) affected" \
+	'{sleep}' 'T' 'hlidac' '{tab}' '{tab}' '{tab}' '{ctrl-u}' 'zakaznici' '{tab}' '{tab}' \
+	"INSERT INTO zaznam VALUES (NEW.jmeno)" '{ctrl-s}' '{sleep}'
+printf "INSERT INTO demo.zakaznici (jmeno) VALUES ('Hedvika');\n" | $MYSQL 2>/dev/null
+printf 'SELECT co FROM demo.zaznam\n' | $MYSQL -N 2>/dev/null | grep -qx 'Hedvika' \
+	|| fail "the trigger from the form did not fire"
+echo "ok: and it fires"
+
+# A column taken out of the alter form, which nothing was written for: the form
+# closed, said nothing, and the column was still in the table. Only SQLite acted
+# on it, because SQLite writes the table again from the columns it is handed.
+# Two go here - `stara` is simply removed, and `cena` is removed with a new
+# column put in under its name, which only works with the old one dropped first.
+$MYSQL >/dev/null 2>&1 <<'SQL'
+CREATE TABLE demo.sloupce (id int NOT NULL PRIMARY KEY, nazev varchar(80) NOT NULL, stara text, cena int);
+INSERT INTO demo.sloupce VALUES (1, 'šroub', 'pryč', 5);
+SQL
+# The table is picked by name. Then eleven tabs to the third column's name: the
+# table's own field, and five to a column. A row removed leaves the cursor on the
+# one that moved up into its place.
+# Five statements, because every column that stays is said again here.
+screen "a column removed in the alter form is dropped" "5 statement(s), 0 row(s) affected" \
+	'{sleep}' '/' 'sloupce' '{enter}' '{sleep}' '{enter}' '{sleep}' 'a' '{sleep}' \
+	'{tab}{tab}{tab}{tab}{tab}{tab}{tab}{tab}{tab}{tab}{tab}' '{ctrl-k}' '{ctrl-k}' \
+	'{ctrl-n}' 'cena' '{ctrl-s}' '{sleep}'
+printf "SELECT GROUP_CONCAT(CONCAT(COLUMN_NAME, ' ', DATA_TYPE) ORDER BY ORDINAL_POSITION) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = 'demo' AND TABLE_NAME = 'sloupce'\n" \
+	| $MYSQL -N 2>/dev/null | grep -qx 'id int,nazev varchar,cena text' || fail "the columns removed in the form are not what the table lost"
+echo "ok: and the server no longer has it"
+
 echo "all good"

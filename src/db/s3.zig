@@ -582,7 +582,7 @@ pub const Db = struct {
             try rows.add(&.{
                 .{ .text = key },
                 .{ .number = std.fmt.parseInt(i64, response.get("content-length") orelse "0", 10) catch 0 },
-                .{ .text = response.get("last-modified") orelse "" },
+                .{ .text = try asListed(arena, response.get("last-modified") orelse "") },
                 .{ .text = trimQuotes(response.get("etag") orelse "") },
                 .{ .text = response.get("x-amz-storage-class") orelse "STANDARD" },
             });
@@ -1219,6 +1219,7 @@ pub const Db = struct {
                     .name = db.store.basename(path),
                     .kind = .file,
                     .size = std.fmt.parseInt(u64, response.get("content-length") orelse "0", 10) catch 0,
+                    .modified = http.secondsOf(response.get("last-modified") orelse ""),
                 };
             }
             // Not an object, so it is a folder if anything is under it. A prefix
@@ -1603,18 +1604,29 @@ fn whenever(text: []const u8) i64 {
     const hour = std.fmt.parseInt(i64, text[11..13], 10) catch return 0;
     const minute = std.fmt.parseInt(i64, text[14..16], 10) catch return 0;
     const second = std.fmt.parseInt(i64, text[17..19], 10) catch return 0;
-    return days(year, month, day) * 86400 + hour * 3600 + minute * 60 + second;
+    return http.days(year, month, day) * 86400 + hour * 3600 + minute * 60 + second;
 }
 
-/// Days from 1970 to that date. The civil calendar arithmetic that every C
-/// library hides inside timegm, which is not portable enough to call.
-fn days(year: i64, month: i64, day: i64) i64 {
-    const shifted = year - @intFromBool(month <= 2);
-    const era = @divFloor(shifted, 400);
-    const of_era = shifted - era * 400;
-    const of_year = @divTrunc(153 * (month + (if (month > 2) @as(i64, -3) else 9)) + 2, 5) + day - 1;
-    const day_of_era = of_era * 365 + @divTrunc(of_era, 4) - @divTrunc(of_era, 100) + of_year;
-    return era * 146097 + day_of_era - 719468;
+/// The `Last-Modified` of a HEAD - `Sun, 30 Aug 2015 12:36:00 GMT` - written the
+/// way a listing writes that time: `2015-08-30T12:36:00Z`.
+///
+/// One object has one `modified`, and which request happened to answer for it is
+/// not the reader's business. The grid lists; the whole-value view, and a filter
+/// on one key, ask with a HEAD - so the same cell read `2015-08-30T12:36:00.000Z`
+/// in the grid and `Sun, 30 Aug 2015 12:36:00 GMT` in the box drawn over it. The
+/// listing's form is the one kept: it is what the grid shows, it sorts as text,
+/// and `whenever` reads it.
+///
+/// To the second, with no `.000` after it. A header carries no more than that,
+/// and three digits made up here would be three digits the listing contradicts.
+///
+/// Anything that is not such a date comes back as it came, for the reason
+/// `whenever` gives: an odd date is still something to show.
+fn asListed(arena: std.mem.Allocator, header: []const u8) db.Error![]const u8 {
+    const date = http.parseDate(header) orelse return header;
+    return arena.print("{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}Z", .{
+        date.year, date.month, date.day, date.hour, date.minute, date.second,
+    });
 }
 
 /// A key as `encoding-type=url` sends it. That encoding is the one a form uses,
@@ -1888,6 +1900,69 @@ test "the time on an object becomes a number" {
     // And anything that is not a time at all is nothing rather than a wrong date.
     try testing.expectEqual(@as(i64, 0), whenever(""));
     try testing.expectEqual(@as(i64, 0), whenever("yesterday"));
+}
+
+test "the date a HEAD gives is written the way a listing writes it" {
+    var scratch = std.heap.ArenaAllocator.init(testing.allocator);
+    defer scratch.deinit();
+    const arena = scratch.allocator();
+
+    // The same moment as the listing above has it, less the milliseconds a
+    // header has no room for - and none are made up in their place.
+    try testing.expectEqualStrings("2015-08-30T12:36:00Z", try asListed(arena, "Sun, 30 Aug 2015 12:36:00 GMT"));
+    // What Garage answered with, where the grid said 2026-10-09T20:11:46.999Z:
+    // the two agree as far as the header goes.
+    const garage = try asListed(arena, "Fri, 09 Oct 2026 20:11:46 GMT");
+    try testing.expectEqualStrings("2026-10-09T20:11:46Z", garage);
+    try testing.expect(std.mem.startsWith(u8, "2026-10-09T20:11:46.999Z", garage[0 .. garage.len - 1]));
+    // The first and the last second of a year, a leap day, and every month by
+    // its name in whatever case. The day of the week is not looked at, so the
+    // twelve below all say Tuesday.
+    try testing.expectEqualStrings("2024-01-01T00:00:00Z", try asListed(arena, "Mon, 01 Jan 2024 00:00:00 GMT"));
+    try testing.expectEqualStrings("2024-02-29T12:00:00Z", try asListed(arena, "Thu, 29 Feb 2024 12:00:00 GMT"));
+    try testing.expectEqualStrings("2023-12-31T23:59:59Z", try asListed(arena, "Sun, 31 DEC 2023 23:59:59 GMT"));
+    const names = [_][]const u8{ "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
+    for (names, 1..) |name, number| {
+        const header = try arena.print("Tue, 05 {s} 2019 06:07:08 GMT", .{name});
+        const wanted = try arena.print("2019-{d:0>2}-05T06:07:08Z", .{number});
+        try testing.expectEqualStrings(wanted, try asListed(arena, header));
+    }
+    // A leap second is a second, and the space a header may have around it is
+    // not part of the date.
+    try testing.expectEqualStrings("2016-12-31T23:59:60Z", try asListed(arena, "Sat, 31 Dec 2016 23:59:60 GMT"));
+    try testing.expectEqualStrings("2015-08-30T12:36:00Z", try asListed(arena, " Sun, 30 Aug 2015 12:36:00 GMT "));
+
+    // What it writes is what `whenever` reads, and reads as the same second the
+    // listing's own text comes to.
+    try testing.expectEqual(whenever("2015-08-30T12:36:00.000Z"), whenever(try asListed(arena, "Sun, 30 Aug 2015 12:36:00 GMT")));
+    // And the file manager is told the same second by a listing, which goes
+    // through `whenever`, and by a `stat`, which reads the header for itself.
+    try testing.expectEqual(whenever("2015-08-30T12:36:00.000Z"), http.secondsOf("Sun, 30 Aug 2015 12:36:00 GMT"));
+
+    // Anything else is left as it came rather than turned into a wrong date: no
+    // header at all, a date that is one already, the two forms HTTP gave up on,
+    // another zone, a month there is not, and numbers that are not numbers.
+    for ([_][]const u8{
+        "",
+        "yesterday",
+        "2015-08-30T12:36:00.000Z",
+        "Sunday, 30-Aug-15 12:36:00 GMT",
+        "Sun Aug 30 12:36:00 2015",
+        "Sun, 30 Aug 2015 12:36:00 CET",
+        "Sun, 30 Aug 2015 14:36:00 +0200",
+        "Sun, 30 Okt 2015 12:36:00 GMT",
+        "Sun, 00 Aug 2015 12:36:00 GMT",
+        "Sun, 32 Aug 2015 12:36:00 GMT",
+        "Sun, 30 Aug 2015 24:36:00 GMT",
+        "Sun, 30 Aug 2015 12:60:00 GMT",
+        "Sun, 30 Aug 2015 12:36:61 GMT",
+        "Sun, +3 Aug 2015 12:36:00 GMT",
+        "Sun, 30 Aug 2_15 12:36:00 GMT",
+        "Sun, 30 Aug 2015 12-36-00 GMT",
+        "Sun,x30 Aug 2015 12:36:00 GMT",
+    }) |odd| {
+        try testing.expectEqualStrings(odd, try asListed(arena, odd));
+    }
 }
 
 test "the last page has no next, whatever token it carries" {

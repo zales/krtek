@@ -125,6 +125,19 @@ check "a file is not a directory" \
 check "a directory that is not there says so" \
 	"sftp://foo:heslo@127.0.0.1:$PORT/neexistuje?insecure=1" "there is nothing there"
 
+# --- and the grid ---
+#
+# The whole value of a cell is that cell's. `gv` asks the server again for the
+# one column the cursor is on and shows the first cell of what comes back - and
+# what came back was every column, so the box said `size` along the top and had
+# the file's name inside. A directory opens on the file manager, so `q` first,
+# for the grid; the name that sorts first there is the one with the spaces in
+# it, `ahoj` and a newline, five bytes.
+whole=$(python3 tests/screen.py "$ROOT" '{sleep}' 'q' '{tab}' '{right}' 'g' 'v' '{sleep}' '{keep}' 2>&1 |
+	grep -A1 'size ─ enter/esc closes' | tail -1 | sed 's/\(.*\)│.*$/\1/; s/ *$//; s/^.*│ //')
+[ "$whole" = "5" ] || fail "gv on the size of 0 august trip.txt should show 5, and shows '$whole'"
+echo "ok: gv shows the value under the cursor, and not the name of its row"
+
 # --- and the file manager, which is the only way the copying is reachable ---
 #
 # Driven through the pty harness rather than called directly, because what is

@@ -129,6 +129,15 @@ queues() {
 
 screen "the queues are on the grid, the one with a space in its name too" "dead letters" "$ROOT/%2F"
 
+# The whole value of a cell is that cell's. `gv` asks the broker again for the
+# one column the cursor is on and shows the first cell of what comes back - and
+# what came back was every column, so the box said `type` along the top and had
+# the queue's name inside.
+whole=$(SCREEN_COLS=118 SCREEN_ROWS=22 python3 tests/screen.py "$ROOT/%2F" '{tab}' '{right}' 'g' 'v' '{sleep}' '{keep}' 2>&1 |
+	grep -A1 'type ─ enter/esc closes' | tail -1 | sed 's/\(.*\)│.*$/\1/; s/ *$//; s/^.*│ //')
+[ "$whole" = "classic" ] || fail "gv on the type of dead letters should show classic, and shows '$whole'"
+echo "ok: gv shows the value under the cursor, and not the name of its row"
+
 # The console is the one way to a message, and what each of its two ways does
 # to the queue is on the screen rather than in a footnote - so it is checked
 # against the broker's own count, not against what the screen says about itself.

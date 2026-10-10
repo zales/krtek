@@ -11,6 +11,10 @@
 //! up. Those four are what makes a list of pods worth looking at rather than a
 //! list of names, and each is one line of arithmetic over fields that are there.
 //!
+//! One is not in the object at all: what a pod is using. That is measured by
+//! metrics-server and answered at an address of its own, so it is read here out
+//! of a second document, which the driver fetches and hands over.
+//!
 //! JSON in, cells out, and no connection anywhere near it.
 
 const std = @import("std");
@@ -46,6 +50,13 @@ pub const From = union(enum) {
     /// per container, and what somebody wants to know about a pod is its whole
     /// appetite - which is also what the scheduler placed it by.
     asked: Asked,
+    /// What a pod is using right now, of `cpu` or of `memory`. Nothing in the pod
+    /// says: `cell` answers nothing for this, and `usedText` reads it out of what
+    /// metrics-server said about the pod.
+    used: []const u8,
+    /// The kind of thing that owns this one - `ReplicaSet`, `StatefulSet`, `Job` -
+    /// which is who makes another when it is deleted. Empty where nothing does.
+    owner,
 };
 
 pub const Asked = struct {
@@ -112,14 +123,21 @@ pub const RESOURCES = [_]Resource{
         .columns = &.{
             NAME,
             .{ .name = "ready", .from = .ready },
-            .{ .name = "status", .from = .pod_status },
+            // What the pod is using, not what it asked for: a request is written
+            // once in a manifest and says nothing about the pod that is eating a
+            // node today. Empty where nobody measured it - a cluster with no
+            // metrics-server, a pod that is not running - because a zero there
+            // would read as idle. What it asked for is on the screen `enter` opens.
+            .{ .name = "cpu", .from = .{ .used = "cpu" } },
+            .{ .name = "memory", .from = .{ .used = "memory" } },
             .{ .name = "restarts", .from = .restarts, .numeric = true },
-            // What the pod asked for, which is what it was placed by. Empty where
-            // it asked for nothing, because that is a choice with consequences and
-            // a zero would read as having asked.
-            .{ .name = "cpu", .from = .{ .asked = .{ .which = "requests", .what = "cpu" } } },
-            .{ .name = "memory", .from = .{ .asked = .{ .which = "requests", .what = "memory" } } },
             AGE,
+            .{ .name = "status", .from = .pod_status },
+            // After the status and not before it: every pod of a deployment says
+            // the same word here, and the status is the one column a list of
+            // pods is scanned for - it should not be the one a narrow window
+            // cuts off.
+            .{ .name = "controlled by", .from = .owner },
             .{ .name = "ip", .from = .{ .at = "status.podIP" } },
             .{ .name = "node", .from = .{ .at = "spec.nodeName" } },
         },
@@ -516,16 +534,19 @@ pub fn quantityOf(text: []const u8) ?i64 {
     const suffix = trimmed[digits..];
 
     // The three a CPU is written in, all of them thousandths of each other.
-    // metrics-server answers in nanocores - `48209274n` is 48 millicores - and
-    // reading that as anything else is a busy node that looks idle.
+    // metrics-server answers in nanocores - `48209274n` is 49 millicores - and
+    // reading that as anything else is a busy node that looks idle. The two
+    // finer ones are rounded up, which is what kubectl does with them: a pod
+    // that is using a third of a millicore is using something, and `0m` is what
+    // one that is using nothing says.
     if (std.mem.eql(u8, suffix, "m")) {
         return @intFromFloat(number);
     }
     if (std.mem.eql(u8, suffix, "u")) {
-        return @intFromFloat(number / 1000);
+        return @intFromFloat(@ceil(number / 1000));
     }
     if (std.mem.eql(u8, suffix, "n")) {
-        return @intFromFloat(number / 1_000_000);
+        return @intFromFloat(@ceil(number / 1_000_000));
     }
     const scale: f64 = if (suffix.len == 0)
         1000 // a bare CPU count, in millicores
@@ -621,6 +642,86 @@ fn askedFor(arena: std.mem.Allocator, object: Json, which: Asked) ![]const u8 {
         bytesText(arena, total);
 }
 
+/// What a pod is using of `cpu` or of `memory`, added up over its containers, out
+/// of what metrics-server answered about that pod.
+///
+/// Null where there is nothing to add up: no answer about this pod at all, or one
+/// with no container in it that says. That is not the same as none - a pod that
+/// was started a moment ago has not been measured yet, and one that has finished
+/// never will be again.
+pub fn usedBy(measured: ?Json, what: []const u8) ?i64 {
+    const containers = at(measured orelse return null, "containers") orelse return null;
+    if (containers != .array) {
+        return null;
+    }
+    var total: i64 = 0;
+    var any = false;
+    for (containers.array.items) |one| {
+        const value = at(at(one, "usage") orelse continue, what) orelse continue;
+        if (value != .string) {
+            continue;
+        }
+        total += quantityOf(value.string) orelse continue;
+        any = true;
+    }
+    return if (any) total else null;
+}
+
+/// The same, as the cell it is: empty where nobody measured.
+pub fn usedText(arena: std.mem.Allocator, measured: ?Json, what: []const u8) ![]const u8 {
+    const total = usedBy(measured, what) orelse return "";
+    return if (std.mem.eql(u8, what, "cpu"))
+        coresText(arena, total)
+    else
+        bytesText(arena, total);
+}
+
+/// Whether a column holds an amount - of cores or of bytes - rather than text.
+/// Such a column is put in order by how much, not by how it is spelled.
+pub fn isAmount(column: Column) bool {
+    return switch (column.from) {
+        .quantity, .asked, .used => true,
+        else => false,
+    };
+}
+
+/// A cell `coresText` or `bytesText` wrote, as a number again, so that rows can
+/// be put in order by it: `900.0Ki` before `1.2Mi`, and `5m` before `10m` before
+/// `1`. Near enough for that and for nothing else - a tenth of a unit was lost
+/// when it was written.
+pub fn amountOf(text: []const u8) ?i64 {
+    // The one suffix `bytesText` writes that Kubernetes does not.
+    if (text.len > 1 and text[text.len - 1] == 'B' and std.ascii.isDigit(text[text.len - 2])) {
+        return std.fmt.parseInt(i64, text[0 .. text.len - 1], 10) catch null;
+    }
+    return quantityOf(text);
+}
+
+/// What kind of thing owns this object. The reference marked as the controller
+/// where there is one, because an object may be owned by several things and is
+/// only ever put back by one of them.
+fn ownerKind(object: Json) []const u8 {
+    const owners = at(object, "metadata.ownerReferences") orelse return "";
+    if (owners != .array) {
+        return "";
+    }
+    var found: []const u8 = "";
+    for (owners.array.items) |one| {
+        const kind = at(one, "kind") orelse continue;
+        if (kind != .string) {
+            continue;
+        }
+        const controls = at(one, "controller") orelse Json{ .bool = false };
+        if (controls == .bool and controls.bool) {
+            return kind.string;
+        }
+        if (found.len == 0) {
+            found = kind.string;
+        }
+    }
+    return found;
+}
+
 /// since the epoch, so a whole page is aged from one reading of the clock.
 pub fn cell(arena: std.mem.Allocator, object: Json, column: Column, now: i64) ![]const u8 {
     return switch (column.from) {
@@ -640,6 +741,9 @@ pub fn cell(arena: std.mem.Allocator, object: Json, column: Column, now: i64) ![
         .ports => try ports(arena, object),
         .quantity => |path| try readable(arena, at(object, path)),
         .asked => |which| try askedFor(arena, object, which),
+        // Not in the object: see `usedText`.
+        .used => "",
+        .owner => ownerKind(object),
     };
 }
 
@@ -718,6 +822,75 @@ pub fn epochOf(text: []const u8) ?i64 {
     const day_of_era = year_of_era * 365 + @divTrunc(year_of_era, 4) - @divTrunc(year_of_era, 100) + day_of_year;
     const days = era * 146097 + day_of_era - 719468;
     return days * 86400 + hour * 3600 + minute * 60 + second;
+}
+
+/// The marks a cell may be drawn as, where its column is one that counts things.
+/// Only a pod's containers are, so far.
+pub fn marks(arena: std.mem.Allocator, object: Json, column: Column) ![]const db.Mark {
+    return switch (column.from) {
+        .ready => containerMarks(arena, object),
+        else => &.{},
+    };
+}
+
+/// How each of a pod's containers is doing, in the order the pod names them.
+///
+/// One for every container the pod asked for, as with the count beside it: a
+/// pod that has not been scheduled has containers and no statuses, and those are
+/// containers that are not there yet rather than no containers.
+///
+/// A container waiting to be started again after it died is broken, not on its
+/// way: that is what a crash loop is for all but the instant in which it runs,
+/// and a mark that said otherwise would be saying it of the one pod in the list
+/// somebody is looking for.
+fn containerMarks(arena: std.mem.Allocator, object: Json) ![]const db.Mark {
+    const wanted = at(object, "spec.containers") orelse return &.{};
+    if (wanted != .array) {
+        return &.{};
+    }
+    const statuses: []const Json = switch (at(object, "status.containerStatuses") orelse Json{ .null = {} }) {
+        .array => |list| list.items,
+        else => &.{},
+    };
+    const out = try arena.alloc(db.Mark, wanted.array.items.len);
+    for (wanted.array.items, 0..) |container, i| {
+        out[i] = .waiting;
+        const name = at(container, "name") orelse continue;
+        if (name != .string) {
+            continue;
+        }
+        for (statuses) |status| {
+            const called = at(status, "name") orelse continue;
+            if (called == .string and std.mem.eql(u8, called.string, name.string)) {
+                out[i] = containerMark(status);
+                break;
+            }
+        }
+    }
+    return out;
+}
+
+fn containerMark(status: Json) db.Mark {
+    if (at(status, "state.running") != null) {
+        const ready = at(status, "ready") orelse Json{ .bool = false };
+        return if (ready == .bool and ready.bool) .ok else .waiting;
+    }
+    if (at(status, "state.terminated")) |ended| {
+        return if (exitedCleanly(ended)) .done else .failed;
+    }
+    // Waiting, or nothing said yet. What it is waiting after is what tells a
+    // container being started from one being started again.
+    if (at(status, "lastState.terminated")) |before| {
+        if (!exitedCleanly(before)) {
+            return .failed;
+        }
+    }
+    return .waiting;
+}
+
+fn exitedCleanly(ended: Json) bool {
+    const code = at(ended, "exitCode") orelse return true;
+    return code != .integer or code.integer == 0;
 }
 
 /// Ready out of asked for. The denominator is `spec.containers`, not the
@@ -891,7 +1064,9 @@ test "a pod's row is read and worked out from what the API answers" {
     const a = arena.allocator();
     const pod = try parsed(a,
         \\{"metadata": {"name": "api-7c9", "creationTimestamp": "2026-08-20T10:00:00Z",
-        \\              "labels": {"app": "api"}},
+        \\              "labels": {"app": "api"},
+        \\              "ownerReferences": [{"kind": "Widget", "name": "other"},
+        \\                                  {"kind": "ReplicaSet", "name": "api", "controller": true}]},
         \\ "spec": {"nodeName": "node-1", "containers": [
         \\     {"name": "api", "resources": {"requests": {"cpu": "100m", "memory": "64Mi"}}},
         \\     {"name": "sidecar", "resources": {"requests": {"cpu": "250m", "memory": "192Mi"}}}]},
@@ -909,11 +1084,21 @@ test "a pod's row is read and worked out from what the API answers" {
     try testing.expectEqualStrings("2d4h", try cellNamed(a, pod, resource, "age", now));
     try testing.expectEqualStrings("10.1.2.3", try cellNamed(a, pod, resource, "ip", now));
     try testing.expectEqualStrings("node-1", try cellNamed(a, pod, resource, "node", now));
+    // Owned by two things and put back by one of them, which is the one to name.
+    try testing.expectEqualStrings("ReplicaSet", try cellNamed(a, pod, resource, "controlled by", now));
 
     // What the pod asked for is the whole pod's appetite, not the first
     // container's: 100m and 250m is 350m, and 64Mi and 192Mi is 256Mi.
-    try testing.expectEqualStrings("350m", try cellNamed(a, pod, resource, "cpu", now));
-    try testing.expectEqualStrings("256.0Mi", try cellNamed(a, pod, resource, "memory", now));
+    const asked_cpu: Column = .{ .name = "c", .from = .{ .asked = .{ .which = "requests", .what = "cpu" } } };
+    const asked_memory: Column = .{ .name = "m", .from = .{ .asked = .{ .which = "requests", .what = "memory" } } };
+    try testing.expectEqualStrings("350m", try cell(a, pod, asked_cpu, now));
+    try testing.expectEqualStrings("256.0Mi", try cell(a, pod, asked_memory, now));
+
+    // And what it is using is not in the pod at all, so the pod alone says
+    // nothing about it - not what it asked for, which is a different number
+    // under the same heading and the easiest thing here to get wrong.
+    try testing.expectEqualStrings("", try cellNamed(a, pod, resource, "cpu", now));
+    try testing.expectEqualStrings("", try cellNamed(a, pod, resource, "memory", now));
 }
 
 test "a pod that asked for nothing says nothing, rather than asking for none" {
@@ -923,11 +1108,94 @@ test "a pod that asked for nothing says nothing, rather than asking for none" {
     const pod = try parsed(a,
         \\{"metadata": {"name": "bez"}, "spec": {"containers": [{"name": "one"}]}}
     );
-    const resource = find("pods").?;
     // Empty, not "0": not asking is a choice the scheduler treats differently
     // from asking for none, and a zero here would read as the second.
-    try testing.expectEqualStrings("", try cellNamed(a, pod, resource, "cpu", 0));
-    try testing.expectEqualStrings("", try cellNamed(a, pod, resource, "memory", 0));
+    for ([_][]const u8{ "requests", "limits" }) |which| {
+        for ([_][]const u8{ "cpu", "memory" }) |what| {
+            const column: Column = .{ .name = "x", .from = .{ .asked = .{ .which = which, .what = what } } };
+            try testing.expectEqualStrings("", try cell(a, pod, column, 0));
+        }
+    }
+    // And nobody owns it, which is said the same way.
+    try testing.expectEqualStrings("", try cellNamed(a, pod, find("pods").?, "controlled by", 0));
+}
+
+test "what a pod is using is added up over its containers, from what was measured" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // What metrics-server answers about one pod: nanocores and kibibytes, a
+    // container at a time.
+    const measured = try parsed(a,
+        \\{"metadata": {"name": "api-7c9", "namespace": "payments"},
+        \\ "timestamp": "2026-08-22T14:30:00Z", "window": "15s",
+        \\ "containers": [{"name": "api", "usage": {"cpu": "1820713n", "memory": "243814Ki"}},
+        \\                {"name": "sidecar", "usage": {"cpu": "0", "memory": "512Ki"}}]}
+    );
+    try testing.expectEqual(@as(?i64, 2), usedBy(measured, "cpu"));
+    try testing.expectEqual(@as(?i64, 244326 * 1024), usedBy(measured, "memory"));
+    try testing.expectEqualStrings("2m", try usedText(a, measured, "cpu"));
+    try testing.expectEqualStrings("238.6Mi", try usedText(a, measured, "memory"));
+
+    // Measured and idle is a zero, and says so.
+    const idle = try parsed(a, "{\"containers\": [{\"name\": \"one\", \"usage\": {\"cpu\": \"0\", \"memory\": \"0\"}}]}");
+    try testing.expectEqualStrings("0m", try usedText(a, idle, "cpu"));
+    try testing.expectEqualStrings("0B", try usedText(a, idle, "memory"));
+}
+
+test "a pod nobody measured says nothing, rather than using none" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // No answer about the pod at all: a cluster with no metrics-server, a pod
+    // started a moment ago, one that has finished.
+    try testing.expectEqual(@as(?i64, null), usedBy(null, "cpu"));
+    try testing.expectEqualStrings("", try usedText(a, null, "cpu"));
+    try testing.expectEqualStrings("", try usedText(a, null, "memory"));
+    // And an answer with nothing in it is the same, not a sum of nothing.
+    for ([_][]const u8{
+        "{}",
+        "{\"containers\": []}",
+        "{\"containers\": \"none\"}",
+        "{\"containers\": [{\"name\": \"one\"}]}",
+        "{\"containers\": [{\"name\": \"one\", \"usage\": {\"cpu\": \"plenty\"}}]}",
+    }) |text| {
+        const nothing = try parsed(a, text);
+        try testing.expectEqualStrings("", try usedText(a, nothing, "cpu"));
+        try testing.expectEqualStrings("", try usedText(a, nothing, "memory"));
+    }
+}
+
+test "an amount is put in order by how much it is, not by how it is spelled" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // Each of these is smaller than the one after it, and as text most of them
+    // are not: "5m" comes after "10m", and "900.0Ki" after "1.2Mi".
+    const cores = [_]i64{ 0, 5, 10, 999, 1000, 1500, 14000 };
+    const bytes = [_]i64{ 0, 512, 900 * 1024, 1258291, 250 << 20, 2 << 30 };
+    var last: i64 = -1;
+    for (cores) |milli| {
+        const read = amountOf(try coresText(a, milli)).?;
+        try testing.expect(read > last);
+        last = read;
+    }
+    last = -1;
+    for (bytes) |amount| {
+        const read = amountOf(try bytesText(a, amount)).?;
+        try testing.expect(read > last);
+        last = read;
+    }
+    // What was not measured is not an amount.
+    try testing.expectEqual(@as(?i64, null), amountOf(""));
+    try testing.expectEqual(@as(?i64, null), amountOf("B"));
+
+    // The columns this is for, and not the ones that only look like numbers.
+    const pods = find("pods").?;
+    for (pods.columns) |column| {
+        const amount = std.mem.eql(u8, column.name, "cpu") or std.mem.eql(u8, column.name, "memory");
+        try testing.expectEqual(amount, isAmount(column));
+    }
 }
 
 test "a node says what is left to place pods in, in units somebody reads" {
@@ -969,6 +1237,59 @@ test "an object missing half of itself gives empty cells, not wrong ones" {
     const waiting = try parsed(a, "{\"spec\": {\"containers\": [{\"name\": \"a\"}]}, \"status\": {\"phase\": \"Pending\"}}");
     try testing.expectEqualStrings("0/1", try cell(a, waiting, .{ .name = "ready", .from = .ready }, now));
     try testing.expectEqualStrings("Pending", try cell(a, waiting, .{ .name = "s", .from = .pod_status }, now));
+}
+
+test "a pod's containers are a mark each, by what each is doing" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const column: Column = .{ .name = "ready", .from = .ready };
+    // One of every kind, named out of order in the statuses: the kubelet lists
+    // them as it likes and the pod's own order is the one somebody wrote.
+    const pod = try parsed(a,
+        \\{"spec": {"containers": [{"name": "up"}, {"name": "starting"}, {"name": "slow"},
+        \\                         {"name": "looping"}, {"name": "killed"}, {"name": "finished"},
+        \\                         {"name": "restarted"}, {"name": "unheard"}]},
+        \\ "status": {"containerStatuses": [
+        \\   {"name": "finished", "ready": false, "state": {"terminated": {"exitCode": 0, "reason": "Completed"}}},
+        \\   {"name": "up", "ready": true, "state": {"running": {}}},
+        \\   {"name": "starting", "ready": false, "state": {"waiting": {"reason": "ContainerCreating"}}},
+        \\   {"name": "slow", "ready": false, "state": {"running": {}}},
+        \\   {"name": "looping", "ready": false, "state": {"waiting": {"reason": "CrashLoopBackOff"}},
+        \\    "lastState": {"terminated": {"exitCode": 1, "reason": "Error"}}},
+        \\   {"name": "killed", "ready": false, "state": {"terminated": {"exitCode": 137, "reason": "OOMKilled"}}},
+        \\   {"name": "restarted", "ready": true, "state": {"running": {}},
+        \\    "lastState": {"terminated": {"exitCode": 1, "reason": "Error"}}}]}}
+    );
+    try testing.expectEqualSlices(db.Mark, &.{
+        .ok,
+        // Being started, and up but not ready: neither is there yet.
+        .waiting,
+        .waiting,
+        // Waiting to be started again after dying is broken, not on its way -
+        // which is what a crash loop is for all but the instant it runs.
+        .failed,
+        .failed,
+        .done,
+        // One that died once and is up again is up.
+        .ok,
+        // And one the kubelet has said nothing about is not there yet.
+        .waiting,
+    }, try marks(a, pod, column));
+    // The count beside them is the same pod read the same way: two are ready.
+    try testing.expectEqualStrings("2/8", try cell(a, pod, column, 0));
+
+    // A pod nobody has scheduled has containers and no statuses, and that is a
+    // mark for each of them rather than none.
+    const pending = try parsed(a, "{\"spec\": {\"containers\": [{\"name\": \"a\"}, {\"name\": \"b\"}]}}");
+    try testing.expectEqualSlices(db.Mark, &.{ .waiting, .waiting }, try marks(a, pending, column));
+    // Something that is not a pod has none, and neither has any other column.
+    try testing.expectEqual(@as(usize, 0), (try marks(a, try parsed(a, "{}"), column)).len);
+    for (find("pods").?.columns) |other| {
+        if (other.from != .ready) {
+            try testing.expectEqual(@as(usize, 0), (try marks(a, pod, other)).len);
+        }
+    }
 }
 
 test "a pod's status is what kubectl prints, which is not its phase" {
@@ -1134,9 +1455,16 @@ test "a quantity is read in the units it was written in, not the ones it looks l
     // What metrics-server answers in. A node using 48 millicores writes it as
     // forty-eight million nanocores, and reading that as millicores is a busy
     // machine that looks asleep - which is what it looked like the first time.
-    try testing.expectEqual(@as(?i64, 48), quantityOf("48209274n"));
+    // Rounded up, as kubectl rounds it, so the two say the same number.
+    try testing.expectEqual(@as(?i64, 49), quantityOf("48209274n"));
     try testing.expectEqual(@as(?i64, 1000), quantityOf("1000000000n"));
     try testing.expectEqual(@as(?i64, 5), quantityOf("5000u"));
+    // Something is not nothing: a third of a millicore is 1m, and only a pod
+    // using none at all says 0m.
+    try testing.expectEqual(@as(?i64, 1), quantityOf("312455n"));
+    try testing.expectEqual(@as(?i64, 1), quantityOf("1u"));
+    try testing.expectEqual(@as(?i64, 0), quantityOf("0n"));
+    try testing.expectEqual(@as(?i64, 0), quantityOf("0"));
 
     // Memory. `Ki` is a thousand and twenty-four and `K` is a thousand, which is
     // the pair this exists to keep apart.

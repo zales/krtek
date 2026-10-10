@@ -857,6 +857,38 @@ finished is phase `Succeeded` where kubectl says `Completed` - so a column that
 showed the phase would call the one broken pod in a namespace healthy, which is
 the single thing anybody scans a pod list for.
 
+**A pod's containers are a square each.** What kubectl writes as `1/2` is drawn as
+`▪▫`: filled for a container that is ready and hollow for one that is not, so
+the row says how many are up to somebody who cannot tell the colours apart, and
+the colour says which kind of not up - green for ready, amber for one that is
+being started or is up and not ready yet, red for one that died or is waiting to
+be started again after dying, grey for one that finished as it was meant to. A
+crash loop is red for all but the instant its container runs, although that
+container is `waiting` nearly all the time: what it is waiting for is to be
+started again. The value is still `1/2` - that is what the column is filtered on
+and put in order by, what `E` writes to a file and what is copied - and the
+squares are only how the grid draws it. Which is the engine's to say and the
+interface's to draw: a driver hands a mark for each thing a cell counts, and the
+grid knows nothing about what a container is.
+
+**A pod's `cpu` and `memory` are what it is using, not what it asked for.** A
+request is written once in a manifest and says nothing about the pod that is
+eating a node today, which is the one somebody opens a list of pods to find - so
+`o` on either column puts them in order of how much, `5m` before `10m` and
+`900.0Ki` before `1.2Mi`. The figures are metrics-server's, added up over the
+pod's containers and rounded the way `kubectl top` rounds them. That is an add-on
+and a second request, and neither is allowed to stop a list of pods from opening:
+on a cluster without one, for an account that may not ask it, and for a pod that
+is not running, the two cells are empty rather than zero, because nobody measured
+and that is not the same as idle. `TOP pods` is the same question asked on
+purpose, and says why it cannot be answered. What a pod asked for and what it is
+limited to are on the screen `enter` opens, under what it is using, where the
+three numbers can be read against each other.
+
+What controls a pod - `ReplicaSet`, `StatefulSet`, `Job` - has a column too, after
+the status rather than before it: every pod of a deployment says the same word
+there, and that is not worth the status falling off the edge of a narrow window.
+
 **`enter` on a row opens a screen about it.** Everything the grid had room for
 and everything it did not: what each container is doing, what the last one died of
 and with what exit code, the labels, and the events - which is where a failed image
@@ -1245,11 +1277,16 @@ permanent.
 | `src/sqlite.zig` | the SQLite C declarations |
 | `src/tui/term.zig` | the terminal: a thin adapter over libvaxis |
 | `src/tui/app.zig` | state, the loaded page, and everything that runs SQL |
+| `src/tui/forms.zig` | the forms: what each asks, and what is done with the answers |
+| `src/tui/connection_form.zig` | the form a connection is added in, which builds itself again for each engine |
+| `src/tui/dialing.zig` | opening a connection on a thread of its own, with a panel that can be given up on |
+| `src/tui/file_actions.zig` | what the two file panes do: copying, removing, renaming, and asking first |
 | `src/tui/editor.zig` | the SQL editor and the tokenizer that colours it |
 | `src/tui/fuzzy.zig` | the fuzzy match shared by the palette and the filter |
 | `src/tui/form.zig` | the form widget every dialog is built from |
 | `src/tui/draw.zig` | rendering |
 | `src/tui/input.zig` | the key map and the command palette |
+| `src/tui/bench.zig` | the program with no terminal under it, for the unit tests |
 | `src/tui/connections.zig` | the saved connections and where each keeps its password |
 | `src/db/kafka.zig` | Kafka: the protocol, the compression codecs, TLS and SASL |
 | `src/db/ask.zig` | what the interface asks for, and the SQL it renders to |
@@ -1285,6 +1322,28 @@ that changed; a resize arrives as an event, so there is no polling and no signal
 handler.
 
 ## Testing it
+
+`zig build test` runs the unit tests, and most of what a key does is among them.
+Everything drawn goes into the cells libvaxis keeps, and those need no terminal:
+[src/tui/bench.zig](src/tui/bench.zig) is the loop `main` runs - a key, then a
+frame - over a screen that is only cells, on a SQLite file in a directory of its
+own. A test types a script, reads the screen back as text and asks the database
+what became of it, as fast as the code runs:
+
+```zig
+var bench = try Bench.open(BOOKS);
+defer bench.close();
+try bench.keys("j{enter}jx");
+try bench.says("1 row(s) deleted");
+try bench.expectAsked("SELECT title FROM books ORDER BY id", "RUR Žert Saturnin");
+```
+
+The keys, the forms and the drawing are tested that way, beside the code they
+test. One of them draws every screen at eight window sizes and looks for
+anything past the edge, which is what found the structure of a table falling
+over on a window twenty-four columns wide. What that cannot say is whether a
+terminal would agree - how wide it draws a character, what it sends for a key -
+and that is what the rest of this section is for.
 
 A terminal app cannot be checked by a human on every change, so
 [tests/screen.py](tests/screen.py) runs the binary in a pseudo terminal, feeds it
@@ -1476,6 +1535,17 @@ with `CHANGE COLUMN`. The MySQL one earned its keep on the first run: a
 `decimal(12,2)` was going through a float on the way to the screen, so `2499.50`
 arrived as `2499.5`.
 
+The PostgreSQL one also runs the unit test that wants a server: every schema
+statement the driver writes, run as written, in a schema of its own. A statement
+compared only with a string the same file wrote says nothing about whether a
+server would take it - a trigger was a syntax error for as long as that was the
+only check - so it is handed one with `zig build test
+-Dagainst=KRTEK_POSTGRES=postgres://…`. An option and not a variable in the
+shell: a test run is kept and handed back while the binary is the same, whatever
+is in the environment, so the variable alone got yesterday's answer, with every
+test that wants a server skipped. Both suites make a trigger through the form
+and then check that it fires.
+
 ```sh
 zig build && ./tests/postgres.sh
 zig build && ./tests/mysql.sh
@@ -1512,6 +1582,17 @@ up on neither holds up the next one nor writes on its panel.
 
 ```sh
 zig build && ./tests/connecting.sh
+```
+
+[tests/saved.sh](tests/saved.sh) is about the file the list of connections is
+kept in, when it cannot be written. A connection saved from the form, one
+removed and one marked read-only each have to say that they did not reach the
+file - and still be saying it after the connection the form goes on to open has
+written its own line over the first - while opening one, which only moves it to
+the front of a list somebody may keep read-only on purpose, says nothing:
+
+```sh
+zig build && ./tests/saved.sh
 ```
 
 [tests/mssql.sh](tests/mssql.sh) is worth more than the rest of these, because

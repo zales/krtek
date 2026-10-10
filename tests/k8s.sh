@@ -32,8 +32,10 @@ command -v kubectl >/dev/null || { echo "kubectl is the yardstick here and is no
 
 echo "starting $IMAGE"
 docker rm -f "$NAME" >/dev/null 2>&1 || true
+# With its metrics-server, which the other two add-ons are not needed for: what
+# a pod is using is a column, and it is measured by nothing else.
 docker run -d --name "$NAME" --privileged -p 6443:6443 "$IMAGE" \
-	server --disable=traefik --disable=servicelb --disable=metrics-server --tls-san=127.0.0.1 >/dev/null
+	server --disable=traefik --disable=servicelb --tls-san=127.0.0.1 >/dev/null
 
 export KUBECONFIG="$WORK/kubeconfig"
 printf 'waiting for the cluster'
@@ -47,6 +49,10 @@ kubectl get nodes >/dev/null 2>&1 || { echo " the cluster never came up" >&2; ex
 echo " up"
 
 kubectl create namespace payments >/dev/null
+# A pod made by hand is refused until the namespace has its service account,
+# which arrives a moment after the namespace does. A deployment's pods are made
+# by a controller that tries again; the one bare pod below is not.
+until kubectl -n payments get serviceaccount default >/dev/null 2>&1; do sleep 1; done
 kubectl apply -f - >/dev/null <<'YAML'
 apiVersion: apps/v1
 kind: Deployment
@@ -77,6 +83,21 @@ spec:
       - name: broken
         image: busybox:1.36
         command: ["sh","-c","exit 1"]
+---
+# One that holds on to thirty megabytes, among pods that hold on to none. What a
+# pod is using is read from another place than the pod and matched to it by name,
+# and a list where every pod uses the same would look right with them shuffled.
+apiVersion: v1
+kind: Pod
+metadata: {name: hungry, namespace: payments}
+spec:
+  containers:
+  - name: hungry
+    image: busybox:1.36
+    command: ["sh","-c","x=$(head -c 30000000 /dev/zero | tr '\\0' a); while true; do sleep 30; done"]
+    resources:
+      requests: {cpu: 50m, memory: 48Mi}
+      limits: {memory: 256Mi}
 ---
 apiVersion: v1
 kind: Service
@@ -189,6 +210,15 @@ screen() {
 	python3 tests/screen.py "$1" "$2" "$3" "$4" "$5" '{sleep}' '{keep}' 2>&1
 }
 
+# And the grid alone: the sidebar and the rule that divides it off come first on
+# every line. The rule is spelled as the two it can be and not as a set of them,
+# because a sed that reads bytes reads such a set as a set of bytes - and the
+# first byte of a rule is the first byte of the squares a pod's containers are
+# drawn as, so everything up to the last square on the line went with it.
+grid() {
+	sed -E 's/^.*(┃|│)//'
+}
+
 ROOT=k8s://default/payments
 
 check "the admin's client certificate gets in" "$ROOT" "Kubernetes v1.31"
@@ -212,8 +242,23 @@ check "a context that is not there says which ones are" "k8s://staging" "there i
 # merely into whatever both happen to see: it goes Error between restarts, and
 # two views agreeing on Error is agreement about a state the checks below are
 # not about.
+# The status is the seventh thing on a row here and the third on kubectl's: what
+# a pod is using, how often it has restarted and how old it is come before it. A
+# cell with nothing in it still says NULL, so the count holds.
+#
+# And what kubectl writes as 1/2 is drawn here as a square a container, filled
+# for one that is ready and hollow for one that is not - so counting the two
+# kinds gives kubectl's two numbers back, which is what is compared.
 for _ in $(seq 1 10); do
-	mine=$(screen "$ROOT" '{keep}' | sed -n '4,16p' | sed 's/^.*[┃│]//' | awk 'NF >= 3 {print $1, $2, $3}' | sort)
+	mine=$(screen "$ROOT" '{keep}' | sed -n '4,16p' | grid |
+		awk 'NF >= 7 {
+			drawn = $2
+			up = gsub(/▪/, "", drawn)
+			down = gsub(/▫/, "", drawn)
+			# Anything left over is not a square, and is shown as it came so
+			# that the comparison fails on it rather than counting past it.
+			print $1, (drawn == "" ? up "/" (up + down) : $2), $7
+		}' | sort)
 	theirs=$(kubectl -n payments get pods --no-headers | awk '{print $1, $2, $3}' | sort)
 	if [ "$mine" = "$theirs" ] && printf '%s' "$theirs" | grep -q CrashLoopBackOff; then
 		break
@@ -228,10 +273,43 @@ if [ "$mine" != "$theirs" ]; then
 fi
 echo "ok: the pod list matches kubectl, name for name and state for state"
 
+# The squares themselves, and not only their count: every pod of the deployment
+# that works is one filled square, and the one that keeps dying is a hollow one.
+# Asked more than once, for the pod of the three that is last to be ready.
+for _ in $(seq 1 6); do
+	squares=$(screen "$ROOT" '{keep}' | grid |
+		awk '$1 ~ /^(api|broken)-/ {print substr($1, 1, 3), $2}' | sort -u)
+	[ "$squares" = "$(printf 'api ▪\nbro ▫')" ] && break
+	sleep 3
+done
+[ "$squares" = "$(printf 'api ▪\nbro ▫')" ] || {
+	printf '%s\n' "$squares" >&2
+	fail "a ready container should be a filled square and one that is not a hollow one"
+}
+echo "ok: a container is a square, filled where it is ready and hollow where it is not"
+
 # The two states that are not the phase, which is the whole point of the column.
 printf '%s' "$mine" | grep -q CrashLoopBackOff || fail "a crash-looping pod should not read as Running"
 printf '%s' "$mine" | grep -q Completed || fail "a finished pod should not read as Succeeded"
 echo "ok: a broken pod says CrashLoopBackOff and a finished one says Completed"
+
+# The whole value of a cell is that cell's. `gv` asks the engine again for the
+# one column the cursor is on and shows the first cell of what comes back - and
+# what came back had every column in it, so the box said `status` along the top
+# and the pod's name inside. The third column of the first pod, then, against
+# what kubectl says of that pod; asked more than once for the reason the list
+# above is.
+pod=$(screen "$ROOT" '{keep}' | sed -n '4p' | sed 's/^.*[┃│]//' | awk '{print $1}')
+[ -n "$pod" ] || fail "there is no first pod to ask the whole value of"
+for _ in $(seq 1 6); do
+	whole=$(python3 tests/screen.py "$ROOT" '{tab}' '{right}{right}' 'g' 'v' '{sleep}' '{keep}' 2>&1 |
+		grep -A1 'status ─ enter/esc closes' | tail -1 | sed 's/ *│ *$//; s/^.*│ //')
+	theirs=$(kubectl -n payments get pod "$pod" --no-headers | awk '{print $3}')
+	[ "$whole" = "$theirs" ] && break
+	sleep 3
+done
+[ "$whole" = "$theirs" ] || fail "gv on the status of $pod should show $theirs, and shows '$whole'"
+echo "ok: gv shows the value under the cursor, and not the name of its row"
 
 # Writing: the two things this driver does, checked against the cluster itself.
 screen "$ROOT" 's' 'SCALE deployments api 5' '{ctrl-s}' >/dev/null
@@ -442,16 +520,100 @@ printf '%s' "$summary" | grep -q "ready of $nodes" || {
 }
 echo "ok: CLUSTER says what the cluster is and what is spoken for"
 
-# And what is actually being used, which a cluster may not know. This one does
-# not - k3s is started without metrics-server above - so what is checked is that
-# it says so rather than answering zero, which is the difference between "idle"
-# and "nobody is measuring".
-out=$(python3 tests/screen.py "$ROOT" 's' 'TOP nodes' '{ctrl-s}' '{sleep}' '{keep}' 2>&1)
-printf '%s' "$out" | grep -q "no metrics-server" || {
-	printf '%s\n' "$out" >&2
-	fail "TOP on a cluster without metrics-server should say so"
+# What the pods are using, which is what their cpu and memory columns say. It is
+# metrics-server that knows, and it takes a minute after a cluster comes up to
+# have measured anything - so this waits for kubectl to be told first.
+printf 'waiting for the pods to be measured'
+for _ in $(seq 1 90); do
+	kubectl -n payments top pod hungry --no-headers >/dev/null 2>&1 &&
+		kubectl -n payments top pod shellme --no-headers >/dev/null 2>&1 && break
+	printf .
+	sleep 2
+done
+echo " measured"
+kubectl -n payments top pod hungry --no-headers >/dev/null 2>&1 ||
+	fail "metrics-server never measured the pods, so there is nothing to compare against"
+
+# One row of the pod list, by the pod's name, without the sidebar in front of it.
+row_of() {
+	printf '%s\n' "$1" | grid | awk -v pod="$2" '$1 ~ "^" pod {print; exit}'
 }
-echo "ok: TOP says when there is nothing measuring, rather than answering zero"
+
+# Against kubectl, to the megabyte. Asked more than once: the two are read a
+# moment apart, and a measurement taken in between is a different measurement.
+for _ in $(seq 1 6); do
+	listed=$(screen "$ROOT" '{keep}')
+	mine=$(row_of "$listed" hungry | awk '{print $4}')
+	theirs=$(kubectl -n payments top pod hungry --no-headers | awk '{print $3}')
+	near=$(awk -v a="${mine%Mi}" -v b="${theirs%Mi}" 'BEGIN {d = a - b; print (d > -2 && d < 2) ? "yes" : "no"}')
+	case "$mine" in *Mi) [ "$near" = "yes" ] && break ;; esac
+	sleep 3
+done
+case "$mine" in *Mi) ;; *) printf '%s\n' "$listed" >&2; fail "a pod's memory should be what it is using, in units somebody reads" ;; esac
+[ "$near" = "yes" ] || fail "hungry is using $theirs by kubectl and $mine here"
+echo "ok: a pod's memory is what kubectl top says it is using ($mine)"
+
+# And it is that pod's, not a neighbour's: the one holding thirty megabytes says
+# more than twenty, and one that only sleeps says less than ten. What hungry
+# asked for is 48Mi, which is what this column used to say.
+[ "$(awk -v a="${mine%Mi}" 'BEGIN {print (a > 20 && a != 48) ? "yes" : "no"}')" = "yes" ] ||
+	fail "hungry should say what it is using ($mine), which is more than 20Mi and is not its request"
+other=$(row_of "$listed" shellme | awk '{print $4}')
+case "$other" in
+	*Ki|[0-9].[0-9]Mi) ;;
+	*) printf '%s\n' "$listed" >&2; fail "a pod that only sleeps should not be using $other" ;;
+esac
+row_of "$listed" hungry | awk '{print $3}' | grep -qE '^[0-9]+m?$' || {
+	printf '%s\n' "$listed" >&2
+	fail "a pod's cpu should be what it is using, in cores or thousandths of one"
+}
+echo "ok: and it is that pod's own, not its neighbour's"
+
+# A pod that has finished is not measured, and says nothing rather than zero.
+row_of "$listed" migrate | awk '{print $3, $4}' | grep -q '^NULL NULL$' || {
+	printf '%s\n' "$listed" >&2
+	fail "a pod that is not running should say nothing about what it is using"
+}
+echo "ok: a pod nobody is measuring says nothing, rather than using none"
+
+# And what puts a pod back when it is deleted, which is in the pod: a job's pod
+# says Job and a deployment's says ReplicaSet, as kubectl describe would.
+for pod in migrate api; do
+	name=$(row_of "$listed" "$pod" | awk '{print $1}')
+	mine=$(row_of "$listed" "$pod" | awk '{print $8}')
+	theirs=$(kubectl -n payments get pod "$name" -o jsonpath='{.metadata.ownerReferences[0].kind}')
+	[ -n "$theirs" ] && [ "$mine" = "$theirs" ] || {
+		printf '%s\n' "$listed" >&2
+		fail "$name is controlled by a $theirs, and here it says $mine"
+	}
+done
+echo "ok: a pod says what controls it"
+
+# Put in order by how much, the hungriest is on top - which as text it would not
+# be: every pod here that says Ki sorts after one that says 30.1Mi.
+sorted=$(python3 tests/screen.py "$ROOT" '{tab}' '{right}' '{right}' '{right}' \
+	'o' '{sleep}' 'o' '{sleep}' '{keep}' 2>&1)
+printf '%s' "$sorted" | grep -q "order memory desc" || {
+	printf '%s\n' "$sorted" >&2
+	fail "o twice on the memory column should order by it, largest first"
+}
+[ "$(printf '%s\n' "$sorted" | sed -n '4p' | grid | awk '{print $1}')" = "hungry" ] || {
+	printf '%s\n' "$sorted" >&2
+	fail "ordered by memory, the pod using the most should come first"
+}
+echo "ok: ordered by memory, the pod using the most comes first"
+
+# What it asked for and what it is limited to are on the screen about it, under
+# what it is using - which is where the grid's old two columns went.
+about=$(python3 tests/screen.py "$ROOT" '{tab}' '{right}' '{right}' '{right}' \
+	'o' '{sleep}' 'o' '{sleep}' '{enter}' '{sleep}' '{keep}' 2>&1)
+for expected in "memory  [0-9.]*Mi" "memory asked  48.0Mi" "memory limit  256.0Mi" "cpu asked  50m"; do
+	printf '%s' "$about" | grep -q "$expected" || {
+		printf '%s\n' "$about" >&2
+		fail "the screen about a pod should say: $expected"
+	}
+done
+echo "ok: the screen about a pod says what it uses, what it asked for and its limit"
 
 # A node's row carries what it has room for.
 row=$(python3 tests/screen.py "$ROOT" 's' 'GET nodes' '{ctrl-s}' '{sleep}' '{keep}' 2>&1)
@@ -594,5 +756,29 @@ if [ -n "${SHOTS:-}" ]; then
 		'{tab}' "$down" '{enter}' '{wait}'
 	echo "ok: docs/kubernetes.svg and docs/pod.svg regenerated"
 fi
+
+# And a cluster may not know any of what its pods are using. This one stops
+# knowing here - the API that metrics-server answers at is taken away, which is
+# why this is last - so what is checked is that TOP says so rather than answering
+# zero, which is the difference between "idle" and "nobody is measuring".
+kubectl delete apiservice v1beta1.metrics.k8s.io >/dev/null
+for _ in $(seq 1 30); do
+	kubectl top nodes >/dev/null 2>&1 || break
+	sleep 1
+done
+out=$(python3 tests/screen.py "$ROOT" 's' 'TOP nodes' '{ctrl-s}' '{sleep}' 'gm' '{sleep}' '{keep}' 2>&1)
+printf '%s' "$out" | grep -q "no metrics-server" || {
+	printf '%s\n' "$out" >&2
+	fail "TOP on a cluster without metrics-server should say so"
+}
+echo "ok: TOP says when there is nothing measuring, rather than answering zero"
+
+# The list of pods still opens there, with every pod in it and nothing made up.
+unmeasured=$(screen "$ROOT" '{keep}')
+row_of "$unmeasured" hungry | awk '{print $3, $4, $7}' | grep -q '^NULL NULL Running$' || {
+	printf '%s\n' "$unmeasured" >&2
+	fail "without metrics-server a pod should be listed, with nothing said about what it uses"
+}
+echo "ok: without metrics-server the pods are still listed, and their usage is empty"
 
 echo "all good"

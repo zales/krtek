@@ -554,9 +554,11 @@ pub const Db = struct {
         return list.items;
     }
 
-    /// PostgreSQL alters in place, so an alter has nothing to carry over.
-    pub fn alterContext(_: *Db, _: std.mem.Allocator, _: db.Table, cols: []const db.Column) db.Error!db.AlterContext {
-        return .{ .columns = cols };
+    /// PostgreSQL alters in place, so an alter has nothing to carry over - but
+    /// it does have to know what the table is like now, to say only what is
+    /// different. See `Ddl.alterTable`.
+    pub fn alterContext(self: *Db, arena: std.mem.Allocator, table: db.Table, cols: []const db.Column) db.Error!db.AlterContext {
+        return .{ .columns = cols, .before = try self.columns(arena, table) };
     }
 
     /// `'schema.name'::regclass`, which every catalog query keys off.
@@ -800,9 +802,33 @@ pub const Ddl = struct {
     }
 
     /// PostgreSQL alters in place: one statement per difference, no rebuild.
+    ///
+    /// Per difference, which it was not: every column that already existed had
+    /// its type set, its NOT NULL set or dropped and its default set or dropped,
+    /// changed or not. For most columns that is three statements that do
+    /// nothing. For a column that numbers itself - `GENERATED … AS IDENTITY`,
+    /// which is how PostgreSQL has said `serial` since version 10 - `DROP
+    /// DEFAULT` is refused, and for one worked out from the others so is the
+    /// type: so a table with either could not be altered at all, whichever
+    /// column the change was to. And `SET NOT NULL` reads the whole table to
+    /// make sure, once for every column that was already not null.
+    ///
+    /// `context.before` is the table as it is now. With nothing there - a caller
+    /// that did not ask the server - everything is said, as it was.
+    ///
+    /// `context.removed` is the columns to drop, and nothing was written for
+    /// them: a column taken out of the form was simply not in `cols`, and what
+    /// is not there is not looked at. They go last, after everything that might
+    /// be refused, except one whose name is wanted again - that one has to be
+    /// out of the way first. No CASCADE: a view that reads the column is a
+    /// reason to be told, not something to lose along with it.
     pub fn alterTable(_: Ddl, out: *List, a: std.mem.Allocator, table: db.Table, new_name: []const u8, cols: []const db.Column, context: db.AlterContext) !void {
-        _ = context;
         var current = table;
+        for (context.removed) |name| {
+            if (db.AlterContext.takenAgain(cols, name)) {
+                try dropColumn(out, a, current, name);
+            }
+        }
         for (cols) |column| {
             if (column.original.len == 0) {
                 try out.appendSlice(a, "ALTER TABLE ");
@@ -832,7 +858,14 @@ pub const Ddl = struct {
                 try db.quoteName(out, a, column.name);
                 try out.appendSlice(a, ";\n");
             }
-            if (column.type.len != 0) {
+            // The column as it is now, by the name it had before this form.
+            const was: ?db.Column = for (context.before) |known| {
+                if (std.mem.eql(u8, known.name, column.original)) {
+                    break known;
+                }
+            } else null;
+            const same_type = if (was) |known| std.mem.eql(u8, known.type, column.type) else false;
+            if (column.type.len != 0 and !same_type) {
                 try out.appendSlice(a, "ALTER TABLE ");
                 try db.quoteTable(out, a, current);
                 try out.appendSlice(a, " ALTER COLUMN ");
@@ -845,25 +878,33 @@ pub const Ddl = struct {
                 try out.appendSlice(a, column.type);
                 try out.appendSlice(a, ";\n");
             }
-            try out.appendSlice(a, "ALTER TABLE ");
-            try db.quoteTable(out, a, current);
-            try out.appendSlice(a, " ALTER COLUMN ");
-            try db.quoteName(out, a, column.name);
-            try out.appendSlice(a, if (column.notnull) " SET NOT NULL;\n" else " DROP NOT NULL;\n");
-            try out.appendSlice(a, "ALTER TABLE ");
-            try db.quoteTable(out, a, current);
-            try out.appendSlice(a, " ALTER COLUMN ");
-            try db.quoteName(out, a, column.name);
-            if (column.dflt) |value| {
-                if (value.len != 0) {
+            if (was == null or was.?.notnull != column.notnull) {
+                try out.appendSlice(a, "ALTER TABLE ");
+                try db.quoteTable(out, a, current);
+                try out.appendSlice(a, " ALTER COLUMN ");
+                try db.quoteName(out, a, column.name);
+                try out.appendSlice(a, if (column.notnull) " SET NOT NULL;\n" else " DROP NOT NULL;\n");
+            }
+            // No default and an empty one are the same thing said twice: the
+            // form hands back an empty field for a column that never had one.
+            const wanted = column.dflt orelse "";
+            if (was == null or !std.mem.eql(u8, was.?.dflt orelse "", wanted)) {
+                try out.appendSlice(a, "ALTER TABLE ");
+                try db.quoteTable(out, a, current);
+                try out.appendSlice(a, " ALTER COLUMN ");
+                try db.quoteName(out, a, column.name);
+                if (wanted.len != 0) {
                     try out.appendSlice(a, " SET DEFAULT ");
-                    try out.appendSlice(a, value);
+                    try out.appendSlice(a, wanted);
                     try out.appendSlice(a, ";\n");
                 } else {
                     try out.appendSlice(a, " DROP DEFAULT;\n");
                 }
-            } else {
-                try out.appendSlice(a, " DROP DEFAULT;\n");
+            }
+        }
+        for (context.removed) |name| {
+            if (!db.AlterContext.takenAgain(cols, name)) {
+                try dropColumn(out, a, current, name);
             }
         }
         if (new_name.len != 0 and !std.mem.eql(u8, new_name, table.name)) {
@@ -874,6 +915,14 @@ pub const Ddl = struct {
             try out.appendSlice(a, ";\n");
             current.name = new_name;
         }
+    }
+
+    fn dropColumn(out: *List, a: std.mem.Allocator, table: db.Table, name: []const u8) !void {
+        try out.appendSlice(a, "ALTER TABLE ");
+        try db.quoteTable(out, a, table);
+        try out.appendSlice(a, " DROP COLUMN ");
+        try db.quoteName(out, a, name);
+        try out.appendSlice(a, ";\n");
     }
 
     pub fn addForeignKey(_: Ddl, out: *List, a: std.mem.Allocator, table: db.Table, key: db.ForeignKey, context: db.AlterContext) !void {
@@ -924,9 +973,15 @@ pub const Ddl = struct {
 
     /// A trigger needs a function in PostgreSQL, so one is written alongside it.
     pub fn createTrigger(_: Ddl, out: *List, a: std.mem.Allocator, table: db.Table, name: []const u8, when: []const u8, event: []const u8, condition: []const u8, action: []const u8) !void {
+        // The function is named after the trigger, and the name is quoted as
+        // one name. It was the trigger's name quoted and `_fn` after it -
+        // `"audit"_fn`, which is two words to PostgreSQL: a syntax error at
+        // `_fn`, for every trigger the form ever wrote.
+        const function = try std.fmt.allocPrint(a, "{s}_fn", .{name});
+        defer a.free(function);
         try out.appendSlice(a, "CREATE FUNCTION ");
-        try db.quoteName(out, a, name);
-        try out.appendSlice(a, "_fn() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN\n\t");
+        try db.quoteName(out, a, function);
+        try out.appendSlice(a, "() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN\n\t");
         try out.appendSlice(a, if (action.len != 0) action else "RETURN NEW");
         try out.appendSlice(a, ";\n\tRETURN NEW;\nEND $$;\nCREATE TRIGGER ");
         try db.quoteName(out, a, name);
@@ -939,8 +994,8 @@ pub const Ddl = struct {
             try out.append(a, ')');
         }
         try out.appendSlice(a, " EXECUTE FUNCTION ");
-        try db.quoteName(out, a, name);
-        try out.appendSlice(a, "_fn();\n");
+        try db.quoteName(out, a, function);
+        try out.appendSlice(a, "();\n");
     }
 
     pub fn renameTable(_: Ddl, out: *List, a: std.mem.Allocator, table: db.Table, to: []const u8) !void {
@@ -1141,4 +1196,561 @@ test "a target with a time limit of its own is left to libpq whole" {
     // And what libpq cannot read is libpq's to refuse, in its own words.
     try std.testing.expect(Plan.of("postgres://app@db.example/shop?no_such_option=1").limited);
     try std.testing.expectEqualStrings("db.example", Plan.of("host=db.example dbname=shop").host());
+}
+
+test "a truth is a t, however PostgreSQL spells it" {
+    try std.testing.expect(isTrue("t"));
+    try std.testing.expect(isTrue("true"));
+    try std.testing.expect(isTrue("1"));
+    try std.testing.expect(!isTrue("f"));
+    try std.testing.expect(!isTrue("0"));
+    // No answer at all, which is what an outer join leaves, is not a yes.
+    try std.testing.expect(!isTrue(""));
+}
+
+test "a server that is not there is refused in libpq's words, and nothing is kept" {
+    // Nothing listens on port 1 of this machine, so this is refused at once -
+    // and the allocator the test runs on fails it for anything left behind on
+    // the way out, which is the half of `open` no server suite walks.
+    var report: List = .empty;
+    defer report.deinit(std.testing.allocator);
+    try std.testing.expectError(
+        error.Driver,
+        Db.open(std.testing.allocator, "postgres://nobody@127.0.0.1:1/nothing?connect_timeout=2", &report),
+    );
+    try std.testing.expect(report.items.len != 0);
+    try std.testing.expect(report.items[report.items.len - 1] != '\n');
+    // And a target libpq cannot read is libpq's to explain.
+    report.clearRetainingCapacity();
+    try std.testing.expectError(
+        error.Driver,
+        Db.open(std.testing.allocator, "postgres://nobody@127.0.0.1:1/nothing?no_such_option=1", &report),
+    );
+    try std.testing.expect(std.mem.find(u8, report.items, "no_such_option") != null);
+}
+
+/// What the generator writes for one call, for a test to read.
+const Written = struct {
+    text: List = .empty,
+
+    fn deinit(self: *Written) void {
+        self.text.deinit(std.testing.allocator);
+    }
+
+    fn has(self: *Written, wanted: []const u8) !void {
+        if (std.mem.find(u8, self.text.items, wanted) == null) {
+            std.debug.print("\n--- wanted\n{s}\n--- in\n{s}\n", .{ wanted, self.text.items });
+            return error.TestExpectedEqual;
+        }
+    }
+
+    fn lacks(self: *Written, unwanted: []const u8) !void {
+        if (std.mem.find(u8, self.text.items, unwanted) != null) {
+            std.debug.print("\n--- not wanted\n{s}\n--- in\n{s}\n", .{ unwanted, self.text.items });
+            return error.TestExpectedEqual;
+        }
+    }
+
+    /// Where one piece comes before another, which is half of what a script
+    /// of several statements has to get right.
+    fn before(self: *Written, first: []const u8, second: []const u8) !void {
+        const one = std.mem.find(u8, self.text.items, first) orelse return self.has(first);
+        const other = std.mem.find(u8, self.text.items, second) orelse return self.has(second);
+        try std.testing.expect(one < other);
+    }
+};
+
+test "a table is created in its schema, with its key as a constraint and a type for every column" {
+    const a = std.testing.allocator;
+    var out = Written{};
+    defer out.deinit();
+    try (Ddl{}).createTable(&out.text, a, .{ .schema = "shop", .name = "orders" }, &.{
+        .{ .name = "id", .type = "serial", .pk = true },
+        .{ .name = "code", .type = "text", .notnull = true, .unique = true },
+        .{ .name = "placed", .type = "timestamptz", .dflt = "now()" },
+        .{ .name = "note" },
+        .{ .name = "customer", .type = "integer" },
+    }, &.{
+        .{ .column = "customer", .target_table = "customers", .target_column = "id", .on_delete = "CASCADE" },
+    });
+    try std.testing.expectEqualStrings("CREATE TABLE \"shop\".\"orders\" (\n" ++
+        "\t\"id\" serial,\n" ++
+        "\t\"code\" text NOT NULL UNIQUE,\n" ++
+        "\t\"placed\" timestamptz DEFAULT now(),\n" ++
+        // PostgreSQL has no column without a type, so one is given.
+        "\t\"note\" text,\n" ++
+        "\t\"customer\" integer,\n" ++
+        "\tPRIMARY KEY (\"id\"),\n" ++
+        // What a key does by default is not written out.
+        "\tFOREIGN KEY (\"customer\") REFERENCES \"customers\"(\"id\") ON DELETE CASCADE\n" ++
+        ");\n", out.text.items);
+}
+
+test "a key of two columns is one constraint, in the order of the columns" {
+    var out = Written{};
+    defer out.deinit();
+    try (Ddl{}).createTable(&out.text, std.testing.allocator, .{ .name = "t" }, &.{
+        .{ .name = "a", .type = "integer", .pk = true },
+        .{ .name = "x", .type = "text" },
+        .{ .name = "b", .type = "integer", .pk = true },
+    }, &.{});
+    try out.has("PRIMARY KEY (\"a\", \"b\")");
+    // A public table is not written with a schema it was not given.
+    try out.has("CREATE TABLE \"t\" (");
+}
+
+test "an alter adds what is new, and renames a column before it says anything else about it" {
+    var out = Written{};
+    defer out.deinit();
+    const table = db.Table{ .schema = "shop", .name = "orders" };
+    try (Ddl{}).alterTable(&out.text, std.testing.allocator, table, "", &.{
+        .{ .name = "label", .type = "text", .notnull = true, .dflt = "'none'", .original = "code" },
+        .{ .name = "weight", .type = "numeric", .notnull = true, .dflt = "0" },
+        .{ .name = "anything" },
+    }, .{});
+    // A column that was not there is added whole, in one statement.
+    try out.has("ALTER TABLE \"shop\".\"orders\" ADD COLUMN \"weight\" numeric NOT NULL DEFAULT 0;\n");
+    try out.has("ADD COLUMN \"anything\" text;\n");
+    // One that was is renamed first: every statement after that has to call
+    // it by the name it has by then.
+    try out.has("RENAME COLUMN \"code\" TO \"label\";\n");
+    try out.before("RENAME COLUMN \"code\" TO \"label\"", "ALTER COLUMN \"label\"");
+    try out.lacks("ALTER COLUMN \"code\"");
+    try out.has("ALTER COLUMN \"label\" TYPE text USING \"label\"::text;\n");
+    try out.has("ALTER COLUMN \"label\" SET NOT NULL;\n");
+    try out.has("ALTER COLUMN \"label\" SET DEFAULT 'none';\n");
+    // Nothing about the table's own name, which was not changed.
+    try out.lacks("RENAME TO");
+}
+
+test "an alter renames the table last, and leaves it in its schema" {
+    var out = Written{};
+    defer out.deinit();
+    const table = db.Table{ .schema = "shop", .name = "orders" };
+    try (Ddl{}).alterTable(&out.text, std.testing.allocator, table, "sales", &.{
+        .{ .name = "weight", .type = "numeric" },
+    }, .{});
+    // The column is added to the table under the name it still has.
+    try out.before("ALTER TABLE \"shop\".\"orders\" ADD COLUMN", "RENAME TO");
+    // RENAME TO takes a name, not a path: the schema is where the table is.
+    try out.has("ALTER TABLE \"shop\".\"orders\" RENAME TO \"sales\";\n");
+
+    // The same name is not a rename.
+    var same = Written{};
+    defer same.deinit();
+    try (Ddl{}).alterTable(&same.text, std.testing.allocator, table, "orders", &.{}, .{});
+    try std.testing.expectEqualStrings("", same.text.items);
+}
+
+test "a foreign key is added in place, with what it does and nothing it does not" {
+    var out = Written{};
+    defer out.deinit();
+    try (Ddl{}).addForeignKey(&out.text, std.testing.allocator, .{ .schema = "shop", .name = "orders" }, .{
+        .column = "customer",
+        .target_table = "customers",
+        .target_column = "id",
+        .on_update = "NO ACTION",
+        .on_delete = "SET NULL",
+    }, .{});
+    try std.testing.expectEqualStrings(
+        "ALTER TABLE \"shop\".\"orders\" ADD FOREIGN KEY (\"customer\") REFERENCES \"customers\"(\"id\") ON DELETE SET NULL;\n",
+        out.text.items,
+    );
+}
+
+test "an index names its columns, and its condition where it has one" {
+    const a = std.testing.allocator;
+    var out = Written{};
+    defer out.deinit();
+    const table = db.Table{ .schema = "shop", .name = "orders" };
+    try (Ddl{}).createIndex(&out.text, a, table, "open orders", &.{ "customer", "placed" }, true, "closed IS NULL");
+    try std.testing.expectEqualStrings(
+        "CREATE UNIQUE INDEX \"open orders\" ON \"shop\".\"orders\" (\"customer\", \"placed\") WHERE closed IS NULL;\n",
+        out.text.items,
+    );
+    out.text.clearRetainingCapacity();
+    try (Ddl{}).createIndex(&out.text, a, .{ .name = "t" }, "i", &.{"x"}, false, "");
+    try std.testing.expectEqualStrings("CREATE INDEX \"i\" ON \"t\" (\"x\");\n", out.text.items);
+}
+
+test "a trigger's function has one name, quoted whole" {
+    var out = Written{};
+    defer out.deinit();
+    try (Ddl{}).createTrigger(
+        &out.text,
+        std.testing.allocator,
+        .{ .schema = "shop", .name = "orders" },
+        "audit",
+        "AFTER",
+        "INSERT",
+        "NEW.total > 0",
+        "INSERT INTO log VALUES (NEW.id)",
+    );
+    try std.testing.expectEqualStrings("CREATE FUNCTION \"audit_fn\"() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN\n" ++
+        "\tINSERT INTO log VALUES (NEW.id);\n" ++
+        "\tRETURN NEW;\n" ++
+        "END $$;\n" ++
+        "CREATE TRIGGER \"audit\" AFTER INSERT ON \"shop\".\"orders\" FOR EACH ROW" ++
+        " WHEN (NEW.total > 0) EXECUTE FUNCTION \"audit_fn\"();\n", out.text.items);
+    // `"audit"_fn` is the trigger's name and then a second word: PostgreSQL
+    // stops there with a syntax error, which every trigger this wrote did.
+    try out.lacks("\"_fn");
+
+    // A quote in the name is doubled inside the one pair, not closed early.
+    var odd = Written{};
+    defer odd.deinit();
+    try (Ddl{}).createTrigger(&odd.text, std.testing.allocator, .{ .name = "t" }, "a\"b", "BEFORE", "UPDATE", "", "");
+    try odd.has("CREATE FUNCTION \"a\"\"b_fn\"()");
+    try odd.has("EXECUTE FUNCTION \"a\"\"b_fn\"();");
+    // With nothing to do it still has to be a function PostgreSQL will take.
+    try odd.has("BEGIN\n\tRETURN NEW;\n\tRETURN NEW;\nEND $$;");
+    try odd.lacks("WHEN (");
+}
+
+test "a table is renamed, copied, emptied and dropped by its full name" {
+    const a = std.testing.allocator;
+    const table = db.Table{ .schema = "shop", .name = "orders" };
+    var out = Written{};
+    defer out.deinit();
+
+    try (Ddl{}).renameTable(&out.text, a, table, "sales");
+    try std.testing.expectEqualStrings("ALTER TABLE \"shop\".\"orders\" RENAME TO \"sales\";\n", out.text.items);
+
+    out.text.clearRetainingCapacity();
+    try (Ddl{}).copyTable(&out.text, a, table, "orders copy", true);
+    try std.testing.expectEqualStrings("CREATE TABLE \"orders copy\" AS SELECT * FROM \"shop\".\"orders\";\n", out.text.items);
+
+    // Without its rows: PostgreSQL has words for that, where SQLite has to
+    // ask for the rows that match nothing.
+    out.text.clearRetainingCapacity();
+    try (Ddl{}).copyTable(&out.text, a, table, "empty", false);
+    try std.testing.expectEqualStrings("CREATE TABLE \"empty\" AS SELECT * FROM \"shop\".\"orders\" WITH NO DATA;\n", out.text.items);
+
+    out.text.clearRetainingCapacity();
+    try (Ddl{}).truncate(&out.text, a, table);
+    try std.testing.expectEqualStrings("TRUNCATE \"shop\".\"orders\";\n", out.text.items);
+
+    out.text.clearRetainingCapacity();
+    try (Ddl{}).dropObject(&out.text, a, .table, table);
+    try (Ddl{}).dropObject(&out.text, a, .view, .{ .name = "seen" });
+    try std.testing.expectEqualStrings("DROP TABLE \"shop\".\"orders\";\nDROP VIEW \"seen\";\n", out.text.items);
+}
+
+test "a view is its select, under its name" {
+    var out = Written{};
+    defer out.deinit();
+    try (Ddl{}).createView(&out.text, std.testing.allocator, .{ .schema = "shop", .name = "open" }, "SELECT * FROM orders WHERE closed IS NULL");
+    try std.testing.expectEqualStrings(
+        "CREATE VIEW \"shop\".\"open\" AS SELECT * FROM orders WHERE closed IS NULL;\n",
+        out.text.items,
+    );
+}
+
+test "an alter says only what is different from the table as it is" {
+    var out = Written{};
+    defer out.deinit();
+    const table = db.Table{ .name = "orders" };
+    const now = [_]db.Column{
+        // A column that numbers itself: its default is not one, and PostgreSQL
+        // refuses to have it dropped.
+        .{ .name = "id", .type = "integer", .notnull = true, .pk = true },
+        .{ .name = "code", .type = "text", .notnull = true },
+        .{ .name = "total", .type = "numeric(12,2)", .dflt = "0" },
+        .{ .name = "note", .type = "text" },
+    };
+    try (Ddl{}).alterTable(&out.text, std.testing.allocator, table, "", &.{
+        // Left alone: nothing is said about it at all.
+        .{ .name = "id", .type = "integer", .notnull = true, .pk = true, .original = "id" },
+        // Only renamed.
+        .{ .name = "label", .type = "text", .notnull = true, .original = "code" },
+        // A wider type, and nothing else about it.
+        .{ .name = "total", .type = "numeric(14,2)", .dflt = "0", .original = "total" },
+        // Made not null, and given a default it did not have.
+        .{ .name = "note", .type = "text", .notnull = true, .dflt = "''", .original = "note" },
+    }, .{ .before = &now });
+    try std.testing.expectEqualStrings("ALTER TABLE \"orders\" RENAME COLUMN \"code\" TO \"label\";\n" ++
+        "ALTER TABLE \"orders\" ALTER COLUMN \"total\" TYPE numeric(14,2) USING \"total\"::numeric(14,2);\n" ++
+        "ALTER TABLE \"orders\" ALTER COLUMN \"note\" SET NOT NULL;\n" ++
+        "ALTER TABLE \"orders\" ALTER COLUMN \"note\" SET DEFAULT '';\n", out.text.items);
+}
+
+test "a default taken away is dropped, and one that was never there is not" {
+    var out = Written{};
+    defer out.deinit();
+    const now = [_]db.Column{
+        .{ .name = "total", .type = "numeric", .dflt = "0" },
+        .{ .name = "note", .type = "text" },
+        .{ .name = "open", .type = "boolean", .notnull = true },
+    };
+    try (Ddl{}).alterTable(&out.text, std.testing.allocator, .{ .name = "t" }, "", &.{
+        // The form hands back an empty field where the default was deleted...
+        .{ .name = "total", .type = "numeric", .dflt = "", .original = "total" },
+        // ...and an empty field where there never was one, which is no change.
+        .{ .name = "note", .type = "text", .dflt = "", .original = "note" },
+        .{ .name = "open", .type = "boolean", .original = "open" },
+    }, .{ .before = &now });
+    try std.testing.expectEqualStrings("ALTER TABLE \"t\" ALTER COLUMN \"total\" DROP DEFAULT;\n" ++
+        "ALTER TABLE \"t\" ALTER COLUMN \"open\" DROP NOT NULL;\n", out.text.items);
+}
+
+test "a column taken out of the form is dropped, and last unless its name is wanted again" {
+    var out = Written{};
+    defer out.deinit();
+    const table = db.Table{ .schema = "shop", .name = "orders" };
+    const now = [_]db.Column{
+        .{ .name = "id", .type = "integer", .notnull = true, .pk = true },
+        .{ .name = "note", .type = "text" },
+        .{ .name = "total", .type = "numeric" },
+        // Added by somebody else while the form was open: on the server, and
+        // in neither list the form has.
+        .{ .name = "theirs", .type = "integer" },
+    };
+    try (Ddl{}).alterTable(&out.text, std.testing.allocator, table, "sales", &.{
+        .{ .name = "id", .type = "integer", .notnull = true, .pk = true, .original = "id" },
+        // A new column under the name of one that was removed.
+        .{ .name = "total", .type = "text" },
+        .{ .name = "weight", .type = "numeric" },
+    }, .{ .before = &now, .removed = &.{ "note", "total" } });
+    // The one in the way goes first, and the other after everything the server
+    // might refuse - but while the table still has the name they know it by.
+    try std.testing.expectEqualStrings("ALTER TABLE \"shop\".\"orders\" DROP COLUMN \"total\";\n" ++
+        "ALTER TABLE \"shop\".\"orders\" ADD COLUMN \"total\" text;\n" ++
+        "ALTER TABLE \"shop\".\"orders\" ADD COLUMN \"weight\" numeric;\n" ++
+        "ALTER TABLE \"shop\".\"orders\" DROP COLUMN \"note\";\n" ++
+        "ALTER TABLE \"shop\".\"orders\" RENAME TO \"sales\";\n", out.text.items);
+    // What the form never showed is not the form's to drop.
+    try out.lacks("theirs");
+
+    // A column that is on the server and not in the list is not thereby
+    // removed: only one that is said to be.
+    var quiet = Written{};
+    defer quiet.deinit();
+    try (Ddl{}).alterTable(&quiet.text, std.testing.allocator, table, "", &.{
+        .{ .name = "id", .type = "integer", .notnull = true, .pk = true, .original = "id" },
+    }, .{ .before = &now });
+    try std.testing.expectEqualStrings("", quiet.text.items);
+}
+
+// Against a real server, and only where one is offered: `KRTEK_POSTGRES` holds
+// a target, and tests/postgres.sh is what offers it - with
+// `zig build test -Dagainst=KRTEK_POSTGRES=…`, which is what makes the tests
+// run again rather than be answered from the last time. Everything happens in
+// a schema of its own, which is dropped before and after.
+test "every schema statement this writes is one the server takes" {
+    const target = @import("targets.zig").getenv("KRTEK_POSTGRES") orelse return error.SkipZigTest;
+    const testing = std.testing;
+    var scratch = std.heap.ArenaAllocator.init(testing.allocator);
+    defer scratch.deinit();
+    const arena = scratch.allocator();
+
+    var report: List = .empty;
+    defer report.deinit(testing.allocator);
+    const self = Db.open(testing.allocator, target, &report) catch {
+        std.debug.print("not connected: {s}\n", .{report.items});
+        return error.TestUnexpectedResult;
+    };
+    defer self.close();
+
+    // Each statement below is written by this file and then run as written: a
+    // statement only ever compared to a string this same file wrote proves
+    // nothing about whether the server would take it - which is how a trigger
+    // came to be a syntax error with a unit test's worth of confidence in it.
+    const check = struct {
+        fn run(owner: *Db, a: std.mem.Allocator, what: []const u8, sql: []const u8) !void {
+            for (try owner.split(a, sql)) |statement| {
+                owner.exec(statement.sql) catch {
+                    std.debug.print("{s} refused: {s}\n  {s}\n", .{ what, owner.message(), statement.sql });
+                    return error.TestUnexpectedResult;
+                };
+            }
+        }
+    }.run;
+
+    // What the server remarks on in passing goes to stderr, and a test that
+    // writes there is reported as one that had something to say.
+    try check(self, arena, "quiet", "SET client_min_messages TO warning");
+    try check(self, arena, "the schema", "DROP SCHEMA IF EXISTS krtek_ddl CASCADE; CREATE SCHEMA krtek_ddl");
+    defer self.exec("DROP SCHEMA IF EXISTS krtek_ddl CASCADE") catch {};
+    const dialect = Ddl{};
+    const table = db.Table{ .schema = "krtek_ddl", .name = "orders" };
+    const customers = db.Table{ .schema = "krtek_ddl", .name = "customers" };
+    var out: List = .empty;
+
+    try dialect.createTable(&out, arena, customers, &.{
+        .{ .name = "id", .type = "serial", .pk = true },
+        .{ .name = "name", .type = "text", .notnull = true },
+    }, &.{});
+    try check(self, arena, "create table", out.items);
+
+    // The columns the generator knows nothing special about are the ones that
+    // made every alter of their table fail: one that numbers itself, and one
+    // worked out from another. Made by hand, because the form cannot.
+    try check(self, arena, "a table with an identity and a generated column",
+        \\CREATE TABLE krtek_ddl.orders (
+        \\  id integer GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+        \\  code text NOT NULL,
+        \\  shouted text GENERATED ALWAYS AS (upper(code)) STORED,
+        \\  total numeric(12,2) DEFAULT 0,
+        \\  customer integer
+        \\);
+        \\INSERT INTO krtek_ddl.orders (code, total) VALUES ('a-1', 10)
+    );
+
+    // What the alter form does: the columns as the server reports them, with
+    // one renamed, one widened and one added - and the two awkward ones left
+    // exactly as they came.
+    const before = try self.columns(arena, table);
+    var cols: std.ArrayList(db.Column) = .empty;
+    try cols.appendSlice(arena, before);
+    for (cols.items) |*column| {
+        if (std.mem.eql(u8, column.name, "code")) {
+            column.name = "label";
+        } else if (std.mem.eql(u8, column.name, "total")) {
+            column.type = "numeric(14,2)";
+        }
+    }
+    try cols.append(arena, .{ .name = "note", .type = "text", .notnull = true, .dflt = "''" });
+    out.clearRetainingCapacity();
+    try dialect.alterTable(&out, arena, table, "", cols.items, try self.alterContext(arena, table, cols.items));
+    try check(self, arena, "alter", out.items);
+
+    const after = try self.columns(arena, table);
+    var seen: usize = 0;
+    for (after) |column| {
+        if (std.mem.eql(u8, column.name, "label")) {
+            try testing.expect(column.notnull);
+            seen += 1;
+        } else if (std.mem.eql(u8, column.name, "total")) {
+            try testing.expectEqualStrings("numeric(14,2)", column.type);
+            try testing.expectEqualStrings("0", column.dflt.?);
+            seen += 1;
+        } else if (std.mem.eql(u8, column.name, "note")) {
+            try testing.expect(column.notnull);
+            seen += 1;
+        }
+    }
+    try testing.expectEqual(@as(usize, 3), seen);
+    // Nothing changed is nothing written, which is the whole of the fix.
+    out.clearRetainingCapacity();
+    try dialect.alterTable(&out, arena, table, "", after, try self.alterContext(arena, table, after));
+    try testing.expectEqualStrings("", out.items);
+
+    // A column taken out of the form, which nothing was written for: the form
+    // closed and the column was still there. Two of them here - one simply
+    // removed, and one removed with a new column put in under its name, which
+    // only works with the old one dropped first.
+    try check(self, arena, "two columns to remove", "ALTER TABLE krtek_ddl.orders ADD COLUMN spare text DEFAULT 'x', ADD COLUMN swap text");
+    const shown = try self.columns(arena, table);
+    // And one that arrives while the form is open. It is in the catalog at the
+    // moment of saving and in nothing the form has, and it has to survive.
+    try check(self, arena, "a column from somebody else", "ALTER TABLE krtek_ddl.orders ADD COLUMN theirs integer");
+    var names: std.ArrayList([]const u8) = .empty;
+    var left: std.ArrayList(db.Column) = .empty;
+    for (shown) |column| {
+        try names.append(arena, column.original);
+        if (!std.mem.eql(u8, column.name, "spare") and !std.mem.eql(u8, column.name, "swap")) {
+            try left.append(arena, column);
+        }
+    }
+    try left.append(arena, .{ .name = "swap", .type = "integer" });
+    var removing = try self.alterContext(arena, table, left.items);
+    removing.removed = try db.removedColumns(arena, names.items, left.items);
+    try testing.expectEqual(@as(usize, 2), removing.removed.len);
+    out.clearRetainingCapacity();
+    try dialect.alterTable(&out, arena, table, "", left.items, removing);
+    try check(self, arena, "an alter that removes", out.items);
+    var swapped = false;
+    var has_theirs = false;
+    for (try self.columns(arena, table)) |column| {
+        try testing.expect(!std.mem.eql(u8, column.name, "spare"));
+        if (std.mem.eql(u8, column.name, "swap")) {
+            swapped = true;
+            try testing.expectEqualStrings("integer", column.type);
+        }
+        has_theirs = has_theirs or std.mem.eql(u8, column.name, "theirs");
+    }
+    try testing.expect(swapped);
+    try testing.expect(has_theirs);
+    try check(self, arena, "and theirs goes back", "ALTER TABLE krtek_ddl.orders DROP COLUMN theirs, DROP COLUMN swap");
+
+    out.clearRetainingCapacity();
+    try dialect.addForeignKey(&out, arena, table, .{
+        .column = "customer",
+        .target_table = "customers",
+        .target_column = "id",
+        .on_delete = "SET NULL",
+    }, .{});
+    // The key names its table without a schema, so it is looked for where
+    // the session looks.
+    try check(self, arena, "the search path", "SET search_path TO krtek_ddl, public");
+    try check(self, arena, "foreign key", out.items);
+    const keys = try self.foreignKeys(arena, table);
+    try testing.expectEqual(@as(usize, 1), keys.len);
+    try testing.expectEqualStrings("customers", keys[0].target_table);
+    try testing.expectEqualStrings("SET NULL", keys[0].on_delete);
+
+    out.clearRetainingCapacity();
+    try dialect.createIndex(&out, arena, table, "by label", &.{ "label", "customer" }, true, "");
+    try dialect.createIndex(&out, arena, table, "big", &.{"total"}, false, "total > 100");
+    try check(self, arena, "index", out.items);
+    var partial = false;
+    for (try self.indexes(arena, table)) |index| {
+        if (std.mem.eql(u8, index.name, "big")) {
+            partial = index.partial;
+        }
+    }
+    try testing.expect(partial);
+
+    out.clearRetainingCapacity();
+    try dialect.createView(&out, arena, .{ .schema = "krtek_ddl", .name = "open" }, "SELECT id, label FROM krtek_ddl.orders");
+    try check(self, arena, "view", out.items);
+    const body = (try self.definition(arena, .{ .schema = "krtek_ddl", .name = "open" })).?;
+    try testing.expect(std.mem.find(u8, body, "label") != null);
+
+    // The statement that was a syntax error: a function, and a trigger that
+    // calls it. It has to be taken, and then it has to fire.
+    try check(self, arena, "a log", "CREATE TABLE krtek_ddl.log (what text)");
+    out.clearRetainingCapacity();
+    try dialect.createTrigger(&out, arena, table, "audit", "AFTER", "INSERT", "NEW.total > 0", "INSERT INTO krtek_ddl.log VALUES (NEW.label)");
+    try check(self, arena, "trigger", out.items);
+    try check(self, arena, "two rows, one of them worth logging", "INSERT INTO krtek_ddl.orders (label, total) VALUES ('b-2', 5), ('c-3', 0)");
+    {
+        var rows = (try self.query("SELECT string_agg(what, ',') FROM krtek_ddl.log", null)).?;
+        defer rows.close();
+        try testing.expect(try rows.next());
+        try testing.expectEqualStrings("b-2", rows.value(0).text);
+    }
+
+    out.clearRetainingCapacity();
+    try dialect.copyTable(&out, arena, table, "orders empty", false);
+    try dialect.copyTable(&out, arena, table, "orders full", true);
+    try check(self, arena, "copy", out.items);
+    try testing.expectEqual(@as(?i64, 0), exact(self, "SELECT count(*) FROM \"orders empty\""));
+    try testing.expectEqual(@as(?i64, 3), exact(self, "SELECT count(*) FROM \"orders full\""));
+
+    out.clearRetainingCapacity();
+    try dialect.truncate(&out, arena, .{ .schema = "krtek_ddl", .name = "orders full" });
+    try check(self, arena, "truncate", out.items);
+    try testing.expectEqual(@as(?i64, 0), exact(self, "SELECT count(*) FROM \"orders full\""));
+
+    // And a rename, last, because everything above named the table.
+    out.clearRetainingCapacity();
+    try dialect.renameTable(&out, arena, table, "sales");
+    try dialect.dropObject(&out, arena, .view, .{ .schema = "krtek_ddl", .name = "open" });
+    try dialect.dropObject(&out, arena, .table, .{ .schema = "krtek_ddl", .name = "sales" });
+    try check(self, arena, "rename and drop", out.items);
+}
+
+/// One number out of the server, for the test above.
+fn exact(self: *Db, sql: []const u8) ?i64 {
+    var rows = (self.query(sql, null) catch return null) orelse return null;
+    defer rows.close();
+    if (!(rows.next() catch return null)) {
+        return null;
+    }
+    return switch (rows.value(0)) {
+        .int => |value| value,
+        .text => |text| std.fmt.parseInt(i64, text, 10) catch null,
+        else => null,
+    };
 }

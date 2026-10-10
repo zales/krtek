@@ -79,12 +79,71 @@ pub fn Built(comptime Owner: type, comptime Held: type) type {
         table: []const u8 = "",
         /// What a statement changed, for the engines that count.
         changed: i64 = 0,
+        /// Which cell of a row each column of the answer is, once it has been cut
+        /// down to the columns that were asked for. Null is a name the rows have
+        /// no column of, and empty is nothing cut: the rows as they stand.
+        from: []const ?usize = &.{},
         at: usize = 0,
         started: bool = false,
 
         pub fn add(self: *Self, values: []const Held) Error!void {
             const arena = self.owner.replies.allocator();
             try self.rows.append(arena, try arena.dupe(Held, values));
+        }
+
+        /// Cut the answer down to the columns that were asked for, in the order
+        /// they were asked for. Nothing named is every column, which is what it
+        /// means in the request too.
+        ///
+        /// Whoever names its columns reads the answer by where it put them - the
+        /// whole-value view asks for the one under the cursor and takes the first
+        /// cell of what comes back. A driver that builds its rows builds whole
+        /// ones whatever was asked for, so that view showed the first column of
+        /// the row under the heading of whichever it had asked for: a Redis key
+        /// where its value should be, the partition of a Kafka record, the name
+        /// of a file.
+        ///
+        /// For an answer that is finished: the filter and the order a driver
+        /// applies find a column by where it is in a whole row, so this comes
+        /// after both. The rows are not touched - `value` looks a cell up through
+        /// `from`. A name there is no column of is an empty cell in its place
+        /// rather than nothing, so that the cells after it stay where the request
+        /// put them.
+        pub fn project(self: *Self, asked: []const []const u8) Error!void {
+            if (asked.len == 0) {
+                return;
+            }
+            const arena = self.owner.replies.allocator();
+            const heading = try arena.alloc([]const u8, asked.len);
+            const number = try arena.alloc(bool, asked.len);
+            const from = try arena.alloc(?usize, asked.len);
+            for (asked, 0..) |wanted, i| {
+                var found: ?usize = null;
+                for (self.names, 0..) |have, at| {
+                    if (std.mem.eql(u8, have, wanted)) {
+                        found = at;
+                        break;
+                    }
+                }
+                // The answer's own copy of the name where it has one: what was
+                // asked with is the caller's, and may not last as long as the rows.
+                heading[i] = if (found) |at| self.names[at] else try arena.dupe(u8, wanted);
+                number[i] = if (found) |at| self.isNumeric(at) else false;
+                from[i] = if (found) |at| self.cellOf(at) else null;
+            }
+            self.names = heading;
+            self.numeric = number;
+            self.from = from;
+        }
+
+        /// Which cell of a row column `at` of the answer is. Asked by `project`
+        /// as well, so that an answer cut down twice is still read from the rows
+        /// it was built with.
+        fn cellOf(self: *Self, at: usize) ?usize {
+            if (self.from.len == 0) {
+                return at;
+            }
+            return if (at < self.from.len) self.from[at] else null;
         }
 
         /// Before the first row rather than on it, so the first `next` lands on
@@ -119,10 +178,11 @@ pub fn Built(comptime Owner: type, comptime Held: type) type {
                 return .{ .null = {} };
             }
             const row = self.rows.items[self.at];
-            if (at >= row.len) {
+            const cell = self.cellOf(at) orelse return .{ .null = {} };
+            if (cell >= row.len) {
                 return .{ .null = {} };
             }
-            return row[at].asValue();
+            return row[cell].asValue();
         }
 
         pub fn sourceTable(self: *Self, _: usize) []const u8 {
@@ -135,6 +195,19 @@ pub fn Built(comptime Owner: type, comptime Held: type) type {
 
         pub fn isNumeric(self: *Self, at: usize) bool {
             return at < self.numeric.len and self.numeric[at];
+        }
+
+        /// How the things this cell counts are doing, where the driver's own
+        /// value says so. Nothing for every other cell - which is every cell of
+        /// a driver that has nothing of the kind.
+        pub fn marks(self: *Self, at: usize) []const Mark {
+            if (@hasDecl(Held, "asMarks") and self.at < self.rows.items.len) {
+                const row = self.rows.items[self.at];
+                if (at < row.len) {
+                    return row[at].asMarks();
+                }
+            }
+            return &.{};
         }
 
         pub fn affected(self: *Self) i64 {
@@ -275,6 +348,24 @@ pub fn tell(comptime fmt: []const u8, args: anytype) void {
 
 /// One cell. Text and blob point into the driver's memory and stay valid until
 /// the cursor moves on.
+/// How one of the things a cell counts is doing, for a cell that a grid may
+/// draw as a row of marks instead of as its text: a pod's containers are `1/3`,
+/// and are also three things, each of them up, on its way, broken or finished.
+///
+/// The text is still the cell's value - what is filtered on, put in order,
+/// copied and written to a file. The marks are a way of drawing it, for an
+/// interface that has colours; one that has none loses nothing.
+pub const Mark = enum {
+    /// Up, and doing what it is for.
+    ok,
+    /// Not there yet: being started, or up and not ready.
+    waiting,
+    /// Stopped by something going wrong, or waiting to be started again after it.
+    failed,
+    /// Finished, the way it was meant to.
+    done,
+};
+
 pub const Value = union(enum) {
     null: void,
     int: i64,
@@ -508,6 +599,20 @@ pub const Rows = union(enum) {
         }
     }
 
+    /// How the things the cell counts are doing, one mark each, where the engine
+    /// has something of the kind to say. Empty everywhere else, and then the
+    /// cell is its text and nothing more.
+    pub fn marks(self: *Rows, at: usize) []const Mark {
+        switch (self.*) {
+            inline else => |*rows| {
+                if (@hasDecl(@TypeOf(rows.*), "marks")) {
+                    return rows.marks(at);
+                }
+                return &.{};
+            },
+        }
+    }
+
     /// Rows changed by this statement, once it has been walked to the end.
     pub fn affected(self: *Rows) i64 {
         switch (self.*) {
@@ -730,7 +835,19 @@ pub const Db = union(enum) {
         switch (self) {
             inline else => |driver| {
                 if (@hasDecl(@TypeOf(driver.*), "select")) {
-                    return driver.select(request);
+                    var rows = (try driver.select(request)) orelse return null;
+                    // The columns that were asked for, which SQL takes care of
+                    // for the others. Here rather than in each driver: every one
+                    // of them builds whole rows, and none of them was looking. A
+                    // count is one number whatever was named.
+                    if (request.columns.len != 0 and !request.count) {
+                        switch (rows) {
+                            inline else => |*built| if (@hasDecl(@TypeOf(built.*), "project")) {
+                                try built.project(request.columns);
+                            },
+                        }
+                    }
+                    return rows;
                 }
                 const sql = try self.wording(driver.allocator, .{ .select = request });
                 defer driver.allocator.free(sql);
@@ -1068,6 +1185,23 @@ pub const Ddl = union(enum) {
         }
     }
 
+    /// What to run when a script written here stopped half way, or nothing.
+    ///
+    /// A transaction takes back what a script did inside one, and the caller
+    /// sees to that. This is for what it did outside: a setting it changed at
+    /// its first line and was going to put back at its last. Only an engine
+    /// whose scripts do that has anything to say.
+    pub fn afterFailure(self: Ddl, script: []const u8) []const u8 {
+        switch (self) {
+            inline else => |driver| {
+                if (@hasDecl(@TypeOf(driver), "afterFailure")) {
+                    return driver.afterFailure(script);
+                }
+                return "";
+            },
+        }
+    }
+
     /// Apply a new column list to an existing table, renames included.
     pub fn alterTable(self: Ddl, out: *List, a: std.mem.Allocator, table: Table, new_name: []const u8, cols: []const Column, context: AlterContext) !void {
         switch (self) {
@@ -1200,7 +1334,96 @@ pub const AlterContext = struct {
     columns: []const Column = &.{},
     keys: []const ForeignKey = &.{},
     replay: []const []const u8 = &.{},
+    /// The columns as the table has them now, from an engine that alters in
+    /// place: what is the same in both is then not said again. Empty where the
+    /// engine did not look, and then everything is said.
+    before: []const Column = &.{},
+    /// The columns this alter takes away, by the names the table has for them.
+    /// Said by whoever asked for the alter, and not worked out from `before`:
+    /// that is the table at the moment of saving, and a column somebody else
+    /// added while the form was open is in it and was never in the form - it
+    /// would be dropped for having been added.
+    removed: []const []const u8 = &.{},
+    /// SQL Server keeps a default as a constraint of its own, under a name it
+    /// made up, and will not drop a column that still has one. So these are the
+    /// table's, for the one in the way to be dropped first. Empty elsewhere.
+    defaults: []const NamedDefault = &.{},
+
+    /// Whether a removed column's name is one the new list uses again: a column
+    /// added under it, or another renamed to it. That removal has to be written
+    /// before anything else is, and it is the only one that does - the rest come
+    /// last, so that an alter the server refuses halfway has dropped nothing.
+    ///
+    /// Without regard to case, because MySQL and SQL Server have none in a
+    /// column's name. Where PostgreSQL does, going first costs nothing.
+    pub fn takenAgain(cols: []const Column, name: []const u8) bool {
+        for (cols) |column| {
+            if (std.ascii.eqlIgnoreCase(column.name, name) and !std.mem.eql(u8, column.original, name)) {
+                return true;
+            }
+        }
+        return false;
+    }
 };
+
+/// A default that is a constraint: the column it is on and what it is called.
+pub const NamedDefault = struct {
+    column: []const u8,
+    name: []const u8,
+};
+
+/// What an alter form took away: the columns it was opened on that no column it
+/// came back with used to be. A renamed column still says what it was, so it is
+/// not one of them, and a column the form never showed cannot be.
+pub fn removedColumns(a: std.mem.Allocator, shown: []const []const u8, cols: []const Column) ![]const []const u8 {
+    var gone: std.ArrayList([]const u8) = .empty;
+    for (shown) |name| {
+        const kept = for (cols) |column| {
+            if (std.mem.eql(u8, column.original, name)) {
+                break true;
+            }
+        } else false;
+        if (!kept) {
+            try gone.append(a, name);
+        }
+    }
+    return gone.items;
+}
+
+test "a column an alter form no longer lists is one it removed" {
+    var scratch = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer scratch.deinit();
+    const arena = scratch.allocator();
+    const shown = [_][]const u8{ "id", "nazev", "cena", "poznamka" };
+    const gone = try removedColumns(arena, &shown, &.{
+        .{ .name = "id", .original = "id" },
+        // Renamed, which is not removed: it still says what it was.
+        .{ .name = "jmeno", .original = "nazev" },
+        // Added under the name of one that went, which does not bring it back.
+        .{ .name = "cena", .original = "" },
+        // And one the form never showed, which nothing here can take away.
+        .{ .name = "cizi", .original = "cizi" },
+    });
+    try std.testing.expectEqual(@as(usize, 2), gone.len);
+    try std.testing.expectEqualStrings("cena", gone[0]);
+    try std.testing.expectEqualStrings("poznamka", gone[1]);
+
+    // Nothing shown is nothing removed - a caller that did not say.
+    try std.testing.expectEqual(@as(usize, 0), (try removedColumns(arena, &.{}, &.{.{ .name = "a", .original = "a" }})).len);
+}
+
+test "a removed column goes first only when its name is wanted again" {
+    const cols = [_]Column{
+        .{ .name = "id", .original = "id" },
+        .{ .name = "Cena", .original = "" },
+        .{ .name = "nazev", .original = "titul" },
+    };
+    try std.testing.expect(AlterContext.takenAgain(&cols, "cena"));
+    try std.testing.expect(AlterContext.takenAgain(&cols, "nazev"));
+    try std.testing.expect(!AlterContext.takenAgain(&cols, "poznamka"));
+    // A column that kept its name is not somebody taking it.
+    try std.testing.expect(!AlterContext.takenAgain(&cols, "id"));
+}
 
 /// Whether a SQL statement is one that only reads. The first word decides it,
 /// and anything not on the list is taken to write - a `WITH … DELETE` exists and
@@ -1313,6 +1536,10 @@ pub const SplitOptions = struct {
     brackets: bool = false,
     /// `identifier`
     backticks: bool = false,
+    /// Asked at a semicolon whether a statement ends there, by an engine that
+    /// has statements with semicolons inside them. Null means every semicolon
+    /// outside a string or a comment is the end of one.
+    whole: ?*const fn (arena: std.mem.Allocator, text: []const u8) bool = null,
 };
 
 /// Split a batch on the semicolons that are not inside a string, an identifier,
@@ -1373,6 +1600,12 @@ pub fn splitStatements(arena: std.mem.Allocator, sql: []const u8, options: Split
                 }
             },
             ';' => {
+                if (options.whole) |whole| {
+                    if (!whole(arena, sql[start .. i + 1])) {
+                        i += 1;
+                        continue;
+                    }
+                }
                 const text = std.mem.trim(u8, sql[start..i], " \t\r\n;");
                 if (text.len != 0) {
                     try list.append(arena, .{ .sql = text });
@@ -1498,4 +1731,86 @@ test "the splitter leaves semicolons inside strings, bodies and comments alone" 
     const sqlite_options: SplitOptions = .{ .brackets = true, .backticks = true };
     const brackets = try splitStatements(a, "SELECT [we;ird], `also;this` FROM t; SELECT 2", sqlite_options);
     try std.testing.expectEqual(@as(usize, 2), brackets.len);
+}
+
+test "an answer that was built is cut down to the columns asked for, in the order they were asked for" {
+    const Owner = struct { replies: std.heap.ArenaAllocator };
+    const Answer = Built(Owner, Value);
+    var owner = Owner{ .replies = std.heap.ArenaAllocator.init(std.testing.allocator) };
+    defer owner.replies.deinit();
+    const names = [_][]const u8{ "key", "type", "ttl", "value" };
+    const numeric = [_]bool{ false, false, true, false };
+    // Two whole rows, as a driver builds them whatever it was asked for.
+    const made = struct {
+        fn of(whose: *Owner) !Answer {
+            var answer = Answer{ .owner = whose, .names = &names, .numeric = &numeric, .table = "data" };
+            try answer.add(&.{ .{ .text = "user:1" }, .{ .text = "string" }, .{ .int = -1 }, .{ .text = "ada" } });
+            try answer.add(&.{ .{ .text = "user:2" }, .{ .text = "string" }, .{ .int = 3600 }, .{ .text = "grace" } });
+            return answer;
+        }
+    };
+
+    // Nothing named is everything, and nothing is so much as looked at.
+    var all = try made.of(&owner);
+    try all.project(&.{});
+    try std.testing.expectEqual(@as(usize, 4), all.columnCount());
+    try std.testing.expectEqual(@as(usize, 0), all.from.len);
+    try std.testing.expect(try all.next());
+    try std.testing.expectEqualStrings("user:1", all.value(0).text);
+    try std.testing.expectEqualStrings("ada", all.value(3).text);
+
+    // One column is the whole-value view, which reads the first cell of what it
+    // gets: that was the key whatever the cursor was on.
+    var one = try made.of(&owner);
+    try one.project(&.{"value"});
+    try std.testing.expectEqual(@as(usize, 1), one.columnCount());
+    try std.testing.expectEqualStrings("value", one.name(0));
+    try std.testing.expectEqualStrings("value", one.sourceColumn(0));
+    try std.testing.expect(try one.next());
+    try std.testing.expectEqualStrings("ada", one.value(0).text);
+    try std.testing.expect(one.value(1) == .null);
+    try std.testing.expect(try one.next());
+    try std.testing.expectEqualStrings("grace", one.value(0).text);
+    try std.testing.expect(!try one.next());
+
+    // The order asked for and not the driver's, with which of them are numbers
+    // following along.
+    var two = try made.of(&owner);
+    try two.project(&.{ "ttl", "key" });
+    try std.testing.expectEqualStrings("ttl", two.name(0));
+    try std.testing.expectEqualStrings("key", two.name(1));
+    try std.testing.expect(two.isNumeric(0));
+    try std.testing.expect(!two.isNumeric(1));
+    try std.testing.expect(try two.next());
+    try std.testing.expectEqual(@as(i64, -1), two.value(0).int);
+    try std.testing.expectEqualStrings("user:1", two.value(1).text);
+
+    // A column the rows have not got is an empty cell in its place, so the one
+    // after it is still where the request put it - under a name that is the
+    // answer's own by now, and not the caller's. And a row shorter than its
+    // heading is not read past its end.
+    var asked = [_]u8{ 'n', 'i', 'c' };
+    var odd = try made.of(&owner);
+    try odd.add(&.{.{ .text = "user:3" }});
+    try odd.project(&.{ &asked, "type" });
+    asked[0] = 'x';
+    try std.testing.expectEqualStrings("nic", odd.name(0));
+    try std.testing.expect(!odd.isNumeric(0));
+    try std.testing.expect(try odd.next());
+    try std.testing.expect(odd.value(0) == .null);
+    try std.testing.expectEqualStrings("string", odd.value(1).text);
+    try std.testing.expect(try odd.next());
+    try std.testing.expect(try odd.next());
+    try std.testing.expect(odd.value(0) == .null);
+    try std.testing.expect(odd.value(1) == .null);
+
+    // Cut down twice, it is still the rows it was built with that are read: the
+    // second cut names columns of the first, not cells of a row.
+    var twice = try made.of(&owner);
+    try twice.project(&.{ "value", "ttl", "key" });
+    try twice.project(&.{ "key", "type", "value" });
+    try std.testing.expect(try twice.next());
+    try std.testing.expectEqualStrings("user:1", twice.value(0).text);
+    try std.testing.expect(twice.value(1) == .null);
+    try std.testing.expectEqualStrings("ada", twice.value(2).text);
 }
