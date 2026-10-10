@@ -2434,3 +2434,44 @@ test "what a collection holds is shown element by element, whatever the elements
         .{ .list = &.{.{ .text = "b" }} },
     } }));
 }
+
+test "a request for one column of a key gets that column, and not the key" {
+    const stand = try Stand.start();
+    defer stand.stop();
+    const conn = try stand.open("");
+    defer conn.close();
+    stand.hold();
+    stand.instead = &.{
+        .{ "SCAN", "*2\r\n$1\r\n0\r\n*1\r\n$6\r\nuser:1\r\n" },
+        .{ "TYPE", "+string\r\n" },
+        .{ "TTL", ":-1\r\n" },
+        .{ "GET", "$3\r\nada\r\n" },
+    };
+    stand.release();
+
+    // As the whole-value view asks, and through the door it asks at: the
+    // columns are seen to there, for every driver that builds its rows. This
+    // one is asked directly first, to show what it builds - the whole row.
+    const request = db.ask.Select{
+        .table = .{ .name = TABLE },
+        .columns = &.{VALUE},
+        .where = &.{.{ .column = KEY, .value = "user:1" }},
+        .limit = 1,
+    };
+    var built = (try conn.select(request)).?;
+    try std.testing.expectEqual(@as(usize, 4), built.columnCount());
+    built.close();
+
+    const asked_at = db.Db{ .redis = conn };
+    var rows = (try asked_at.select(request)).?;
+    defer rows.close();
+    try std.testing.expectEqual(@as(usize, 1), rows.columnCount());
+    try std.testing.expectEqualStrings(VALUE, rows.name(0));
+    try std.testing.expect(try rows.next());
+    try std.testing.expectEqualStrings("ada", rows.value(0).text);
+    try std.testing.expect(!try rows.next());
+
+    // A count is one number, whatever columns the request it was made from
+    // had named.
+    try std.testing.expectEqual(@as(?i64, 1), asked_at.count(request));
+}
