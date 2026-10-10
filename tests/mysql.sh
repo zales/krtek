@@ -169,7 +169,7 @@ echo "ok: and the server has it, character for character"
 # ROW` and no BEGIN. The form used to write SQLite's dialect whatever it was
 # talking to, and this server said so.
 printf 'CREATE TABLE demo.zaznam (co varchar(80));\n' | $MYSQL 2>/dev/null
-screen "a trigger made in the form is one the server takes" "1 statement(s), 0 row(s) affected" \
+screen "a trigger made in the form is one the server takes" "1 statement, 0 rows affected" \
 	'{sleep}' 'T' 'hlidac' '{tab}' '{tab}' '{tab}' '{ctrl-u}' 'zakaznici' '{tab}' '{tab}' \
 	"INSERT INTO zaznam VALUES (NEW.jmeno)" '{ctrl-s}' '{sleep}'
 printf "INSERT INTO demo.zakaznici (jmeno) VALUES ('Hedvika');\n" | $MYSQL 2>/dev/null
@@ -190,9 +190,9 @@ SQL
 # table's own field, and five to a column. A row removed leaves the cursor on the
 # one that moved up into its place.
 # Five statements, because every column that stays is said again here.
-screen "a column removed in the alter form is dropped" "5 statement(s), 0 row(s) affected" \
-	'{sleep}' '/' 'sloupce' '{enter}' '{sleep}' '{enter}' '{sleep}' 'a' '{sleep}' \
-	'{tab}{tab}{tab}{tab}{tab}{tab}{tab}{tab}{tab}{tab}{tab}' '{ctrl-k}' '{ctrl-k}' \
+screen "a column removed in the alter form is dropped" "5 statements, 0 rows affected" \
+	'{sleep}' '/' 'sloupce' '{enter}' '{sleep}' 'a' '{sleep}' \
+	'{tab}{tab}{tab}{tab}{tab}{tab}{tab}{tab}{tab}{tab}{tab}' '{ctrl-x}' '{ctrl-x}' \
 	'{ctrl-n}' 'cena' '{ctrl-s}' '{sleep}'
 printf "SELECT GROUP_CONCAT(CONCAT(COLUMN_NAME, ' ', DATA_TYPE) ORDER BY ORDINAL_POSITION) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = 'demo' AND TABLE_NAME = 'sloupce'\n" \
 	| $MYSQL -N 2>/dev/null | grep -qx 'id int,nazev varchar,cena text' || fail "the columns removed in the form are not what the table lost"

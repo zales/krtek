@@ -194,7 +194,7 @@ CREATE TABLE faktury (
 INSERT INTO faktury (cislo) VALUES ('f-1');
 SQL
 # Two statements, because a trigger here is a function and then the trigger.
-screen "a trigger made in the form is one the server takes" "2 statement(s), 0 row(s) affected" \
+screen "a trigger made in the form is one the server takes" "2 statements, 0 rows affected" \
 	'{sleep}' 'T' 'hlidac' '{tab}' '{tab}' '{tab}' '{ctrl-u}' 'faktury' '{tab}' '{tab}' \
 	"INSERT INTO zaznam VALUES (NEW.cislo)" '{ctrl-s}' '{sleep}'
 $PSQL -d demo -c "INSERT INTO faktury (cislo) VALUES ('f-2')" >/dev/null
@@ -214,9 +214,9 @@ SQL
 # The table is picked by name. Then eleven tabs to the third column's name: the
 # table's own field, and five to a column. A row removed leaves the cursor on the
 # one that moved up into its place.
-screen "a column removed in the alter form is dropped" "3 statement(s), 0 row(s) affected" \
-	'{sleep}' '/' 'sloupce' '{enter}' '{sleep}' '{enter}' '{sleep}' 'a' '{sleep}' \
-	'{tab}{tab}{tab}{tab}{tab}{tab}{tab}{tab}{tab}{tab}{tab}' '{ctrl-k}' '{ctrl-k}' \
+screen "a column removed in the alter form is dropped" "3 statements, 0 rows affected" \
+	'{sleep}' '/' 'sloupce' '{enter}' '{sleep}' 'a' '{sleep}' \
+	'{tab}{tab}{tab}{tab}{tab}{tab}{tab}{tab}{tab}{tab}{tab}' '{ctrl-x}' '{ctrl-x}' \
 	'{ctrl-n}' 'cena' '{ctrl-s}' '{sleep}'
 $PSQL -d demo -tAc "SELECT string_agg(column_name || ' ' || data_type, ',' ORDER BY ordinal_position)
 	FROM information_schema.columns WHERE table_name = 'sloupce'" \
@@ -233,7 +233,7 @@ called() {
 		WHERE tablename IN ('sloupce', 'soucastky')"
 }
 screen "an alter refused before its rename leaves the grid on the table as it was" "sloupce  1-1 of 1" \
-	'{sleep}' '/' 'sloupce' '{enter}' '{sleep}' '{enter}' '{sleep}' 'a' '{sleep}' \
+	'{sleep}' '/' 'sloupce' '{enter}' '{sleep}' 'a' '{sleep}' \
 	'{ctrl-u}' 'soucastky' '{tab}{tab}{tab}{tab}{tab}{tab}{tab}{tab}{tab}{tab}{tab}{tab}{tab}' ' ' \
 	'{ctrl-s}' '{sleep}'
 called | grep -qx 'sloupce' || fail "a rename the script never reached was made anyway: $(called)"
@@ -243,7 +243,7 @@ echo "ok: and the server still has it under that name"
 # on asking for the old one: the list beside it showed the rename had worked,
 # and the grid said `relation "public.sloupce" does not exist`.
 screen "a table renamed in the alter form is read by its new name" "soucastky  1-1 of 1" \
-	'{sleep}' '/' 'sloupce' '{enter}' '{sleep}' '{enter}' '{sleep}' 'a' '{sleep}' \
+	'{sleep}' '/' 'sloupce' '{enter}' '{sleep}' 'a' '{sleep}' \
 	'{ctrl-u}' 'soucastky' '{ctrl-s}' '{sleep}'
 called | grep -qx 'soucastky' || fail "the table renamed in the form is not what the server has: $(called)"
 echo "ok: and that is what the server calls it"

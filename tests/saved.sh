@@ -76,7 +76,10 @@ grep -q "$SAID" "$SCREEN" || fail "a mark that was not written was not said"
 grep -q "not written to" "$SCREEN" || fail "the list does not say it is not in its file"
 test "$(cat "$LIST")" = "$(printf 'one\tone.db')" || fail "a file that cannot be written was written"
 
+# Removing one is asked about first, and it is the yes that is not written.
 screen '' 'd'
+grep -q "remove one from the list?" "$SCREEN" || fail "a connection was removed without being asked about"
+screen '' 'd' 'y' '{enter}'
 grep -q "$SAID" "$SCREEN" || fail "a removal that was not written was not said"
 grep -q "removed from the list" "$SCREEN" && fail "a connection still in the file was said to be removed"
 
@@ -110,7 +113,7 @@ grep -q "two.db - SQLite" "$SCREEN" || fail "the connection from the form did no
 grep -q "$SAID" "$SCREEN" && fail "a list that was written was said not to be"
 test "$(listed)" = "two one " || fail "a saved connection is not in the file: $(listed)"
 
-screen '' 'd'
+screen '' 'd' 'y' '{enter}'
 grep -q "two removed from the list" "$SCREEN" || fail "the removal was not said"
 grep -q "saved in" "$SCREEN" || fail "the list does not say where it is kept"
 test "$(listed)" = "one " || fail "a removed connection is still in the file: $(listed)"

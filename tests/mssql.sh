@@ -261,9 +261,9 @@ INSERT INTO dbo.sloupce (id, nazev) VALUES (1, 'sroub');"
 # column. A row removed leaves the cursor on the one that moved up into its place.
 # Seven statements: every column that stays is said again here, and each of the
 # two that go is its default and then itself.
-screen "a column removed in the alter form is dropped" "7 statement(s), " \
-	'{sleep}' / s l o u p c e '{enter}' '{sleep}' '{enter}' '{sleep}' 'a' '{sleep}' \
-	'{tab}{tab}{tab}{tab}{tab}{tab}{tab}{tab}{tab}{tab}{tab}' '{ctrl-k}' '{ctrl-k}' \
+screen "a column removed in the alter form is dropped" "7 statements, " \
+	'{sleep}' / s l o u p c e '{enter}' '{sleep}' 'a' '{sleep}' \
+	'{tab}{tab}{tab}{tab}{tab}{tab}{tab}{tab}{tab}{tab}{tab}' '{ctrl-x}' '{ctrl-x}' \
 	'{ctrl-n}' 'cena' '{ctrl-s}' '{sleep}'
 $SQLCMD -d demo -Q "SET NOCOUNT ON; SELECT STRING_AGG(c.name + ' ' + t.name, ',') WITHIN GROUP (ORDER BY c.column_id)
 	FROM sys.columns c JOIN sys.types t ON t.user_type_id = c.user_type_id
