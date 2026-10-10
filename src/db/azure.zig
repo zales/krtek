@@ -340,18 +340,11 @@ pub const Db = struct {
     }
 
     fn fail(self: *Db, response: http.Response) db.Error {
-        const code = response.get("x-ms-error-code") orelse xml.find(response.body, "Code");
-        const detail = xml.find(response.body, "Message");
-        if (code) |name| {
-            // Azure's Message carries the request id on a line of its own, which is
-            // for a support ticket and not for a status bar.
-            const first = detail orelse "";
-            const cut = std.mem.findScalar(u8, first, '\n') orelse first.len;
-            self.complain("{s}{s}{s}", .{
-                name,
-                if (cut != 0) ": " else "",
-                first[0..cut],
-            });
+        // Held for as long as it takes to copy the words into `last_error`.
+        var scratch = std.heap.ArenaAllocator.init(self.allocator);
+        defer scratch.deinit();
+        if (refusal(scratch.allocator(), response) catch null) |said| {
+            self.remember(said);
         } else if (response.status == 404) {
             self.remember("there is nothing there");
         } else if (response.status == 403) {
@@ -1468,6 +1461,23 @@ fn eql(left: []const u8, right: []const u8) bool {
     return std.ascii.eqlIgnoreCase(left, right);
 }
 
+/// What a refusal says, as one line: the code, which Azure also sends as a
+/// header, and the sentence out of the body - or null when there is no code in
+/// either place. What comes out of the body is read back out of XML first: a
+/// quote in it travels as `&apos;`, which is no way to show it.
+fn refusal(arena: std.mem.Allocator, response: http.Response) !?[]const u8 {
+    const code = response.get("x-ms-error-code") orelse
+        try xml.unescape(arena, xml.find(response.body, "Code") orelse return null);
+    // Azure's Message carries the request id on a line of its own, which is
+    // for a support ticket and not for a status bar.
+    const detail = try xml.unescape(arena, xml.find(response.body, "Message") orelse "");
+    const cut = std.mem.findScalar(u8, detail, '\n') orelse detail.len;
+    if (cut == 0) {
+        return code;
+    }
+    return try arena.print("{s}: {s}", .{ code, detail[0..cut] });
+}
+
 /// A container name has no slash in it; a prefix nearly always does.
 fn looksLikeContainer(word: []const u8) bool {
     return std.mem.findScalar(u8, word, '/') == null and !std.mem.endsWith(u8, word, "%");
@@ -1618,6 +1628,45 @@ test "an empty marker is the end, not a next page" {
     const empty = try parseListing(arena, "<EnumerationResults><Blobs/><NextMarker/></EnumerationResults>");
     try testing.expectEqual(@as(usize, 0), empty.entries.len);
     try testing.expect(empty.next == null);
+}
+
+test "a refusal is shown in the server's words, not in XML's" {
+    var scratch = std.heap.ArenaAllocator.init(testing.allocator);
+    defer scratch.deinit();
+    const arena = scratch.allocator();
+
+    // The emulator, word for word: the sentence is kept and the request id is not.
+    try testing.expectEqualStrings(
+        "InvalidResourceName: The specified resource name contains invalid characters.",
+        (try refusal(arena, .{
+            .status = 400,
+            .headers = &.{.{ .name = "x-ms-error-code", .value = "InvalidResourceName" }},
+            .body =
+            \\<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+            \\<Error>
+            \\  <Code>InvalidResourceName</Code>
+            \\  <Message>The specified resource name contains invalid characters.
+            \\RequestId:193ac1f3-5a4e-401c-9a45-95a65b9904d7
+            \\Time:2026-10-04T09:42:39.313Z</Message>
+            \\</Error>
+            ,
+        })).?,
+    );
+    // Made up for the purpose: no header, so the code is the body's, and every
+    // entity a sentence can hold. A line break written as one still ends it.
+    try testing.expectEqualStrings(
+        "BlobNotFound: no blob called 'a&b.txt' in \"photos\" <private>",
+        (try refusal(arena, .{ .status = 404, .body =
+            \\<Error><Code>BlobNotFound</Code><Message>no blob called &apos;a&amp;b.txt&apos; in &quot;photos&quot; &lt;private&gt;&#10;RequestId:1</Message></Error>
+        })).?,
+    );
+    // A code with no sentence stands alone, and it may be all a HEAD brings.
+    try testing.expectEqualStrings("BlobNotFound", (try refusal(arena, .{
+        .status = 404,
+        .headers = &.{.{ .name = "x-ms-error-code", .value = "BlobNotFound" }},
+    })).?);
+    // No code in either place, and the status is all there is to say.
+    try testing.expect(try refusal(arena, .{ .status = 502, .body = "<html><body>Bad Gateway</body></html>" }) == null);
 }
 
 test "a container and a prefix tell themselves apart" {

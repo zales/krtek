@@ -400,14 +400,11 @@ pub const Db = struct {
     /// S3 puts a code and a sentence in the body; when it does not, the status is
     /// all there is.
     fn fail(self: *Db, response: http.Response) db.Error {
-        const code = xml.find(response.body, "Code");
-        const detail = xml.find(response.body, "Message");
-        if (code) |name| {
-            self.complain("{s}{s}{s}", .{
-                name,
-                if (detail != null and detail.?.len != 0) ": " else "",
-                detail orelse "",
-            });
+        // Held for as long as it takes to copy the words into `last_error`.
+        var scratch = std.heap.ArenaAllocator.init(self.allocator);
+        defer scratch.deinit();
+        if (refusal(scratch.allocator(), response.body) catch null) |said| {
+            self.remember(said);
         } else if (response.status == 404) {
             self.remember("there is nothing there");
         } else {
@@ -733,7 +730,7 @@ pub const Db = struct {
         // the connection open while it works. Believing the status alone would
         // report a rename that did not happen.
         if (xml.find(response.body, "Code")) |code| {
-            self.complain("the copy failed: {s}", .{code});
+            self.complain("the copy failed: {s}", .{try xml.unescape(arena, code)});
             return error.Driver;
         }
     }
@@ -1684,6 +1681,19 @@ fn serverName(header: ?[]const u8) []const u8 {
     return "S3";
 }
 
+/// What a refusal says, as one line: the code and the sentence out of the body,
+/// or null when the body has no code in it. Both are read back out of XML first:
+/// the sentence quotes what it is about - a scope, a key - and a quote travels
+/// as `&apos;`, which is no way to show it.
+fn refusal(arena: std.mem.Allocator, body: []const u8) !?[]const u8 {
+    const code = try xml.unescape(arena, xml.find(body, "Code") orelse return null);
+    const detail = try xml.unescape(arena, xml.find(body, "Message") orelse "");
+    if (detail.len == 0) {
+        return code;
+    }
+    return try arena.print("{s}: {s}", .{ code, detail });
+}
+
 /// The region a refusal names. Amazon puts it in a header when a bucket lives
 /// somewhere else; a request signed for the wrong region gets it in the body,
 /// next to the complaint about the signature - and that is the only place Garage
@@ -2045,6 +2055,33 @@ test "the region a refusal names is found in the header or in the body" {
         \\<Error><Code>InvalidRequest</Code><Message>Bad request</Message><Region>garage</Region></Error>
     }) == null);
     try testing.expect(regionNamed(.{ .status = 400 }) == null);
+}
+
+test "a refusal is shown in the server's words, not in XML's" {
+    var scratch = std.heap.ArenaAllocator.init(testing.allocator);
+    defer scratch.deinit();
+    const arena = scratch.allocator();
+
+    // Garage, word for word: the quotes around both scopes arrive as entities.
+    try testing.expectEqualStrings(
+        "AuthorizationHeaderMalformed: Authorization header malformed, unexpected scope: '20261004/us-east-1/s3/aws4_request', expected: '20261004/garage/s3/aws4_request'",
+        (try refusal(arena,
+            \\<?xml version="1.0" encoding="UTF-8"?><Error><Code>AuthorizationHeaderMalformed</Code><Message>Authorization header malformed, unexpected scope: &apos;20261004/us-east-1/s3/aws4_request&apos;, expected: &apos;20261004/garage/s3/aws4_request&apos;</Message><Resource>/photos</Resource><Region>garage</Region></Error>
+        )).?,
+    );
+    // The other four a sentence can hold, in one made up for the purpose.
+    try testing.expectEqualStrings(
+        "AccessDenied: no access to \"photos/a&b.txt\" <private>",
+        (try refusal(arena,
+            \\<Error><Code>AccessDenied</Code><Message>no access to &quot;photos/a&amp;b.txt&quot; &lt;private&gt;</Message></Error>
+        )).?,
+    );
+    // A code with no sentence, or an empty one, stands alone.
+    try testing.expectEqualStrings("NoSuchBucket", (try refusal(arena, "<Error><Code>NoSuchBucket</Code></Error>")).?);
+    try testing.expectEqualStrings("NoSuchBucket", (try refusal(arena, "<Error><Code>NoSuchBucket</Code><Message/></Error>")).?);
+    // No code, and the status is all there is to say.
+    try testing.expect(try refusal(arena, "<html><body>Bad Gateway</body></html>") == null);
+    try testing.expect(try refusal(arena, "") == null);
 }
 
 test "a server is named by what it says about itself, and not guessed at" {
