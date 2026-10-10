@@ -860,12 +860,12 @@ fn column(arena: std.mem.Allocator, reader: *Reader) !Column {
         },
         0x22 => {
             out.size = try reader.int(u32);
-            _ = try reader.name(arena, u16); // the table it lives in
+            try tableName(reader);
         },
         0x23, 0x63 => {
             out.size = try reader.int(u32);
             _ = try reader.take(5); // collation
-            _ = try reader.name(arena, u16);
+            try tableName(reader);
         },
         0xF1 => {
             // XML: a byte saying whether a schema is named, and then the names.
@@ -888,6 +888,24 @@ fn column(arena: std.mem.Allocator, reader: *Reader) !Column {
     }
     out.name = try reader.name(arena, u8);
     return out;
+}
+
+/// The table an old large column lives in, which stands between its type and
+/// its name and which nothing here wants.
+///
+/// Since TDS 7.2 it is a count of parts and then that many names - a schema
+/// and a table, a database before them, or none at all for a value worked out
+/// in the statement. It was read as the one name it was before that: the count
+/// was taken for half of a length, the length ran past the end of the answer,
+/// and a table with a `text`, an `ntext` or an `image` column in it was `the
+/// server sent an answer this does not read` - every row of it, whatever the
+/// other columns were.
+fn tableName(reader: *Reader) !void {
+    const parts = try reader.byte();
+    for (0..parts) |_| {
+        const count = try reader.int(u16);
+        _ = try reader.take(@as(usize, count) * 2);
+    }
 }
 
 /// The eight bytes a transaction is known by, out of an environment change
@@ -1314,7 +1332,9 @@ test "every type this reads comes back as what was put in" {
         \\  cast('1999-12-31 23:59:59.997' as datetime) d1,
         \\  cast('2024-03-01 00:34:56 +02:00' as datetimeoffset(0)) dz,
         \\  cast('2024-03-01 12:34:56 +00:00' as datetimeoffset(0)) dz0,
-        \\  cast(null as int) nic, cast(N'dlouhy' as nvarchar(max)) mx
+        \\  cast(null as int) nic, cast(N'dlouhy' as nvarchar(max)) mx,
+        \\  cast('stary text' as text) tx, cast(N'starý ntext' as ntext) nx,
+        \\  cast(0x0304 as image) im, cast(null as text) txn
     , &why);
     var trouble: db.List = .empty;
     defer trouble.deinit(testing.allocator);
@@ -1347,6 +1367,11 @@ test "every type this reads comes back as what was put in" {
         .{ .name = "dz0", .text = "2024-03-01 12:34:56 +00:00" },
         .{ .name = "nic", .text = "NULL" },
         .{ .name = "mx", .text = "dlouhy" },
+        // The three old large types, here as values worked out in the
+        // statement, which belong to no table.
+        .{ .name = "tx", .text = "stary text" },
+        .{ .name = "nx", .text = "starý ntext" },
+        .{ .name = "txn", .text = "NULL" },
     };
     for (want) |one| {
         const at = for (reply.columns, 0..) |column_, i| {
@@ -1366,12 +1391,120 @@ test "every type this reads comes back as what was put in" {
             return e;
         };
     }
-    // The binary one is not text and is checked as bytes.
+    // The binary ones are not text and are checked as bytes.
     for (reply.columns, 0..) |column_, i| {
         if (std.mem.eql(u8, column_.name, "bin")) {
             try testing.expectEqualSlices(u8, &.{ 1, 2 }, reply.rows[0][i].blob);
         }
+        if (std.mem.eql(u8, column_.name, "im")) {
+            try testing.expectEqualSlices(u8, &.{ 3, 4 }, reply.rows[0][i].blob);
+        }
     }
+
+    // And the same three as columns of a table, which is where they say which
+    // table: a temporary one, gone with this connection.
+    const stored = try connection.batch(arena,
+        \\create table #krtek_stare (id int, t text null, n ntext null, i image null);
+        \\insert into #krtek_stare values (1, 'ulozeny', N'uložený', 0x0506), (2, null, null, null);
+        \\select id, t, n, i from #krtek_stare order by id
+    , &why);
+    const kept = try read(arena, stored, &trouble, testing.allocator);
+    try testing.expectEqual(@as(usize, 2), kept.rows.len);
+    try testing.expectEqual(@as(i64, 1), kept.rows[0][0].int);
+    try testing.expectEqualStrings("ulozeny", kept.rows[0][1].text);
+    try testing.expectEqualStrings("uložený", kept.rows[0][2].text);
+    try testing.expectEqualSlices(u8, &.{ 5, 6 }, kept.rows[0][3].blob);
+    try testing.expect(kept.rows[1][1] == .null);
+    try testing.expect(kept.rows[1][2] == .null);
+    try testing.expect(kept.rows[1][3] == .null);
+}
+
+test "an old large column says which table it is in, as a count of names and then the names" {
+    var scratch = std.heap.ArenaAllocator.init(testing.allocator);
+    defer scratch.deinit();
+    const arena = scratch.allocator();
+    var stream: std.ArrayList(u8) = .empty;
+    const put = struct {
+        fn name(out: *std.ArrayList(u8), a: std.mem.Allocator, comptime Count: type, text: []const u8) !void {
+            const wide = try utf16(a, text);
+            try out.appendSlice(a, &std.mem.toBytes(@as(Count, @intCast(wide.len))));
+            try out.appendSlice(a, std.mem.sliceAsBytes(wide));
+        }
+    };
+
+    // The description of four columns: a number, and a text, an ntext and an
+    // image out of `dbo.sloupce` - the way SQL Server 2022 sends them to a
+    // client that asked for TDS 7.4.
+    try stream.append(arena, 0x81);
+    try stream.appendSlice(arena, &std.mem.toBytes(@as(u16, 4)));
+    // id int
+    try stream.appendSlice(arena, &.{ 0, 0, 0, 0, 0, 0, 0x38 });
+    try put.name(&stream, arena, u8, "id");
+    // cena text: a length, a collation, and then two names for the table
+    try stream.appendSlice(arena, &.{ 0, 0, 0, 0, 0, 0, 0x23 });
+    try stream.appendSlice(arena, &std.mem.toBytes(@as(u32, 0x7FFFFFFF)));
+    try stream.appendSlice(arena, &.{ 0x09, 0x04, 0xD0, 0x00, 0x34 });
+    try stream.append(arena, 2);
+    try put.name(&stream, arena, u16, "dbo");
+    try put.name(&stream, arena, u16, "sloupce");
+    try put.name(&stream, arena, u8, "cena");
+    // popis ntext, of a table said by one name
+    try stream.appendSlice(arena, &.{ 0, 0, 0, 0, 0, 0, 0x63 });
+    try stream.appendSlice(arena, &std.mem.toBytes(@as(u32, 0x7FFFFFFE)));
+    try stream.appendSlice(arena, &.{ 0x09, 0x04, 0xD0, 0x00, 0x34 });
+    try stream.append(arena, 1);
+    try put.name(&stream, arena, u16, "sloupce");
+    try put.name(&stream, arena, u8, "popis");
+    // obrazek image, worked out in the statement: of no table at all
+    try stream.appendSlice(arena, &.{ 0, 0, 0, 0, 0, 0, 0x22 });
+    try stream.appendSlice(arena, &std.mem.toBytes(@as(u32, 0x7FFFFFFF)));
+    try stream.append(arena, 0);
+    try put.name(&stream, arena, u8, "obrazek");
+
+    // A row with nothing in the three of them: an absent pointer each.
+    try stream.append(arena, 0xD1);
+    try stream.appendSlice(arena, &std.mem.toBytes(@as(i32, 1)));
+    try stream.appendSlice(arena, &.{ 0, 0, 0 });
+    // And a row with something in each: a pointer, when the row was last
+    // changed, a length, and the bytes.
+    try stream.append(arena, 0xD1);
+    try stream.appendSlice(arena, &std.mem.toBytes(@as(i32, 2)));
+    const pointer: [16]u8 = @splat(0xAB);
+    const changed: [8]u8 = @splat(0);
+    try stream.append(arena, pointer.len);
+    try stream.appendSlice(arena, &pointer);
+    try stream.appendSlice(arena, &changed);
+    try stream.appendSlice(arena, &std.mem.toBytes(@as(u32, 5)));
+    try stream.appendSlice(arena, "stary");
+    const wide = try utf16(arena, "starý");
+    try stream.append(arena, pointer.len);
+    try stream.appendSlice(arena, &pointer);
+    try stream.appendSlice(arena, &changed);
+    try stream.appendSlice(arena, &std.mem.toBytes(@as(u32, @intCast(wide.len * 2))));
+    try stream.appendSlice(arena, std.mem.sliceAsBytes(wide));
+    try stream.append(arena, pointer.len);
+    try stream.appendSlice(arena, &pointer);
+    try stream.appendSlice(arena, &changed);
+    try stream.appendSlice(arena, &std.mem.toBytes(@as(u32, 2)));
+    try stream.appendSlice(arena, &.{ 7, 8 });
+
+    var why: db.List = .empty;
+    defer why.deinit(testing.allocator);
+    const reply = try read(arena, stream.items, &why, testing.allocator);
+    try testing.expectEqual(@as(usize, 4), reply.columns.len);
+    try testing.expectEqualStrings("id", reply.columns[0].name);
+    try testing.expectEqualStrings("cena", reply.columns[1].name);
+    try testing.expectEqualStrings("popis", reply.columns[2].name);
+    try testing.expectEqualStrings("obrazek", reply.columns[3].name);
+    try testing.expectEqual(@as(usize, 2), reply.rows.len);
+    try testing.expectEqual(@as(i64, 1), reply.rows[0][0].int);
+    try testing.expect(reply.rows[0][1] == .null);
+    try testing.expect(reply.rows[0][2] == .null);
+    try testing.expect(reply.rows[0][3] == .null);
+    try testing.expectEqual(@as(i64, 2), reply.rows[1][0].int);
+    try testing.expectEqualStrings("stary", reply.rows[1][1].text);
+    try testing.expectEqualStrings("starý", reply.rows[1][2].text);
+    try testing.expectEqualSlices(u8, &.{ 7, 8 }, reply.rows[1][3].blob);
 }
 
 test "a login says who is asking, in the shape the server reads it" {
