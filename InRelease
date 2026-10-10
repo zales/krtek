@@ -1,0 +1,24 @@
+-----BEGIN PGP SIGNED MESSAGE-----
+Hash: SHA512
+
+Origin: krtek
+Label: krtek
+Suite: stable
+Codename: stable
+Architectures: amd64 arm64
+Components: main
+Description: krtek - a database manager for the terminal
+Date: Sat, 10 Oct 2026 11:02:10 +0000
+MD5Sum:
+ 6447c664506d2a22a0108675b6c76711 46361 Packages
+ 599c3fa2b21bdd952b0ccc9140876255 5904 Packages.gz
+SHA256:
+ 3c5f305cd59e55f32ccf61052bbe5eabec18387912819ed9a4d7c501137c77fa 46361 Packages
+ 6caa92a8e6044b226ef6ab9f0961f23f1c6ad61c455904ef29b88dbcb96c460b 5904 Packages.gz
+-----BEGIN PGP SIGNATURE-----
+
+iHUEARYKAB0WIQQYiMC6+oFhoyHa3k3J8VHDGpDRtwUCasobMgAKCRDJ8VHDGpDR
+t3eTAPoD5LJpi3LfCLH0U6B7tMIy/rGykvGSvAM13MPeBLskzAEAj9CrVgBK/2mB
+tO2kOSaeZNenfJTyl+6h/PZFsKru/Q8=
+=qaJw
+-----END PGP SIGNATURE-----
