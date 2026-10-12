@@ -329,6 +329,18 @@ done
 [ "$whole" = "$theirs" ] || fail "gv on the status of $pod should show $theirs, and shows '$whole'"
 echo "ok: gv shows the value under the cursor, and not the name of its row"
 
+# A namespace is picked from a list: `#`, a few letters of its name, and enter.
+# It was a form with one field in it, turned with the arrows a namespace at a
+# time - which on a cluster with thirty of them is the long way to the one whose
+# name was known all along.
+listed=$(screen "$ROOT" '#')
+printf '%s' "$listed" | grep -q "─ namespace ─" || { printf '%s\n' "$listed" >&2; fail "# should open the list of namespaces"; }
+printf '%s' "$listed" | grep -q "payments .* now" || { printf '%s\n' "$listed" >&2; fail "the namespace in force should say so in the list"; }
+moved=$(screen "$ROOT" '#' 'kube-sy' '{enter}')
+printf '%s' "$moved" | grep -q "NAMESPACE kube-system" || { printf '%s\n' "$moved" >&2; fail "enter in the list should move to the namespace that was typed"; }
+printf '%s' "$moved" | grep -q "coredns" || { printf '%s\n' "$moved" >&2; fail "the pods listed are not the ones of the namespace that was picked"; }
+echo "ok: # lists the namespaces, and enter moves to the one that was typed"
+
 # Writing: the two things this driver does, checked against the cluster itself.
 screen "$ROOT" 's' 'SCALE deployments api 5' '{ctrl-s}' >/dev/null
 sleep 2

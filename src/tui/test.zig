@@ -19,6 +19,7 @@ comptime {
     _ = @import("forms.zig");
     _ = @import("fuzzy.zig");
     _ = @import("input.zig");
+    _ = @import("picker.zig");
     _ = @import("line.zig");
     _ = @import("term.zig");
 }

@@ -150,6 +150,12 @@ check "a port with nothing behind it says what happened" \
 	"postgres://postgres:$PASSWORD@127.0.0.1:5599/demo" "Connection refused"
 
 screen "the grid draws the table" "Řehoř" '{sleep}' '{end}' '{enter}' '{sleep}'
+# A schema is picked from a list: `#`, a few letters of its name, and enter. It
+# was a form with one field, turned a name at a time and sent with ctrl+s.
+screen "# lists the schemas, with the one in force marked" "public .* now" '{sleep}' '#' '{sleep}'
+screen "and enter moves to the one that was typed" "SCHEMA sklad" '{sleep}' '#' 'skl' '{enter}' '{sleep}'
+screen "whose tables are then the ones listed" "pohyby" '{sleep}' '#' 'skl' '{enter}' '{sleep}'
+screen "esc leaves the schema as it was" "SCHEMA public" '{sleep}' '#' 'skl' '{esc}' '{sleep}'
 screen "a batch is split and the last statement is what shows" "zbylo" \
 	'{sleep}' 's' "select count(*) as zbylo from zakaznici" '{ctrl-s}' '{sleep}'
 # PostgreSQL runs a batch in one implicit transaction and reports only the last

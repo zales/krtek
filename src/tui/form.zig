@@ -71,13 +71,20 @@ pub const Purpose = enum {
     search_all,
     filter,
     columns,
-    schema,
     connection,
     rename_table,
     copy_table,
 };
 
-pub const Action = enum { none, submit, cancel, add_row, remove_row };
+pub const Action = enum {
+    none,
+    submit,
+    cancel,
+    add_row,
+    remove_row,
+    /// Enter on a choice: the caller opens the list of what it can be.
+    pick,
+};
 
 pub const Form = struct {
     arena: std.heap.ArenaAllocator,
@@ -296,7 +303,20 @@ pub const Form = struct {
                 self.cursor = self.nextEditable(self.cursor, 1);
                 return .none;
             },
-            .tab, .enter => {
+            .tab => {
+                self.cursor = self.nextValue(self.cursor, 1);
+                return .none;
+            },
+            // On a choice enter opens it, as a list to pick from: the arrows
+            // turn it one value at a time, which is the long way round to the
+            // twentieth table of thirty. Anywhere else it goes on to the next
+            // value, as tab does.
+            .enter => {
+                if (self.field(self.cursor)) |here| {
+                    if (here.kind == .choice) {
+                        return .pick;
+                    }
+                }
                 self.cursor = self.nextValue(self.cursor, 1);
                 return .none;
             },
@@ -312,6 +332,10 @@ pub const Form = struct {
                 .left, .right => {
                     const delta: usize = if (key == .right) 1 else options.len - 1;
                     f.pick = (f.pick + delta) % options.len;
+                },
+                // Space opens it too, as it would a list anywhere else.
+                .char => |point| if (point == ' ') {
+                    return .pick;
                 },
                 else => {},
             },

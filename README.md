@@ -1213,6 +1213,16 @@ and database on MySQL, which is the same thing there. The type list in a form is
 the engine's own: `varchar(255)` on MySQL, `timestamptz` on PostgreSQL,
 `nvarchar(max)` on SQL Server.
 
+**One thing out of several is picked from a list.** `#` opens the schemas - or
+the namespaces, the databases, the vhosts - one under another, with the one in
+force marked: a few letters of a name narrow it the way they narrow the command
+palette, the arrows move, `enter` takes the one under the cursor and `esc` leaves
+things as they were. A choice in a form is the same list: `enter` or `space` on
+it opens what it can be, and left and right still turn it to the one beside it,
+which for a choice of two is all anybody wants. It used to be a form with one
+field, turned a name at a time - thirty namespaces were thirty presses to reach
+the one whose name was known all along.
+
 How an alter happens is the engine's business. PostgreSQL alters in place, one
 `ALTER TABLE` per difference; MySQL does too, with `CHANGE COLUMN`, which renames
 and retypes in one go. SQL Server alters in place as well, but a rename is not a
@@ -1284,6 +1294,7 @@ permanent.
 | `src/tui/editor.zig` | the SQL editor and the tokenizer that colours it |
 | `src/tui/fuzzy.zig` | the fuzzy match shared by the palette and the filter |
 | `src/tui/form.zig` | the form widget every dialog is built from |
+| `src/tui/picker.zig` | the list one thing is picked out of: a schema, or what a choice in a form can be |
 | `src/tui/draw.zig` | rendering |
 | `src/tui/input.zig` | the key map and the command palette |
 | `src/tui/bench.zig` | the program with no terminal under it, for the unit tests |
