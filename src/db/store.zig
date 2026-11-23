@@ -41,6 +41,10 @@ pub const Entry = struct {
     kind: Kind = .file,
     size: u64 = 0,
     modified: i64 = 0,
+    /// Whether the thing itself is a symbolic link. `kind`, `size` and
+    /// `modified` are then about what it leads to, which is what a listing
+    /// shows and what a copy reads - and what removing it must not touch.
+    link: bool = false,
 };
 
 // -------------------------------------------------------------------- paths
@@ -212,6 +216,7 @@ pub const Local = struct {
                 entry.kind = facts.kind;
                 entry.size = facts.size;
                 entry.modified = facts.modified;
+                entry.link = facts.link;
             }
             out.append(arena, entry) catch return error.OutOfMemory;
         }
@@ -220,9 +225,9 @@ pub const Local = struct {
 
     pub fn stat(self: *Local, arena: std.mem.Allocator, path: []const u8) Error!Entry {
         const zero = zeroed(arena, path) catch return error.OutOfMemory;
-        var facts = look(zero) orelse return self.blame("cannot look at {s}", .{path});
-        facts.name = basename(path);
-        return facts;
+        var found = look(zero) orelse return self.blame("cannot look at {s}", .{path});
+        found.name = basename(path);
+        return found;
     }
 
     pub fn openRead(self: *Local, arena: std.mem.Allocator, path: []const u8) Error!Reading {
@@ -312,42 +317,70 @@ pub const Local = struct {
     };
 };
 
-/// What the system knows about a path. The one place where the platforms part
-/// company: this Zig routes Linux to `statx` and leaves `fstatat` undefined
-/// there, so asking the same question takes two different calls. Null where the
-/// path cannot be looked at, which a listing survives - a dangling link or a
-/// directory being emptied underneath is still worth showing.
+/// What the system knows about a path: whether the thing there is a link, and
+/// then what it is, how large and how old - of what the link leads to, where it
+/// is one. Null where the path cannot be looked at, which a listing survives -
+/// a directory being emptied underneath is still worth showing.
+///
+/// Asked without following first, and that is the point of asking twice. This
+/// used to follow and nothing else, so a link to a directory was a directory to
+/// everything here - `removeAll` included, which went through it and emptied
+/// whatever it led to, somewhere nobody had chosen to remove anything.
+///
+/// A link that leads nowhere is still something: a file, of the link's own
+/// size, which can be shown and can be removed.
 fn look(path: [*:0]const u8) ?Entry {
+    var own = examine(path, false) orelse return null;
+    if (!own.link) {
+        return own;
+    }
+    if (examine(path, true)) |led| {
+        own.kind = led.kind;
+        own.size = led.size;
+        own.modified = led.modified;
+    }
+    return own;
+}
+
+/// One question to the system about a path, about the link itself or about
+/// what it leads to. The one place where the platforms part company: this Zig
+/// routes Linux to `statx` and leaves `fstatat` undefined there, so asking the
+/// same question takes two different calls.
+fn examine(path: [*:0]const u8, follow: bool) ?Entry {
     if (builtin.target.os.tag == .linux) {
         const linux = std.os.linux;
-        var facts: linux.Statx = undefined;
+        var found: linux.Statx = undefined;
         // The syscall rather than the libc wrapper: musl grew one late and a static
         // build should not depend on which.
-        const rc = linux.statx(linux.AT.FDCWD, path, 0, .{
+        const flags: u32 = if (follow) 0 else linux.AT.SYMLINK_NOFOLLOW;
+        const rc = linux.statx(linux.AT.FDCWD, path, flags, .{
             .TYPE = true,
             .SIZE = true,
             .MTIME = true,
-        }, &facts);
+        }, &found);
         // A syscall says it failed by coming back negative; there is no errno here.
         if (@as(isize, @bitCast(rc)) < 0) {
             return null;
         }
         return .{
             .name = "",
-            .kind = if (facts.mode & linux.S.IFMT == linux.S.IFDIR) .dir else .file,
-            .size = facts.size,
-            .modified = facts.mtime.sec,
+            .kind = if (found.mode & linux.S.IFMT == linux.S.IFDIR) .dir else .file,
+            .size = found.size,
+            .modified = found.mtime.sec,
+            .link = found.mode & linux.S.IFMT == linux.S.IFLNK,
         };
     }
-    var facts: std.c.Stat = undefined;
-    if (std.c.fstatat(std.c.AT.FDCWD, path, &facts, 0) != 0) {
+    var found: std.c.Stat = undefined;
+    const flags: u32 = if (follow) 0 else std.c.AT.SYMLINK_NOFOLLOW;
+    if (std.c.fstatat(std.c.AT.FDCWD, path, &found, flags) != 0) {
         return null;
     }
     return .{
         .name = "",
-        .kind = if (facts.mode & std.c.S.IFMT == std.c.S.IFDIR) .dir else .file,
-        .size = @intCast(@max(facts.size, 0)),
-        .modified = facts.mtime().sec,
+        .kind = if (found.mode & std.c.S.IFMT == std.c.S.IFDIR) .dir else .file,
+        .size = @intCast(@max(found.size, 0)),
+        .modified = found.mtime().sec,
+        .link = found.mode & std.c.S.IFMT == std.c.S.IFLNK,
     };
 }
 
@@ -684,12 +717,15 @@ fn walk(
 }
 
 /// Remove a file, or a directory and everything under it.
+///
+/// Under it, and not beyond it: a link is removed as the link it is, whatever
+/// it leads to. What it leads to is somewhere else, and nobody chose that.
 pub fn removeAll(arena: std.mem.Allocator, place: Store, path: []const u8, depth: usize) Error!void {
     if (depth > DEPTH) {
         return error.Store;
     }
     const what = try place.stat(arena, path);
-    if (what.kind == .file) {
+    if (what.kind == .file or what.link) {
         return place.remove(arena, path, .file);
     }
     var scratch = std.heap.ArenaAllocator.init(arena);
@@ -846,6 +882,78 @@ test "a tree is copied whole, and then removed whole" {
 
     try removeAll(arena, place, target, 0);
     try testing.expectError(error.Store, place.stat(arena, target));
+}
+
+test "removing a tree removes the links in it, and not what they lead to" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var disk = Local.init(testing.allocator);
+    defer disk.deinit();
+    const place = Store{ .local = &disk };
+
+    const root = try arena.print("/tmp/krtek-store-links-{d}", .{clock.steadyNanos()});
+    removeAll(arena, place, root, 0) catch {};
+    try place.makeDir(arena, root);
+    defer removeAll(arena, place, root, 0) catch {};
+
+    // Somewhere else, with something in it that nobody is about to remove.
+    const elsewhere = try join(arena, root, "elsewhere");
+    const kept = try join(arena, elsewhere, "kept.txt");
+    try place.makeDir(arena, elsewhere);
+    {
+        var out = try place.openWrite(arena, kept, 0);
+        try out.write("still here");
+        try out.finish();
+    }
+
+    // And a tree with three links in it: to that directory, to the file in it,
+    // and to nothing at all.
+    const tree = try join(arena, root, "tree");
+    try place.makeDir(arena, tree);
+    const to_dir = try join(arena, tree, "to-dir");
+    const to_file = try join(arena, tree, "to-file");
+    const to_nothing = try join(arena, tree, "to-nothing");
+    try testing.expectEqual(@as(c_int, 0), std.c.symlink(try zeroed(arena, elsewhere), try zeroed(arena, to_dir)));
+    try testing.expectEqual(@as(c_int, 0), std.c.symlink(try zeroed(arena, kept), try zeroed(arena, to_file)));
+    try testing.expectEqual(@as(c_int, 0), std.c.symlink("/tmp/krtek-no-such-place", try zeroed(arena, to_nothing)));
+
+    // A listing still shows what a link leads to - a directory is somewhere to
+    // go - and says that it is a link.
+    const entries = try place.list(arena, tree);
+    try testing.expectEqual(@as(usize, 3), entries.len);
+    for (entries) |entry| {
+        try testing.expect(entry.link);
+        const leads_to_dir = std.mem.eql(u8, entry.name, "to-dir");
+        try testing.expectEqual(if (leads_to_dir) Kind.dir else Kind.file, entry.kind);
+        if (std.mem.eql(u8, entry.name, "to-file")) {
+            try testing.expectEqual(@as(u64, "still here".len), entry.size);
+        }
+    }
+    // What is not a link does not say it is one.
+    try testing.expect(!(try place.stat(arena, elsewhere)).link);
+    try testing.expect(!(try place.stat(arena, kept)).link);
+    // And a link that leads nowhere can still be looked at, or it could never
+    // be removed.
+    try testing.expect((try place.stat(arena, to_nothing)).link);
+
+    // One link, removed by itself: the link goes, the directory stays.
+    try removeAll(arena, place, to_dir, 0);
+    try testing.expectError(error.Store, place.stat(arena, to_dir));
+    try testing.expectEqual(Kind.file, (try place.stat(arena, kept)).kind);
+
+    // And the whole tree, with the link back in it. This is the one that used
+    // to empty `elsewhere` and then fail on the link.
+    try testing.expectEqual(@as(c_int, 0), std.c.symlink(try zeroed(arena, elsewhere), try zeroed(arena, to_dir)));
+    try removeAll(arena, place, tree, 0);
+    try testing.expectError(error.Store, place.stat(arena, tree));
+    try testing.expectEqual(Kind.dir, (try place.stat(arena, elsewhere)).kind);
+    var in = try place.openRead(arena, kept);
+    defer in.close();
+    var buffer: [32]u8 = undefined;
+    const got = try in.read(&buffer);
+    try testing.expectEqualStrings("still here", buffer[0..got]);
 }
 
 test "a file that is not there says which one" {
