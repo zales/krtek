@@ -250,6 +250,7 @@ pub const Db = struct {
                     .kind = if (entry.attributes.isDir()) .dir else .file,
                     .size = entry.attributes.filesize,
                     .modified = @intCast(entry.attributes.mtime),
+                    .link = entry.attributes.isLink(),
                 };
             }
             return out;
@@ -257,12 +258,18 @@ pub const Db = struct {
 
         pub fn stat(self: Files, _: std.mem.Allocator, path: []const u8) db.store.Error!db.store.Entry {
             const conn = try self.connection();
-            const what = ssh.stat(conn, path) catch return error.Store;
+            // The thing itself first, and then what it leads to where it is a
+            // link: a link is said to be one, so that removing it removes the
+            // link and not the directory behind it. One that leads nowhere is
+            // still there to be removed.
+            const own = ssh.lstat(conn, path) catch return error.Store;
+            const what = if (own.isLink()) ssh.stat(conn, path) catch own else own;
             return .{
                 .name = address.basename(path),
                 .kind = if (what.isDir()) .dir else .file,
                 .size = what.filesize,
                 .modified = @intCast(what.mtime),
+                .link = own.isLink(),
             };
         }
 
@@ -746,7 +753,9 @@ pub const Db = struct {
             return self.oneText("written", path);
         }
         if (eql(command, "RM") or eql(command, "DEL")) {
-            const what = ssh.stat(conn, path) catch return self.fromServer();
+            // Of the thing itself: a link to a directory is removed as a link,
+            // which `rmdir` would refuse to do.
+            const what = ssh.lstat(conn, path) catch return self.fromServer();
             ssh.remove(conn, path, what.isDir()) catch return self.fromServer();
             return self.oneText("removed", path);
         }

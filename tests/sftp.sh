@@ -188,6 +188,50 @@ if docker exec "$NAME" test -e /home/foo/upload/strom; then
 fi
 echo "ok: a tree is removed with everything under it"
 
+# And removing stops at a link. A tree with a link in it loses the link, and what
+# the link led to - which is somewhere else, and which nobody chose - is left as
+# it was. It used not to be: the link was followed, the directory behind it was
+# emptied, and then the link itself could not be removed as the directory it had
+# been taken for.
+#
+# Three of them, because they are three different answers from the server: one to
+# a directory, one to a file, and one to nothing at all - which cannot be
+# followed and still has to go.
+# On the far side now: .. 2015 podadresar s-odkazy zustane, so three steps down
+# is s-odkazy.
+docker exec "$NAME" sh -c '
+	mkdir -p /home/foo/upload/zustane /home/foo/upload/s-odkazy
+	echo zustan > /home/foo/upload/zustane/tady.txt
+	echo pryc > /home/foo/upload/s-odkazy/soubor.txt
+	ln -s ../zustane /home/foo/upload/s-odkazy/na-adresar
+	ln -s ../zustane/tady.txt /home/foo/upload/s-odkazy/na-soubor
+	ln -s ../nikde /home/foo/upload/s-odkazy/nikam
+	chown -R foo /home/foo/upload'
+out=$(tests/screen.py "$TARGET" \
+	"{sleep}f{sleep}{tab}{down}{down}{down}x{sleep}y{enter}{sleep}{keep}" 2>/dev/null || true)
+if docker exec "$NAME" test -e /home/foo/upload/s-odkazy; then
+	printf '%s\n' "$out" >&2
+	fail "a tree with links in it is removed"
+fi
+test "$(docker exec "$NAME" cat /home/foo/upload/zustane/tady.txt)" = "zustan" || {
+	printf '%s\n' "$out" >&2
+	fail "removing a tree should leave what a link in it led to"
+}
+echo "ok: a tree with links in it is removed, and what they led to is not"
+
+# RM is the same question asked by hand: a link to a directory is a link, and
+# removing it as a directory is what the server refuses.
+docker exec "$NAME" ln -s zustane /home/foo/upload/odkaz
+out=$(tests/screen.py "$TARGET" "{sleep}q{sleep}s" "RM odkaz" "{ctrl-s}{sleep}{keep}" 2>/dev/null || true)
+if docker exec "$NAME" test -L /home/foo/upload/odkaz; then
+	printf '%s\n' "$out" >&2
+	fail "RM of a link to a directory should remove the link"
+fi
+test "$(docker exec "$NAME" cat /home/foo/upload/zustane/tady.txt)" = "zustan" ||
+	fail "RM of a link should leave what it led to"
+echo "ok: RM of a link to a directory removes the link, and only the link"
+docker exec "$NAME" rm -rf /home/foo/upload/zustane
+
 # A copy that would write over something asks first. This is the one thing here
 # that destroys without saying so - the name is the same on both sides, so the
 # file that was there is simply gone - and removing has always asked.

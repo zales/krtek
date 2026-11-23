@@ -722,6 +722,18 @@ pub fn stat(self: *Connection, path: []const u8) Error!Attributes {
     return attributes;
 }
 
+/// `stat`, of the thing itself: a link is a link here, where `stat` answers
+/// for whatever it leads to. What removing asks, because removing a link must
+/// not be removing what is behind it.
+pub fn lstat(self: *Connection, path: []const u8) Error!Attributes {
+    var attributes = Attributes{};
+    if (libssh2_sftp_stat_ex(self.sftp, path.ptr, @intCast(path.len), LSTAT, &attributes) != 0) {
+        try explain(self, "cannot look at", path);
+        return error.Sftp;
+    }
+    return attributes;
+}
+
 pub fn chmod(self: *Connection, path: []const u8, permissions: c_ulong) Error!void {
     var attributes = Attributes{ .flags = ATTR_PERMISSIONS, .permissions = permissions };
     if (libssh2_sftp_stat_ex(self.sftp, path.ptr, @intCast(path.len), SETSTAT, &attributes) != 0) {
