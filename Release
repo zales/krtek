@@ -1,0 +1,14 @@
+Origin: krtek
+Label: krtek
+Suite: stable
+Codename: stable
+Architectures: amd64 arm64
+Components: main
+Description: krtek - a database manager for the terminal
+Date: Mon, 23 Nov 2026 20:17:47 +0000
+MD5Sum:
+ 598b0c9f0a7dcb3bf3673853514783cc 50263 Packages
+ 16e3569465ee0f2e5f018af771f0c98e 6324 Packages.gz
+SHA256:
+ add5644371ec754e1ef98a005d47d502a208d50be5ecc0ad77be3340dc06c23c 50263 Packages
+ a5534e3fcafec9516e607d32e60b36bf8848d897eeb43631149f778f10bc8aa2 6324 Packages.gz
